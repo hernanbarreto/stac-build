@@ -1341,8 +1341,34 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     (evaluation/references.py, variants.py, api.py — the dock's Evaluation tab), that window's i18n texts and
     `.stac-ref*` style rules (unused now). No session held a `reference_measures.json` (nor holds a
     `calibration_3d.json` yet).
-  · STILL TO DO: the header and the status bar when tight (they fit from 1280 up; under it they belong to
-    stage 2); THEN stages 2 (tablet + touch basics), 3 (phone), 4 (the viewer by touch).
+  · ⭐ STAGE 2 (TABLETS, SMALL WINDOWS), THE FRAME — APPLIED TO HIS PAGE 2026-11-20 05:41 UTC (99cfce4; one
+    page reload, announced), WAITING FOR HIS EYE. A PAGE OF 1280 px AND MORE IS UNTOUCHED (60 pictures: at the
+    four PC sizes the viewer's, toolbar's and rail's boxes are the previous batch's; no control cut anywhere,
+    phones included: 10 → 0). ⚠ A browser zoomed over 100 % on his 1366-px screen is a page UNDER 1280 px: he
+    was told.
+    – layout.css `@media (max-width: 1279px)`: the grid is rail + viewer; the two panels are drawn OVER the
+      viewer's cell from their own edges (`--z-overlay-panel` 80, never wider than the page less a 48-px
+      strip). LayoutContext: `oneAtATime` — both stay open only while ≥ 240 px of viewer is left between them
+      (a tablet on its side keeps both; upright, opening one closes the other; a stored layout or a shrunk
+      window that no longer fits closes the RIGHT one); `panelsExclusive()` in the context — a selection from
+      a list does not open the properties over that list there. No scrim, no close-on-tap-outside (the
+      assistant's choice, told to him as "de a uno": a panel and the viewer are used together).
+    – `--ov-left` / `--ov-right` (what an open overlay panel covers): the viewer's toolbar, cube, banner,
+      cards, physics panel and bottom line keep to the part in sight; the canvas runs under the panels.
+    – the header in steps (regions.css media queries; AppHeader's burger = the four menus' entries under
+      their names, `.stac-header__burger`): 1180 px the name goes, the search field becomes its magnifier;
+      900 px the menus go under one button, the user's menu keeps its icon. The status bar's readouts are
+      groups (`.stac-status__group--units|epoch|cursor|points|scan`, display: contents) dropped at 1100 / 860 /
+      560 px. Menu.tsx: a trigger with no text carries its aria-label and title.
+    – measured: a tablet upright 768 × 1024 — viewer 346 → 720 px.
+    – KNOWN: on a 1024-px page with BOTH panels open the strip in sight is 376 px — the physics panel meets
+      the cube there.
+  · STILL TO DO: stage 2's touch basics (40-px targets on a coarse pointer, row actions visible without hover,
+    16-px inputs, the resizers by finger, the long press as the right click — Viewport.tsx handleContextMenu
+    + `rightDownPos`), stage 3 (phone: the rail at the bottom, panels and windows whole-screen — the Medium
+    rules already give a phone a viewer of 342 px and no cut control), stage 4 (the viewer by touch).
+    ⚠ THE SCREENSHOT RUNS COST THE RUNNING STAGE A FEW PER CENT (PointDiT 1.17 s a keyframe idle, 1.2–1.3 s
+    during a 60-picture run on 8 cores): long sets on 4 cores (`taskset -c 0-3`), and never to time a stage.
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
   background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
   worked with him, one change at a time, on his screenshots. HIS VERDICTS (2026-11-19: "1. confirmado, 2.
