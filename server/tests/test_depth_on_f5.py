@@ -384,3 +384,29 @@ def test_the_half_b_held_out_is_also_measured_in_metres():
     assert got["median_m"] == pytest.approx(float(np.median(rel * rows_B[0][2])), rel=1e-9)
     assert got["median_m"] == pytest.approx(2.0 / 0.9 - 2.0, abs=0.01)   # |z/0.9 - z| at z = 2 m
     assert heldout_metres({0: rows_B[2]}, {0: coefs[2]}, 1, W, H) == {"median_m": None, "range_m": None, "rows": 0}
+
+
+def test_the_published_points_provenance_in_one_pass_is_the_loops():
+    """`source_column` (2026-11-20: one pass over the points instead of one per keyframe — 6.4 silent minutes of
+    pccr 2026-08-24's copy): the same bytes as the loop it replaced, frames in any order, a frame with no map, no
+    point at all, and the same refusal — naming nothing but the rule — when an unresolved pixel is met."""
+    from precision import depth_on_f5 as D
+    from precision.mono_detail import SRC_UNRESOLVED
+    rng = np.random.default_rng(41)
+    H, W, frames = 24, 40, [3, 7, 8, 20, 21, 500, 13000]
+    maps = {f: rng.integers(0, 4, (H, W)).astype(np.int8) for f in frames if f != 20}        # frame 20 has no map
+    n = 60_000
+    data = np.zeros(n, dtype=[("frame_global", "<i4"), ("pixel_row", "<i2"), ("pixel_col", "<i2")])
+    data["frame_global"] = rng.choice(frames, n)
+    data["pixel_row"] = rng.integers(0, H, n)
+    data["pixel_col"] = rng.integers(0, W, n)
+    got, ref = D.source_column(data, maps), D._source_column_reference(data, maps)
+    assert got.dtype == ref.dtype == np.uint8 and got.tobytes() == ref.tobytes()
+    assert set(np.unique(got)) <= {1, 2, 3, 4} and (got[data["frame_global"] == 20] == 1).all()
+    assert D.source_column(data[:0], maps).tobytes() == D._source_column_reference(data[:0], maps).tobytes() == b""
+    assert (D.source_column(data, None) == 1).all() and (D._source_column_reference(data, None) == 1).all()
+    one = data[data["frame_global"] == 8][:1]
+    maps[8][int(one["pixel_row"][0]), int(one["pixel_col"][0])] = SRC_UNRESOLVED
+    for fn in (D.source_column, D._source_column_reference):
+        with pytest.raises(D.DepthOnF5Error, match="mixed_unresolved"):
+            fn(data, maps)

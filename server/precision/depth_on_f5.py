@@ -1054,6 +1054,37 @@ def source_column(data, src_maps) -> np.ndarray:
     fg = np.asarray(data["frame_global"], np.int64)
     r = np.asarray(data["pixel_row"], np.int64); c = np.asarray(data["pixel_col"], np.int64)
     out = np.ones(n, np.uint8)
+    if not n:
+        return out
+    # ONE pass over the points (2026-11-20): the loop over the keyframes compared every point's frame with each of
+    # them — 2772 passes over 117 M points on pccr 2026-08-24's copy, the 6.4 silent minutes between the cleaner
+    # and the publication, the card idle. The points are ordered by frame once and each frame's own run is looked
+    # up in its map: the same bytes, the same frame (the lowest) named when an unresolved pixel is met
+    # (:func:`_source_column_reference` is that loop, kept for the test).
+    order = np.argsort(fg, kind="stable")
+    frames, starts = np.unique(fg[order], return_index=True)
+    ends = np.append(starts[1:], n)
+    for f, a, b in zip(frames.tolist(), starts.tolist(), ends.tolist()):
+        sm = src_maps.get(int(f))
+        if sm is None:
+            continue
+        idx = order[a:b]
+        v = sm[r[idx], c[idx]].astype(np.int64)
+        if (v == SRC_UNRESOLVED).any():
+            raise DepthOnF5Error("a mixed_unresolved pixel reached the cloud — the measurement tier must not hold it")
+        out[idx] = (v + 1).astype(np.uint8)
+    return out
+
+
+def _source_column_reference(data, src_maps) -> np.ndarray:
+    """The loop over the keyframes :func:`source_column` replaced (kept for its test)."""
+    n = len(data)
+    if src_maps is None:
+        return np.ones(n, np.uint8)
+    from precision.mono_detail import SRC_UNRESOLVED
+    fg = np.asarray(data["frame_global"], np.int64)
+    r = np.asarray(data["pixel_row"], np.int64); c = np.asarray(data["pixel_col"], np.int64)
+    out = np.ones(n, np.uint8)
     for f in np.unique(fg):
         m = fg == f
         sm = src_maps.get(int(f))
