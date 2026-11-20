@@ -1930,6 +1930,29 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     Python dictionaries of triangulate_tracks / the held-out: 0.1–0.4 min each at 30 M landmarks on a
     micro-benchmark — they do not explain 21 minutes). NOT ATTRIBUTED: to be PROFILED on the copy's real
     session (read only) when the card is free — never guessed.
+  · F5'S PHASES ARE NOW MEASURED (server patch 0006, the clone): precision.refine.lap(name) — the wall time
+    since the previous lap goes to `name`; F5 is one thread, so the laps PARTITION its run (setup, load_tracks,
+    split, range, groups, triangulate_start, clusters, heldout_start; per rung <R>.before / .inputs / .probe /
+    .problem / .solve / .result, the same with "<R>+" for its continuation, <R>.heldout, <R>.judge; the
+    end) → refine.timing.json "phases" (the wall clock's own file; nothing computed changes). FROM THE GAPS OF
+    THE COPY'S RUN (an estimate until a run with the laps): before R0's solve 10.5 min (the range filter
+    4.6 — it groups and triangulates every track once, then the fit and the held-out are grouped and
+    triangulated again); around each of the six solves ~1.4 min (the problem's inputs, a PROBE problem built
+    only to find the observations off the raster, then the problem built AGAIN, and the result turned back
+    into per-track structures); the two held-outs and the judge after each rung 1.4–1.8 min. scratchpad
+    f5_start_profile.py runs the start alone (refine_core with solve off) on a real session, read only.
+  · ⚠ F6 ON THE COPY, PHASE BY PHASE (the stamped log + the sampler): records + bend 14.4 min (the card
+    under 5 % for 5.8 of them) · PointDiT 55.8 min (card mean 77 %) · the witness lists 2.2 min (card idle) ·
+    THE VOTE 83.4 MIN WITH THE CARD AT 48 % (one Python thread feeding it: the fast vote of patch 0002 is for
+    this) · the chunks written 2.7 min · the cleaner 4.2 min (597,721,940 → 117,482,315 points) · THEN 6.4
+    SILENT MINUTES, one thread at 100 %, no disk activity (07:58:16 → 08:04:39): source_column() compared
+    every point's frame with each keyframe in turn — 2772 passes over 117 M points. DONE IN THE CLONE (server
+    patch 0008): the points ordered by frame once, each frame's run looked up in its map — the same bytes
+    (the loop kept as the test's reference); at the copy's size 19–21 s on one core against ~5.3 min. Then
+    the publication (the cloud's hash, PotreeConverter). NOTICED, NOT TOUCHED: every F6 still writes
+    precision/layer_mono_detail.glb and layer_mixed_unresolved.glb (2,000,000 and 13,524,502 points on the
+    copy) — the two viewer layers he had REMOVED from the interface on 2026-11-19 (point 19); whether their
+    writing goes too is his word.
   · TWO OLD TESTS OF F5 FAIL IN THE LIVE TREE TOO (found 2026-11-20 while running the related tests; they
     need pycolmap 4 = the mapanything env, so the suite, run in da3, SKIPS their file — they are not among
     the 13): tests/test_refine_judge.py::test_rungs_are_warm_started_nested_and_carry_their_continuation
@@ -1942,10 +1965,13 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     steps); cameras moved ≤ 48.8 cm, witnesses 6845 / 8547 localized (bound 9.64 px), epoch 1 → 2. F6 STARTED
     05:13:16 UTC (PointDiT loaded 05:14:58; the original's F6: 173 min).
   THE SERVER PATCHES NOW: 0001 the cube closing's server side · 0002 F6's fast vote · 0003 F5's kept plans and
-  Jacobians · 0004 F6's records on threads · 0005 F4's tracks file on threads (/workspace/tmp/dev/patches/server/,
-  second copy of all the patches and their tests in /workspace/dev_patches_20261120.tar.gz; the clone
-  /root/dev/stac-build on the LOCAL disk). The five apply in order to the live tree as it is (checked on a
-  scratch index 2026-11-20 07:50 UTC). EVERY KEY THEY ADD IS AT THE RECORD'S VALUE: merging changes nothing in
+  Jacobians · 0004 F6's records on threads · 0005 F4's tracks file on threads · 0006 F5's phases measured ·
+  0007 a session frozen before `tracks.npz_threads` loads as the record (absent = 0, as vote_batch and
+  keep_*_gb: every step CLI loads the session's frozen run_config.yaml) · 0008 F6's provenance lookup in one
+  pass (/workspace/tmp/dev/patches/server/, second copy of all the patches and their tests in
+  /workspace/dev_patches_20261120.tar.gz; the clone /root/dev/stac-build on the LOCAL disk). The first five
+  apply in order to the live tree as it is (checked on a scratch index 2026-11-20 07:50 UTC; 0006–0008 are
+  made on top of them). EVERY KEY THEY ADD IS AT THE RECORD'S VALUE: merging changes nothing in
   what is computed — but it changes the steps' CODE and configuration sections, which are in their stamps
   (precision/runner.py: "the first step whose stamp differs is where the chain starts again"): a session
   stopped IN THE MIDDLE of its precision chain and resumed after the merge computes those steps again. A scan
