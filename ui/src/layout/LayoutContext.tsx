@@ -172,30 +172,37 @@ export function useLayout(): LayoutContextValue {
   return ctx
 }
 
-/** Shared drag-to-resize helper for the region handles. */
+/** Shared drag-to-resize helper for the region handles — by mouse, pen or FINGER (pointer events: a tablet could
+ *  not resize a panel; USER 2026-11-20, the page on every screen). The strip carries `touch-action: none`. */
 export function startDrag(
-  e: React.MouseEvent,
+  e: React.PointerEvent,
   axis: 'x' | 'y',
   start: number,
   sign: 1 | -1,
   onChange: (v: number) => void,
   onDone?: () => void,
 ) {
+  if (e.pointerType === 'mouse' && e.button !== 0) return
   e.preventDefault()
+  const id = e.pointerId
   const origin = axis === 'x' ? e.clientX : e.clientY
-  const onMove = (ev: MouseEvent) => {
+  const onMove = (ev: PointerEvent) => {
+    if (ev.pointerId !== id) return
     const cur = axis === 'x' ? ev.clientX : ev.clientY
     onChange(start + sign * (cur - origin))
   }
-  const onUp = () => {
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
+  const onUp = (ev: PointerEvent) => {
+    if (ev.pointerId !== id) return
+    document.removeEventListener('pointermove', onMove)
+    document.removeEventListener('pointerup', onUp)
+    document.removeEventListener('pointercancel', onUp)
     document.body.style.cursor = ''
     document.body.style.userSelect = ''
     onDone?.()
   }
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
+  document.addEventListener('pointermove', onMove)
+  document.addEventListener('pointerup', onUp)
+  document.addEventListener('pointercancel', onUp)
   document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize'
   document.body.style.userSelect = 'none'
 }

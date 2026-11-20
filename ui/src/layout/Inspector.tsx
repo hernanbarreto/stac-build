@@ -17,7 +17,7 @@ export function Inspector({ tabs, panels }: { tabs: TabItem<InspectorTab>[]; pan
   return (
     <aside className="stac-inspector" aria-label={t('layout.inspector')}>
       <div className="stac-resize stac-resize--left" role="separator" aria-orientation="vertical" aria-label={t('layout.resizePanel')}
-        onMouseDown={e => startDrag(e, 'x', state.inspectorWidth, -1, setInspectorWidth)} />
+        onPointerDown={e => startDrag(e, 'x', state.inspectorWidth, -1, setInspectorWidth)} />
       <div className="stac-inspector__head">
         <Tabs items={tabs} value={state.inspectorTab} onChange={setInspectorTab} ariaLabel={t('layout.inspectorTabs')} size="sm" fill className="stac-inspector__tabs" />
         <IconButton label={t('layout.hideInspector')} shortcut="Mod+J" icon={<PanelRightClose aria-hidden />} onClick={() => setInspectorOpen(false)} size="sm" />

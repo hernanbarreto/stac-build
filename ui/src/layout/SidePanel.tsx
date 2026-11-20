@@ -14,7 +14,7 @@ export function SidePanel({ children }: { children: ReactNode }) {
     <div className="stac-side">
       {children}
       <div className="stac-resize stac-resize--right" role="separator" aria-orientation="vertical" aria-label={t('layout.resizePanel')}
-        onMouseDown={e => startDrag(e, 'x', state.leftWidth, 1, setLeftWidth)} />
+        onPointerDown={e => startDrag(e, 'x', state.leftWidth, 1, setLeftWidth)} />
     </div>
   )
 }

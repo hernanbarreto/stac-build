@@ -16,7 +16,7 @@ export function BottomDock({ tabs, panels, actions }: { tabs: TabItem<DockTab>[]
   return (
     <section className="stac-dock" aria-label={t('layout.dock')}>
       <div className="stac-resize stac-resize--top" role="separator" aria-orientation="horizontal" aria-label={t('layout.resizeDock')}
-        onMouseDown={e => startDrag(e, 'y', state.dockHeight, -1, setDockHeight)} />
+        onPointerDown={e => startDrag(e, 'y', state.dockHeight, -1, setDockHeight)} />
       <div className="stac-dock__head">
         <Tabs items={tabs} value={state.dockTab} onChange={setDockTab} ariaLabel={t('layout.dockTabs')} size="sm" />
         <div className="stac-dock__actions">

@@ -4887,6 +4887,55 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         container.addEventListener('contextmenu', handleContextMenu)
 
+        // A LONG PRESS IS THE RIGHT CLICK (USER 2026-11-20: "hace la pagina responsiva para PC tablet y telefonos …
+        // debe funcionar perfectamente adaptada a cada pantalla"). A finger has no right button: the object's menu
+        // (New ticket) and a BIM element's menu had no way in on a tablet. A finger held still on the model for
+        // LONG_PRESS_MS opens what a right click opens there — the same handler, the same rules (the object must
+        // be selected first). A finger that moves (an orbit, a pinch) or lifts earlier cancels it. Where the
+        // browser itself raises `contextmenu` on a long press (Android), that one arrives first and this timer
+        // is dropped: the menu opens once.
+        const LONG_PRESS_MS = 550
+        const LONG_PRESS_SLOP_PX = 8
+        let press: { id: number; x: number; y: number; timer: ReturnType<typeof setTimeout> } | null = null
+        const dropPress = () => { if (press) { clearTimeout(press.timer); press = null } }
+        const handlePressDown = (e: PointerEvent) => {
+            dropPress()
+            if (e.pointerType === 'mouse' || !e.isPrimary) return
+            const x = e.clientX, y = e.clientY
+            rightDownPos = { x, y }                     // (the menu's own "was it a drag" test reads this)
+            press = { id: e.pointerId, x, y, timer: setTimeout(() => {
+                press = null
+                pressFired = true
+                handleContextMenu(new MouseEvent('contextmenu', { clientX: x, clientY: y, bubbles: true, cancelable: true }))
+            }, LONG_PRESS_MS) }
+        }
+        const handlePressMove = (e: PointerEvent) => {
+            if (press && (e.pointerId !== press.id || Math.hypot(e.clientX - press.x, e.clientY - press.y) > LONG_PRESS_SLOP_PX)) dropPress()
+        }
+        // The finger lifts after a long press: the browser may still send the mouse events of a tap (measured in
+        // Chromium: mousedown, mouseup, click on the canvas right after touchend). On the model they would close
+        // the menu that has just opened and pick whatever lies under the finger — they are stopped there, for
+        // half a second, and nowhere else (a tap on the menu itself goes through).
+        let pressFired = false
+        const TAP_ECHO_MS = 500
+        const handlePressUp = () => {
+            dropPress()
+            if (!pressFired) return
+            pressFired = false
+            const until = performance.now() + TAP_ECHO_MS
+            const types = ['mousedown', 'mouseup', 'click'] as const
+            const swallow = (ev: Event) => {
+                if (performance.now() < until && ev.target instanceof Node && container.contains(ev.target)) { ev.stopPropagation(); ev.preventDefault() }
+            }
+            types.forEach(t => window.addEventListener(t, swallow, true))
+            setTimeout(() => types.forEach(t => window.removeEventListener(t, swallow, true)), TAP_ECHO_MS)
+        }
+        container.addEventListener('pointerdown', handlePressDown)
+        container.addEventListener('pointermove', handlePressMove)
+        container.addEventListener('pointerup', handlePressUp)
+        container.addEventListener('pointercancel', dropPress)
+        container.addEventListener('contextmenu', dropPress)
+
         // Click handler: fly to camera pose
         const handleClick = (e: MouseEvent) => {
             const camGroup = cameraGroupRef.current
@@ -4916,6 +4965,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             container.removeEventListener('mousemove', handleMouseMove)
             container.removeEventListener('mousedown', handleRightDown)
             container.removeEventListener('contextmenu', handleContextMenu)
+            dropPress()
+            container.removeEventListener('pointerdown', handlePressDown)
+            container.removeEventListener('pointermove', handlePressMove)
+            container.removeEventListener('pointerup', handlePressUp)
+            container.removeEventListener('pointercancel', dropPress)
+            container.removeEventListener('contextmenu', dropPress)
             container.removeEventListener('click', handleClick)
             container.removeEventListener('click', handleLeftClick)
         }

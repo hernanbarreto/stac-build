@@ -1,0 +1,67 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   STAC Build — A FINGER INSTEAD OF A MOUSE (USER 2026-11-20: "hace la pagina responsiva para PC tablet y
+   telefonos … debe funcionar perfectamente adaptada a cada pantalla"). Loaded LAST: what it says holds whatever
+   a component's own sheet says. The sizes themselves are tokens (tokens.css, under `pointer: coarse`): every
+   control and row at least 40 px, the boxes and the slider's thumb big enough to hit.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* the panels' and the dock's edges are dragged with a finger (LayoutContext.startDrag listens to pointer
+   events): the strip is a handle, not the start of a scroll */
+.stac-resize {
+  touch-action: none;
+}
+
+/* what is typed into: 16 px — an iPhone zooms the whole page when a smaller field takes the focus */
+@media (pointer: coarse) {
+  .stac-input__el,
+  .stac-input--sm .stac-input__el,
+  .stac-input__el.stac-autoseg__textarea,
+  .stac-select__el,
+  .stac-select--sm .stac-select__el,
+  .stac-seg__name,
+  .stac-palette__input {
+    font-size: var(--fs-3);
+  }
+}
+
+/* the small targets that are not `--ctl-h` controls: a tree row's arrow, the status bar's button */
+@media (pointer: coarse) {
+  .stac-tree__chevron {
+    width: var(--sp-8);
+    height: var(--sp-8);
+    justify-content: center;
+  }
+
+  .stac-status__btn {
+    height: 100%;
+  }
+
+  .stac-menubtn {
+    min-width: var(--ctl-h-sm);   /* a menu button that is only its icon (the user's, the menus') is still a target */
+    justify-content: center;
+  }
+}
+
+/* no hover on this screen: what only showed under the pointer is always there (a row's actions were invisible
+   and still took a tap) */
+@media (hover: none) {
+  /* (shown all the time they need their room: when a row has no width for them they go to a line of their own,
+     at its right end — the name keeps the first line) */
+  .stac-tree__row {
+    flex-wrap: wrap;
+    row-gap: var(--sp-half);
+  }
+
+  .stac-tree__row > .stac-tree__label {
+    min-width: calc(var(--sp-12) * 2);   /* the name is never the part that gives way to them */
+  }
+
+  .stac-tree__actions:not(.stac-tree__actions--always) {
+    position: static;
+    opacity: 1;
+    margin-left: auto;
+    padding-left: var(--sp-0);
+    background: none;
+    pointer-events: auto;
+  }
+}

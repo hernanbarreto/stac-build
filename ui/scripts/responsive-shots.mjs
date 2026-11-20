@@ -151,6 +151,59 @@ const STATES = {
     await clickIf(byLabel(page, 'sessions.segmentManual'))
     await page.waitForTimeout(1200)
   } },
+  // BY FINGER: tap the model until an object is selected, then hold a finger on it — the object's menu must open
+  // (a touch screen has no right click). Needs a touch size.
+  longpress: { scenario: 'cloud', layout: { inspectorOpen: false }, run: async (page, note) => {
+    note.session = await loadSession(page)
+    await clickIf(byLabel(page, 'sessions.title'), 1500)           // the left panel closed: the whole viewer is in reach
+    await page.waitForTimeout(400)
+    const box = await page.locator('.stac-main__viewport').boundingBox()
+    const cdp = await page.context().newCDPSession(page)
+    let at = null
+    for (const fy of [0.62, 0.7, 0.55, 0.78, 0.48]) {
+      for (const fx of [0.5, 0.4, 0.6, 0.3, 0.7]) {
+        const x = Math.round(box.x + box.width * fx), y = Math.round(box.y + box.height * fy)
+        await page.touchscreen.tap(x, y)
+        await page.waitForTimeout(350)
+        if (await page.locator('.stac-hud__readout').count()) { at = { x, y }; break }   // the selected object's box dimensions
+      }
+      if (at) break
+    }
+    note.selectedAt = at
+    if (!at) return
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: at.x, y: at.y }] })
+    await page.waitForTimeout(900)
+    note.menuWhileHeld = await page.locator('.stac-menu').count()
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await page.waitForTimeout(300)
+    note.menuAfterLift = await page.locator('.stac-menu').count()
+    note.menuItems = await page.locator('.stac-menu .stac-menu__label').allInnerTexts().catch(() => [])
+  }, keepPointer: true },
+  // BY MOUSE, the same thing (the reference the long press is held to): click the model until an object is selected,
+  // then right-click every candidate point until its menu opens — and say where
+  rightclick: { scenario: 'cloud', layout: { inspectorOpen: false }, run: async (page, note) => {
+    note.session = await loadSession(page)
+    await clickIf(byLabel(page, 'sessions.title'), 1500)
+    await page.waitForTimeout(400)
+    const box = await page.locator('.stac-main__viewport').boundingBox()
+    note.tried = 0
+    for (const fy of [0.62, 0.7, 0.55, 0.78, 0.48, 0.66, 0.74]) {
+      for (const fx of [0.5, 0.4, 0.6, 0.3, 0.7, 0.45, 0.55]) {
+        const x = Math.round(box.x + box.width * fx), y = Math.round(box.y + box.height * fy)
+        await page.mouse.click(x, y)
+        await page.waitForTimeout(300)
+        if (!(await page.locator('.stac-hud__readout').count())) continue
+        note.tried++
+        await page.mouse.click(x, y, { button: 'right' })
+        await page.waitForTimeout(300)
+        if (await page.locator('.stac-menu').count()) {
+          note.menuAt = { x, y }
+          note.menuItems = await page.locator('.stac-menu .stac-menu__label').allInnerTexts().catch(() => [])
+          return
+        }
+      }
+    }
+  }, keepPointer: true },
   nosession: { scenario: 'sessions', run: async () => {} },
   settings: { scenario: 'sessions', run: async page => { await clickIf(byLabel(page, 'menu.settings')); await page.waitForTimeout(400) } },
   login: { scenario: 'sessions', loggedOut: true, run: async () => {} },
@@ -170,11 +223,13 @@ function audit(touch) {
   }
   const cut = []
   let small = 0, controls = 0
+  const tiny = []
   for (const el of document.querySelectorAll('button, a[href], input, select, textarea, [role="tab"], [role="menuitem"], [role="button"], [role="slider"], [role="checkbox"], [role="switch"]')) {
     if (!visible(el)) continue
     controls++
     const r = el.getBoundingClientRect()
     if (touch && Math.min(r.width, r.height) < 40) small++
+    if (touch && Math.min(r.width, r.height) < 32) tiny.push(`${name(el)} ${Math.round(r.width)}×${Math.round(r.height)}`)
     let l = r.left, t = r.top, rt = r.right, b = r.bottom
     let lost = null
     let fixed = getComputedStyle(el).position === 'fixed'
@@ -213,7 +268,7 @@ function audit(touch) {
     if (w > 1 && h > 1) overlaps.push(`${A.k} × ${B.k}: ${Math.round(w)} × ${Math.round(h)} px`)
   }
   const box = q => { const el = document.querySelector(q); if (!el) return null; const r = el.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)] }
-  return { page: [vw, vh], controls, cut, overlaps, small: touch ? small : undefined, viewer: box('.stac-main__viewport'), toolbar: box('.stac-vptoolbar'), rail: box('.stac-activity'), scrollX: document.documentElement.scrollWidth > vw + 1 }
+  return { page: [vw, vh], controls, cut, overlaps, small: touch ? small : undefined, tiny: touch ? tiny : undefined, viewer: box('.stac-main__viewport'), toolbar: box('.stac-vptoolbar'), rail: box('.stac-activity'), scrollX: document.documentElement.scrollWidth > vw + 1 }
 }
 
 // ── run ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -237,6 +292,7 @@ for (const sn of sizeNames) {
     const ctx = await browser.newContext({ viewport: { width: size.w, height: size.h }, deviceScaleFactor: 1, hasTouch: !!size.touch, isMobile: !!size.touch, locale: 'es-MX' })
     const page = await ctx.newPage()
     const errors = []
+    const note = {}
     page.on('pageerror', e => errors.push(String(e).slice(0, 160)))
     try {
       await setScenario(state.scenario)
@@ -257,14 +313,15 @@ for (const sn of sizeNames) {
         await page.goto(`${PAGE}/`, { waitUntil: 'networkidle', timeout: 60000 })
       } else {
         await openApp(page, { layout: state.layout ?? {}, density: size.touch ? 'comfortable' : 'compact' })
-        await state.run(page)
+        await state.run(page, note)
       }
       if (!state.keepPointer) await page.mouse.move(8, 8)
       await page.waitForTimeout(350)
       const a = await page.evaluate(audit, !!size.touch)
       a.session = await page.locator('.stac-vptoolbar').count() > 0
       await page.screenshot({ path: path.join(OUT, `${st}__${sn}.png`) })
-      report[`${st}__${sn}`] = { ...a, errors }
+      report[`${st}__${sn}`] = { ...a, errors, ...(Object.keys(note).length ? { note } : {}) }
+      if (Object.keys(note).length) console.log('     ', JSON.stringify(note))
       console.log(`${st.padEnd(11)} ${sn.padEnd(7)} ${String(a.page[0]).padStart(4)}×${String(a.page[1]).padEnd(4)} ${a.session ? 'session' : 'NO SESS'} viewer ${a.viewer ? `${a.viewer[2]}×${a.viewer[3]}` : '—'}  cut ${String(a.cut.length).padStart(2)} of ${a.controls}  overlaps ${a.overlaps.length}${a.small != null ? `  under 40 px: ${a.small}` : ''}${errors.length ? `  page errors: ${errors.length}` : ''}`)
     } catch (e) {
       report[`${st}__${sn}`] = { failed: String(e).slice(0, 300) }

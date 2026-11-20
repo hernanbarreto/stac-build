@@ -317,6 +317,29 @@ html[data-density='comfortable'] {
   --cell-pad-x: var(--sp-3);
 }
 
+/* ── A FINGER (USER 2026-11-20: the page on tablets and phones) ───────────────────────────────────────────
+   Where the main pointer is a finger, whatever density is chosen: every control and every row is at least
+   40 px (a small control 36), the boxes and the slider's thumb can be hit, the header and the viewer's toolbar
+   hold those controls, the panels' resize strip is wide enough to catch, and what is typed into is 16 px. A
+   mouse or a pen changes nothing here. */
+@media (pointer: coarse) {
+  html[data-density] {
+    --ctl-h: 40px;
+    --ctl-h-sm: 36px;
+    --row-h: 40px;
+    --header-h: 44px;
+    --toolbar-float-h: 48px;
+    --checkbox: 20px;
+    --slider-thumb: 22px;
+    --slider-track-h: 6px;
+    --resize-handle-w: 14px;
+    --tabs-h: 40px;
+    --statusbar-h: 36px;
+    --fs-3: 16px;                 /* what is typed into (touch.css): an iPhone zooms the page under 16 px */
+  }
+}
+
+
 /* ── Theme hook (§4.5): dark is the only implemented theme; a light theme
       is one more block overriding the semantic colours above. ───────── */
 html[data-theme='dark'] {
