@@ -7,10 +7,19 @@ lo pongas a mi aca, guardalo y es lo que vas actualizando, en la medida que vas 
 The 36 conclusions of the audit (`docs/pipeline_audit_2026-11-20.md`). The numbers never change. Three states only:
 
 - **OK — NOT TO BE TOUCHED**: right and necessary as it is.
-- **OK — DONE**: had to be done and is done (tested, applied, committed).
+- **OK — DONE**: had to be done and is done.
 - **PENDING**: has to be done and is not done. An item is done or it is not: nothing is "started".
 
-Updated every time an item closes. Last update: 2026-11-20 — 8 not to be touched, 3 done, 25 pending.
+**THE RULE OF "DONE"** (USER 2026-11-20): *"cuando algo esta hecho, solo se considera hecho si el pipeline lo ejecuta,
+si esta en otro lado, escrito tirado en un costado, en test, eso no sirve, solo se considera hecho si en el pipeline al
+ejecutar la reconstrucion se ejecuta ese codigo, cuando algo debe eliminarse es eliminarse por completo, no un flag
+apagado en el config, es eliminar del codigo, refactorizar el codigo"*.
+- Something built or corrected is DONE only when the reconstruction pipeline EXECUTES that code. Written on the side,
+  in a scratch folder or only in a test: not done.
+- Something to remove is DONE only when it is DELETED from the code and the code is refactored around it. A switch
+  turned off in the configuration is not a removal.
+
+Updated every time an item closes. Last update: 2026-11-20 — 8 not to be touched, 1 done, 27 pending.
 
 ## Right and necessary
 
@@ -40,14 +49,14 @@ Updated every time an item closes. Last update: 2026-11-20 — 8 not to be touch
 | # | What has to be done | State |
 |---|---|---|
 | 14 | Remove the brightness gate of the intake | PENDING |
-| 15 | Remove the old F2 (the scale along the walk) | OK — DONE (2026-11-20, one scale: `gauge.profile: constant`) |
+| 15 | Remove the old F2 (the scale along the walk) | PENDING (today it is only switched: `gauge.profile: constant`; the code of the scale along the walk is still there) |
 | 16 | F6: one depth factor for the session instead of one per keyframe | PENDING (its test run on the copy of pccr 2026-08-24 did not finish) |
-| 17 | Remove the depth graph | OK — DONE (2026-11-20, c97c36a: six real cubes, 276 products byte-identical without it) |
+| 17 | Remove the depth graph | PENDING (today it is only switched off: `depth_graph: false`, c97c36a — six real cubes gave 276 byte-identical products without it; its code is still in the fork) |
 | 18 | Remove today's F2 and the DA3 windows it generates again | PENDING |
 | 19 | Remove the coverage fill | PENDING |
 | 20 | Remove the DA3 lock per cube | PENDING |
 | 21 | Remove the co-visibility budget of the cut | PENDING |
-| 22 | Remove the seams' scale bound | OK — DONE (2026-11-20, fork bc93d56, 50fc503) |
+| 22 | Remove the seams' scale bound | OK — DONE (2026-11-20: deleted from the fork's code, bc93d56 / 50fc503) |
 | 23 | Remove F4's witness windows and F5's localisation of the witness frames | PENDING |
 | 24 | F6 uses the known factor instead of fitting it | PENDING |
 | 25 | Remove the cube check | PENDING |
