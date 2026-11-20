@@ -559,7 +559,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   test, source tape / laser / total station / ANOTHER SCAN) → `output/calibration_3d.json` (calibration3d.py,
   `/api/calibration/{session}`); the model's length is computed by the server from the two points and carries its
   geometry epoch (another epoch = stale, not used); the scale factor = the battery's `gauge_scale` over the gauge
-  ones, with the fit's residuals and the error on the test ones. The image-anchored references (ReferenceDialog, the battery's) stay as they were.
+  ones, with the fit's residuals and the error on the test ones. The image-anchored references (ReferenceDialog, the battery's) stayed as they were UNTIL 2026-11-20, when he had them removed from the menu and the voice ("confunden y son obsoletas" — §7, the page on every screen).
   SINCE 2026-11-13 (97517eb), his words: "la calibracion por plano tambien debe quedar sobre la nube … y debe
   dibujar el plano sobre la nube 3d" (the plane tool: three or more picked points, Enter closes it, drawn filled);
   "ambos metodos de calibracion deben estar agrupados en un unico boton que sea calibracion, debe desplegar un
@@ -612,7 +612,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · A TURN is ONE call of the model on the candidates of the sentence (`commands/router.py`: the scene's tools
     while a scan is open + the interface's and system's found by the sentence's words in the three languages;
     conversation and help always). WHAT TELLS A COMMAND FROM A QUESTION IS THE ROW THE MODEL PICKS.
-    THE DATABASE HOLDS 270 COMMANDS IN 31 AREAS AND STAC RUNS ALL OF THEM (2026-11-17, his "sobre todo los 138
+    THE DATABASE HOLDS 260 COMMANDS IN 31 AREAS SINCE 2026-11-20 (the old Reference tool's 17 left it; it grew to 284, then 277 after the removals of 2026-11-19) — on 2026-11-17 it held 270 AND STAC RUNS ALL OF THEM (2026-11-17, his "sobre todo los 138
     comandos de la interfaz que siguen a mano" / "segui con los 100 que faltan … vamos a terminar de cerrar el
     tema de comandos"): 44 of the scene, 2 of the system, 224 of the interface. A command of the interface is
     executed by the component that OWNS its state — App.tsx, the viewer, or a panel / dialog that registers its
@@ -1329,14 +1329,18 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
       real ones.
     – NOT SEEN (the mock has no keyframes): the Segmentation manager's keyframe and the Reference tools with
       an image and an item selected — reasoned from the rules; his eye.
-  · HIS QUESTION OF THE SAME HOUR, HIS DECISION PENDING: "pero las funciones Reference distance y reference
-    plane, no quedaron en calibration on 3d model?, o sea son obsoletas" — ANSWERED: two tools; the toolbar's
-    Calibration (on the cloud, his order of 2026-11-13) and the Tools menu's Reference distance / Reference
-    plane, the OLD window that marks on the keyframes' images (ReferenceDialog; left "as they were" then): it
-    feeds only the evaluation battery (evaluation/references.py, variants.py, the dock's Evaluation tab), 16
-    voice commands open it (commands/catalog/220_references.yaml), NO session holds a
-    `reference_measures.json` (nor a `calibration_3d.json`). ASKED: remove the two menu entries and the voice
-    commands? Nothing touched.
+  · ⭐ THE OLD REFERENCE TOOL IS OUT OF THE INTERFACE AND OF THE VOICE (USER 2026-11-20: "pero las funciones
+    Reference distance y reference plane, no quedaron en calibration on 3d model?, o sea son obsoletas" / "si
+    quitalas, confunden y son obsoletas, sacalas tanto del menu como de los ocmandos por voz") — d4de58f, on his
+    page since 05:15 UTC (ONE PAGE RELOAD, announced: a hook left the main component). ONE way of calibrating
+    is on screen: the toolbar's Calibration on the 3D model (2026-11-13). Removed: the Tools menu's two
+    entries; the 16 `references.*` commands and `calibration.open_reference` (THE CATALOGUE: 260 COMMANDS IN
+    31 AREAS — it was 277 in 32; the interface's typed catalogue regenerated; the catalogue test's floor
+    follows, 16 pass); the window itself (features/ReferenceDialog.tsx, referenceTypes.ts), its state, opener
+    and command ids. UNTOUCHED (not asked): the server's evaluation battery and its routes
+    (evaluation/references.py, variants.py, api.py — the dock's Evaluation tab), that window's i18n texts and
+    `.stac-ref*` style rules (unused now). No session held a `reference_measures.json` (nor holds a
+    `calibration_3d.json` yet).
   · STILL TO DO: the header and the status bar when tight (they fit from 1280 up; under it they belong to
     stage 2); THEN stages 2 (tablet + touch basics), 3 (phone), 4 (the viewer by touch).
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
@@ -1818,8 +1822,11 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     of this size. TO PROGRAM in the clone (precision/tracks.py is in the live tree's no-touch list while the job
     runs): the members deflated in parallel threads and assembled in the same order (the same bytes when each
     member is its own zlib stream — to be verified), F5 reading them in threads; measured on the card after.
-    F5 ON THE COPY SO FAR: R0 fit 0.593 px, held-out 0.6594 px over 3,167,825 tracks (the original's R0:
-    0.6558; its applied R1 0.6301), 25.6 min for the rung.
+    F5 ON THE COPY, DONE 05:11:45 UTC IN 75.3 MIN (the original: 149 min, with the removed R3): R0 fit 0.593 /
+    held-out 0.6594 px (the original's R0 0.6558); R1 fit 0.558 / held-out 0.62927 px over 3,073,956 tracks —
+    TAKEN, the applied rung (the original's applied R1: 0.6301); R2 not taken (the cost did not move: 9
+    steps); cameras moved ≤ 48.8 cm, witnesses 6845 / 8547 localized (bound 9.64 px), epoch 1 → 2. F6 STARTED
+    05:13:16 UTC (PointDiT loaded 05:14:58; the original's F6: 173 min).
   THE SERVER PATCHES NOW: 0001 the cube closing's server side · 0002 F6's fast vote · 0003 F5's kept plans and
   Jacobians · 0004 F6's records on threads (/workspace/tmp/dev/patches/server/, second copy in
   /workspace/dev_patches_20261119.tar.gz; the clone /root/dev/stac-build on the LOCAL disk). EVERY KEY THEY ADD
