@@ -1380,10 +1380,27 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
       at ~600 ms and is still there after the lift. NOT on a real device. The BRUSH's right-click marks and
       the section box's handles are NOT covered (stage 4).
     – a tablet: controls under 40 px 62 → 41 in the frame, none under 32 px.
-  · STILL TO DO: stage 3 (phone: the rail at the bottom in portrait, panels and windows whole-screen, a
-    non-blocking window as a bottom sheet, the on-screen keyboard — the Medium rules already give a phone a
-    viewer of 342 px and no cut control), stage 4 (the viewer by touch: the brush, the section box, measuring
-    without hover; the phone's rendering defaults are HIS decision).
+  · ⭐ STAGE 3 (PHONES) — APPLIED TO HIS PAGE 2026-11-20 06:34 UTC (2282fe2; one page reload, announced),
+    WAITING FOR HIS EYE ON A PHONE. 63 pictures (9 states × PC 1366 / 1920 / short, tablet both ways, phone
+    both ways): no control cut, no page error; the PC pictures unchanged.
+    – layout.css `@media (max-width: 767px) and (orientation: portrait)`: one column; rows header | viewer |
+      RAIL | status — the rail a bottom bar whose icons scroll sideways (regions.css), a side panel the whole
+      of the viewer's cell. A phone on its side keeps the Medium frame (rail at the left).
+      Viewer on a 390-px phone: 176 px before this work → 390.
+    – Dialog.css `@media (max-width: 767px), (max-height: 520px)`: md / lg / full windows whole-screen, sm /
+      fit stay cards, a NON-BLOCKING window (Common points) a sheet over the lower half; a footer wraps at
+      every size. `--viewer-min-h` (160 px or half the middle): the dock gives way (`flex-shrink: 1`) — a
+      phone on its side with the dock open left the viewer 84 px. The Segmentation manager stacks its list
+      over its image under 768 px.
+    – the on-screen keyboard: LayoutContext writes `--page-h` from window.visualViewport on a coarse pointer
+      while the page is not zoomed; `.stac-app {height: var(--page-h, 100dvh)}`. NOT TRIED ON A DEVICE.
+    – harness flake seen once: the `bare` state's click that closes the left panel can race (pc1920).
+    – left small on touch (polish, not done): the brush's shape buttons 32 × 30, a table header's sort text
+      (19 px high), the readout pins (20 px).
+  · STILL TO DO: stage 4 (the viewer by touch: the brush's marks — a right click today —, the section box's
+    handles, cancelling one measurement, the names of the toolbar's icons; the phone's rendering defaults —
+    pixel ratio, point budget — are HIS decision), and HIS EYE on a real tablet and phone through the fixed
+    address (each device opens the secret link once).
     ⚠ THE SCREENSHOT RUNS COST THE RUNNING STAGE A FEW PER CENT (PointDiT 1.17 s a keyframe idle, 1.2–1.3 s
     during a 60-picture run on 8 cores): long sets on 4 cores (`taskset -c 0-3`), and never to time a stage.
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
