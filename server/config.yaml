@@ -3078,6 +3078,23 @@ reconstruction:
       irls_iterations: 10               # Huber IRLS steps of the factor's fit, from the least-squares start
       min_depth_m: 0.05                 # landmark rows where Omega's depth is under this are not used
       seed: 0                           # the fixed seed of F6's process (nothing in it is drawn at random)
+    coherence:                          # THE COHERENCE MEASURE AND THE DECISION BY ZONE (USER 2026-11-20: "si empeora
+                                        # ese paso o esa decisión se vuelve al estado mejor"; precision/coherence.py).
+                                        # A stage's result is measured against the state it started from, zone by
+                                        # zone (a zone = a cube's keyframes): one keyframe's pixels carried into
+                                        # another with the state's cameras and depth — ALONG the ray (depth against
+                                        # depth) and ACROSS it (image against image) — over neighbours and over
+                                        # keyframes of other passes. The rule is his: 95 %, 1.1 x the measured error
+                                        # (correction_graph.graph.improvement_error_factor).
+      device: cuda                      # cpu | cuda — "todo en placa"
+      pixel_stride: 4                   # BOUND (cost): every 4th pixel of a keyframe (rows and columns) is carried
+      search_px: 8                      # BOUND (search): shifts of up to 8 px are searched across the ray
+      blur_sigma_px: 1.0                # the grey images are smoothed by 1 px before they are compared
+      min_pixels: 500                   # a pair with fewer pixels on a common surface is not measured
+      same_surface_sigmas: 3.0          # same surface = depths within 3 robust sigmas of the pair's own differences
+      heldout_confidence: 0.95          # declared confidence (as everywhere else)
+      bootstrap: 2000                   # BOUND (cost): resamples of the rule's interval (as refine.permutations)
+      seed: 0                           # their fixed seed
     flyers:                             # (claude_stac.txt 2026-10-04) flyer
                                         # diagnosis of the published cloud (precision/flyers.py). A flyer is an
                                         # ISOLATED point or one BETWEEN two surfaces of its own frame; classes

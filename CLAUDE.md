@@ -963,12 +963,33 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   STATE: line 1 (PointDiT removed from the chain, the repo, the pod and the kit) DONE, 9a13f32 · line 2 (ONE depth
   factor in F6 — `precision.depth_on_f5.session_factor`; the factor per keyframe, its window choice, its
   "verification", their device twin and their configuration keys, `bend.scope` among them, DELETED) DONE, the commit
-  after it · line 3 (conclusion 31: the decision by zone at the end of every stage) PENDING — his word to start it
-  given the same evening ("si estamos esperando test, entonces avanzamos con la tarea 3"); in the working tree, not
-  committed: `precision/coherence.py` + `tests/test_coherence.py` (the measure and the rule by zone, 7 tests) — NOT
-  yet executed by the pipeline. THE PLAN FOR IT: the decision runs INSIDE the stage, before it applies its result
-  (F5 first: its candidate cameras against the session's, zone by zone; some zone worse → F5 solved again with those
-  zones' cameras held; still worse → nothing applied), the record in `output/precision/decisions.json`.
+  after it (074cc6e) · line 3 (conclusion 31: the decision by zone) DONE, the commit after 074cc6e — his word to
+  start it: "si estamos esperando test, entonces avanzamos con la tarea 3". WHAT IT IS: `precision/coherence.py` (the
+  measure: a keyframe's pixels carried into another with the state's cameras and depth — along the ray, depth against
+  depth; across it, image against image — over neighbours and keyframes of other passes; `judge_zones` = his rule by
+  zone) and `precision/decide.py` (`decide_stage`: the flow). THE DECISION RUNS INSIDE THE STAGE, BEFORE IT APPLIES
+  ITS RESULT — nothing is ever undone. F5 (`run_refine`) executes it: its candidate cameras + camera model against the
+  session's; a zone worse → the whole ladder again with that zone's cameras held (`ba_torch.hold_cameras`, the
+  solver's own mask of free unknowns: their update is exactly zero); still worse → nothing applied. The record:
+  `output/precision/decisions.json`.
+  · THE SCALE IS DECIDED ONCE: a stage that does not decide the scale is measured with the SAME depth scale as the
+    state it started from (`decide_stage(owns_scale=False)`). The scale of the state before F5 is read from its
+    cameras against the records' own poses (`camera_scale`) — MEASURED on the two test sessions: those cameras are
+    the records' moved as ONE body and scaled to 1e-10 (bufferStop_prueba x0.99235, pccr2408_prueba epoch 0
+    x0.97158); cameras moved one by one (F5's) are refused by that function.
+  · ⚠ THE ASSISTANT'S WRONG CLAIM, RETRACTED TO HIM: "F5 changed the scale by 1.8 % on bufferStop" — it was the
+    median of F5's camera steps (x0.982), which also falls when F5 takes a tremor out of the cameras; with the depth
+    at the OLD scale the session agrees better after F5 than with the depth rescaled by that figure.
+  · THE FIRST REAL READING (read only, CPU, one pair in six, `bufferStop_prueba`, its published F5 = R2 against the
+    state before it): across the ray better in every zone (neighbours 1.19 → 0.46 cm, other passes 1.68 → 1.12 cm);
+    along the ray: neighbours 1.10 → 1.45 cm, other passes 4.98 → 4.50 cm; by zone: 4 better, 1 WORSE (cube 0:
+    neighbours along the ray 0.87 → 1.44 cm) — today's F5 would be solved again there with cube 0 held.
+  · TOLD TO HIM, HIS OK PENDING — the measure's own numbers in config.yaml (`reconstruction.precision.coherence`),
+    the assistant's: every 4th pixel, shifts searched up to 8 px, 1 px of smoothing, a pair measured from 500 common
+    pixels, same surface = 3 robust sigmas, 2000 resamples; and the definition "a zone is WORSE when ANY of its four
+    series (neighbours / other passes x along / across) is".
+  · NOT DONE IN IT: nothing ran on the card (the tests and the reading are on the CPU); F5 end to end with the
+    decision has no test of its own (its pieces have: the measure 7, the decision 7, the hold 1).
   WHAT THIS SUPERSEDES BELOW: the F6 test with `bend.scope: session` on the copy of pccr 2026-08-24 was stopped on
   his order (that copy still shows the morning's cloud, a factor per keyframe; its chain can no longer resume: the
   steps' stamps changed) and "config.yaml keeps `scope: keyframe` until his eye" — the key no longer exists.

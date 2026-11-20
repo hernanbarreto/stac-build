@@ -26,7 +26,7 @@ apagado en el config, es eliminar del codigo, refactorizar el codigo"*.
 - Removed: DONE only when it is DELETED from the code and the code refactored. A switch turned off is not a removal.
 - A line is DONE or PENDING. Nothing is "started".
 
-State on 2026-11-20: 36 conclusions — 8 not to be touched, 3 done, 25 pending.
+State on 2026-11-20: 36 conclusions — 8 not to be touched, 4 done, 24 pending.
 
 ## The list
 
@@ -34,7 +34,7 @@ State on 2026-11-20: 36 conclusions — 8 not to be touched, 3 done, 25 pending.
 |---|---|---|---|---|
 | 1 | 34 | PointDiT (the detail at the edges): a model under a non-commercial licence, an hour of the card, no result or need shown — *"hay que sacarlo, eliminalo de la cadena, del repo, de todo"* | REMOVE — from F6's code, the configuration, the tests, the pod's environment and weights, the rebuild kit, the documents | **DONE** (2026-11-20: deleted from F6 — its hook between the depth and the vote, its modules, its device functions —, from the typed configuration and config.yaml, the tests, the evaluation variant, the interface's two layer entries, the pod — the vendor tree with 15 GB of weights, two packages of env `da3` — and the rebuild kit; F6 runs without it and always takes the card) |
 | 2 | 16 | F6's depth factor per keyframe, and its "verification" on F5's own landmarks | DO IT RIGHT — one factor for the session; verified in the final run of pccr from scratch (no intermediate run) | **DONE** (2026-11-20: F6 executes `session_factor` — one robust fit of z_landmark / z_Omega over every landmark row of the session, applied to every keyframe and turn witness; the fit per keyframe, its window choice, its "verification", their device twin `precision/bend_torch.py` and their configuration keys — `bend.scope` among them — are deleted) |
-| 3 | 31 | Every step is judged against itself; none against an independent reference | BUILD — the decision by zone at the end of every stage, the best state kept (the flow below), with one measure computed on the card | PENDING |
+| 3 | 31 | Every step is judged against itself; none against an independent reference | BUILD — the decision by zone at the end of every stage, the best state kept (the flow below), with one measure computed on the card | **DONE** (2026-11-20: `precision/coherence.py` — the measure: one keyframe's pixels carried into another with the state's cameras and depth, read ALONG the ray (depth against depth) and ACROSS it (image against image), over neighbours and over keyframes of other passes, on the card; `precision/decide.py` — the flow below. F5 executes it BEFORE it applies its result: its candidate against the session's state, zone by zone, with his rule; a zone worse → the ladder solved again with that zone's cameras held (`ba_torch.hold_cameras`); still worse → nothing of F5 is applied. The record: `output/precision/decisions.json`. F5 is the one stage that today hands over a candidate that can be worse than what it started from; the stages lines 5, 6 and 9 remove are not wired) |
 | 4 | 9 | F5 does not carry the cube graph: where the tracks say nothing it moves the cameras freely | DO IT RIGHT — relative constraints between neighbouring cameras and the closures inside F5's cost; the independent position priors deleted | PENDING |
 | 5 | 15 | The old F2 (a scale along the walk) | REMOVE — today it is only switched (`gauge.profile: constant`) | PENDING |
 | 6 | 18 | Today's F2 (a second estimate of the metre) and the DA3 windows it generates again | REMOVE | PENDING |

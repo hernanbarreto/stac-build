@@ -826,6 +826,24 @@ def make_problem(w2c0, params_by_block0, block_of, cam_idx, pt_idx, uv, X0, hube
     return _Problem(w2c0, params_by_block0, block_of, cam_idx, pt_idx, uv, X0, huber_px, cam_free, **kw)
 
 
+def hold_cameras(problem, cams) -> int:
+    """These cameras' poses stop being unknowns of ``problem`` (USER 2026-11-20, the decision by zone: a stage is
+    solved again with the zones that got worse HELD to the state it started from). Their six rows and columns leave
+    the reduced camera system (``free`` False): their update is exactly zero, and every other camera and landmark is
+    solved with them where they are. Returns how many are held."""
+    torch = problem.torch
+    idx = torch.as_tensor(np.asarray(cams, np.int64).ravel(), device=problem.device)
+    if idx.numel() == 0:
+        return 0
+    if int(idx.min()) < 0 or int(idx.max()) >= problem.N:
+        raise BATorchError(f"cameras to hold outside 0 … {problem.N - 1}")
+    cols = (6 * idx[:, None] + torch.arange(6, device=problem.device)[None, :]).reshape(-1)
+    problem.free[cols] = False
+    if not bool(problem.free.any()):
+        raise BATorchError("every camera unknown is held: nothing is left to solve")
+    return int(torch.unique(idx).numel())
+
+
 def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]:
     """Levenberg-Marquardt with Ceres' stopping rules (refine.torch_ba). Returns the summary dict the rung report reads."""
     tb = problem.tb
@@ -978,8 +996,9 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
                    fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: Optional[np.ndarray],
                    cfg, block_of: Optional[np.ndarray] = None, params_by_block0: Optional[List[List[float]]] = None,
                    prior_w2c: Optional[np.ndarray] = None, flags_of: Optional[str] = None,
-                   device: Optional[str] = None, log=None):
-    """The same inputs and the same RungResult as precision.refine.run_rung, solved on the device."""
+                   device: Optional[str] = None, log=None, held: Optional[np.ndarray] = None):
+    """The same inputs and the same RungResult as precision.refine.run_rung, solved on the device. ``held``: per
+    keyframe, True = its pose is not solved (:func:`hold_cameras`)."""
     from precision.refine import RefineError, RungResult
     torch = _torch()
     dev = device_for(device)
@@ -1059,6 +1078,8 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     C = -np.einsum("nji,nj->ni", prior_w2c[:, :3, :3], prior_w2c[:, :3, 3])
     prob = make_problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
                     sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba)
+    if held is not None:
+        hold_cameras(prob, np.flatnonzero(np.asarray(held, bool)))
     n_prior = N
     if log is None and os.environ.get("STAC_BA_TORCH_TRACE"):
         log = lambda m: print(f"[ba_torch {name}] {m}", flush=True)       # noqa: E731

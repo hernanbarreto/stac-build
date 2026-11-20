@@ -585,16 +585,20 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
              fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: np.ndarray,
              cfg, block_of: Optional[np.ndarray] = None,
              params_by_block0: Optional[List[List[float]]] = None,
-             prior_w2c: Optional[np.ndarray] = None) -> RungResult:
+             prior_w2c: Optional[np.ndarray] = None, held: Optional[np.ndarray] = None) -> RungResult:
     """One pose-prior bundle adjustment. ``w2c_start`` / ``params_start`` / ``X_start``: where the
     solve STARTS (the gauge for R0; the rung it contains for R1, R2 and the continuation solves —
     point 61). ``prior_w2c``: the poses whose centres hold the gauge priors — the GAUGE poses for
     every rung (default: ``w2c_start``, the pre-2026-10-07 behaviour, kept for callers that start at
-    the gauge). The position prior σ per keyframe is ``sigmas``."""
+    the gauge). The position prior σ per keyframe is ``sigmas``. ``held``: per keyframe, True = its pose is not
+    solved — it stays where the solve starts (the decision by zone, USER 2026-11-20)."""
     if str(getattr(cfg, "solver", "ceres")) == "torch":
         from precision.ba_torch import run_rung_torch
         return run_rung_torch(name, w2c_start, params_start, wh, fit_groups, X_start, sigmas, cfg, block_of=block_of,
-                              params_by_block0=params_by_block0, prior_w2c=prior_w2c)
+                              params_by_block0=params_by_block0, prior_w2c=prior_w2c, held=held)
+    if held is not None and np.asarray(held, bool).any():
+        raise RefineError(f"{name}: holding the cameras of a zone is solved by the torch solver — "
+                          f"'reconstruction.precision.refine.solver' is {str(getattr(cfg, 'solver', 'ceres'))!r}")
     import pycolmap
     _vendor_path()
     from reconstruction.colmap_ba import _rigid, _tune_ceres, _solve_checked
@@ -888,8 +892,10 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 track: np.ndarray, frame: np.ndarray, uv: np.ndarray, split: np.ndarray,
                 kf_frames: Sequence[int], sigma_rel: float, cfg, solver: dict, *,
                 error_factor: float, log: Callable = print, solve: bool = True,
-                range_m: float = 0.0) -> Dict[str, Any]:
+                range_m: float = 0.0, hold: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split).
+    ``hold``: per keyframe, True = its pose is HELD to ``w2c0`` in every rung (the decision by zone: the stage solved
+    again with the zones that got worse held to the state it started from).
     ``error_factor``: ``correction_graph.graph.improvement_error_factor`` (the user's 2).
     ``solve=False`` (``refine.enabled: false``, the evaluation battery): no rung is solved — the
     initial state is the result (its held-out measured, its landmarks the witnesses' map)."""
@@ -928,7 +934,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         log(f"{LOG_TAG} refine.enabled: false — no rung solved; the initial poses and camera stand "
             f"(held-out median {np.median(list(held['init'].values())) if held['init'] else float('nan'):.3f} px "
             f"over {len(held['init'])} tracks)")
-        return {"best": base, "rungs": {}, "held": held, "X": X0, "X0": X0, "fit_groups": fit_g,
+        return {"best": base, "base": base, "rungs": {}, "held": held, "X": X0, "X0": X0, "fit_groups": fit_g,
                 "held_groups": held_g, "prior_sigma_m": sig,
                 "solver_errors": {}, "clusters": clusters, "ladder": [],
                 "ladder_restricted_by": "refine.enabled: false", "error_factor": fac,
@@ -947,7 +953,8 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         # 2026-10-07: cost 0.587605 → 0.587605, the focal stayed at F0's 362.56)
         start = base if name in ("R0", "R1") else parent
         r, held_r, dropped, cont, err = _rung_and_continuation(
-            name, start, wh, fit_g, held_g, sig, cfg, solver, w2c0, log)
+            name, start, wh, fit_g, held_g, sig, cfg, solver, w2c0, log,
+            **({"held": np.asarray(hold, bool)} if hold is not None else {}))
         held[name] = held_r
         errors[name] = err
         timing[name] = r.seconds
@@ -1004,7 +1011,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     if best is None:
         raise RefineError("no rung could be judged — the session camera cannot be refined; see the "
                           "rung reasons in the log")
-    return {"best": best, "rungs": rungs, "held": held, "X": best.X, "X0": X0, "fit_groups": fit_g,
+    return {"best": best, "base": base, "rungs": rungs, "held": held, "X": best.X, "X0": X0, "fit_groups": fit_g,
             "held_groups": held_g, "prior_sigma_m": sig,
             "solver_errors": errors, "clusters": clusters, "ladder": list(ladder),
             "ladder_restricted_by": RUNGS_ENV if os.environ.get(RUNGS_ENV, "").strip() else None,
@@ -1298,6 +1305,39 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                        error_factor=fac, log=log, solve=bool(cfg.enabled), range_m=float(pcfg.view_range_m))
     best = core["best"]
     lap("ladder_end")
+    # THE DECISION BY ZONE (USER 2026-11-20, precision/decide.py): what the ladder solved is a CANDIDATE. It is
+    # measured against the state F5 started from, zone by zone, with the session's own coherence; a zone that got
+    # worse -> the ladder is solved again with that zone's cameras held where they were; still worse -> nothing of
+    # F5 is applied and the session stays as it was.
+    decision: Optional[Dict[str, Any]] = None
+    first_rungs: Optional[dict] = None
+    if apply and best.name != "init":
+        from precision import decide as DZ
+
+        def _cam_of(r: RungResult):
+            return cam.with_params(r.params_by_block[0], "refine", cam.camera_epoch + 1,
+                                   report={"rung": r.name, "blocks": len(r.params_by_block)})
+
+        def _solve_again(hold: np.ndarray):
+            nonlocal core, best, first_rungs
+            first_rungs = core["rungs"]               # the first ladder stays in the record;
+            core = best = None                        # its landmarks and groups are made again by this solve
+            core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
+                               tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver, error_factor=fac,
+                               log=log, solve=True, range_m=float(pcfg.view_range_m), hold=hold)
+            best = core["best"]
+            return f"F5 {best.name}, {int(np.asarray(hold, bool).sum())} keyframe(s) held", best.w2c, _cam_of(best)
+
+        judge = DZ.Judge(session_dir, pcfg, raw_of(pcfg), cam, log=log)
+        decision = DZ.decide_stage(judge, "f5_refine", ("the session before F5", w2c0, cam),
+                                   (f"F5 {best.name}", best.w2c, _cam_of(best)), _solve_again, log=log)
+        del judge
+        if decision["outcome"] == DZ.DISCARDED:
+            best = core["base"]                       # the state F5 started from stands: its landmarks are the
+            core["X"] = core["X0"]                    # witnesses' map, nothing is applied below
+        DZ.write_decisions(out, "f5_refine", decision["records"])
+        lap("decision")
+    discarded = decision is not None and decision["outcome"] == "discarded"
     _t = time.perf_counter()
     bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,
                                                      max_px=float(np.hypot(cam.width, cam.height))), cfg)
@@ -1349,6 +1389,11 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                          "unlocalized": {str(f): r["reason"] for f, r in wloc.items()
                                          if not r["localized"]},
                          "rms_px": {str(f): r.get("rms_px") for f, r in wloc.items()}},
+           "decision": (None if decision is None else
+                        {"outcome": decision["outcome"], "attempt": decision["attempt"],
+                         "keyframes_held": (int(decision["held"].sum()) if decision["held"] is not None else 0),
+                         "zones_worse_first": decision["records"][0]["zones"]["worse"],
+                         "first_ladder": first_rungs, "record": "precision/decisions.json"}),
            "applied": False}
     # the solver's wall clock, outside the compared artifact (point 36)
     lap("report")
@@ -1360,7 +1405,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                         heldout_rms_px=np.array(list(core["held"][best.name].values()), np.float32),
                         init_track=np.array(list(core["held"]["init"].keys()), np.int64),
                         init_rms_px=np.array(list(core["held"]["init"].values()), np.float32))
-    if apply:
+    if apply and not discarded:
         new_cam = cam.with_params(best.params_by_block[0], "refine", cam.camera_epoch + 1,
                                   report={"rung": best.name, "blocks": len(best.params_by_block)})
         save_camera_json(out / "camera.json", new_cam, epochs.get("geometry_epoch"))
@@ -1372,7 +1417,8 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
         doc["epoch_to"] = (res or {}).get("epoch_to")
         doc["camera_epoch_to"] = new_cam.camera_epoch
     (pdir / REFINE_NAME).write_text(json.dumps(doc, indent=1, default=float))
-    log(f"{LOG_TAG} applied rung {best.name}; witnesses {len(loc)}/{len(wit)} localized "
+    log(f"{LOG_TAG} " + ("NOTHING APPLIED (the decision by zone: the session stays as it was)" if discarded
+                         else f"applied rung {best.name}") + f"; witnesses {len(loc)}/{len(wit)} localized "
         f"(bound {bound:.2f} px) → {pdir / REFINE_NAME}")
     return doc
 

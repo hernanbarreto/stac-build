@@ -459,6 +459,22 @@ class BendConfig:
     seed: int                   # the fixed seed of F6's process (nothing in it is drawn at random)
 
 
+# ── the coherence measure and the decision by zone (USER 2026-11-20) ───────
+
+@dataclass(frozen=True)
+class CoherenceConfig:
+    device: str                 # cpu | cuda — where the measure's arrays live (precision/coherence.py)
+    pixel_stride: int           # BOUND (cost): every n-th pixel of a keyframe (rows and columns) is carried
+    search_px: int              # BOUND (search): half-width of the window of shifts searched across the ray
+    blur_sigma_px: float        # the grey images are smoothed by this before they are compared
+    min_pixels: int             # fewest pixels on a common surface for a pair to be measured at all
+    same_surface_sigmas: float  # a carried pixel is on the SAME surface as the pixel it lands on when their depths
+                                # differ by at most this many robust sigmas of the pair's own differences
+    heldout_confidence: float   # declared confidence of the rule by zone (as everywhere else)
+    bootstrap: int              # BOUND (cost): resamples of the rule's interval
+    seed: int                   # their fixed seed
+
+
 # ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
 
 @dataclass(frozen=True)
@@ -545,6 +561,7 @@ class PrecisionConfig:
     cloud: CloudConfig
     bend: BendConfig
     flyers: FlyersConfig
+    coherence: CoherenceConfig
     cloud_metrics: CloudMetricsConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
@@ -918,6 +935,19 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                       irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
                       min_depth_m=_num(bd, "min_depth_m", "bend", lo=0.0),
                       seed=_num(bd, "seed", "bend", lo=0, integer=True))
+    co = _sub(sec, "coherence", "")
+    coherence = CoherenceConfig(device=_enum(co, "device", "coherence", ("cpu", "cuda")),
+                                pixel_stride=_num(co, "pixel_stride", "coherence", lo=1, integer=True),
+                                search_px=_num(co, "search_px", "coherence", lo=1, integer=True),
+                                blur_sigma_px=_num(co, "blur_sigma_px", "coherence", lo=0.0),
+                                min_pixels=_num(co, "min_pixels", "coherence", lo=2, integer=True),
+                                same_surface_sigmas=_num(co, "same_surface_sigmas", "coherence", lo=0.0, lo_excl=True),
+                                heldout_confidence=_num(co, "heldout_confidence", "coherence", lo=0.0, hi=1.0,
+                                                        lo_excl=True),
+                                bootstrap=_num(co, "bootstrap", "coherence", lo=1, integer=True),
+                                seed=_num(co, "seed", "coherence", lo=0, integer=True))
+    if coherence.heldout_confidence >= 1.0:
+        raise PrecisionConfigError(f"'{SECTION}.coherence.heldout_confidence' must be below 1")
     fl = _sub(sec, "flyers", "")
     flyers = FlyersConfig(knn_k=_num(fl, "knn_k", "flyers", lo=1, integer=True),
                           isolated_quantile=_num(fl, "isolated_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
@@ -954,7 +984,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
           "(edge_max_objects x edge_max_points_per_object), never by a wall clock")
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
-                           cloud=cloud, bend=bend, flyers=flyers,
+                           cloud=cloud, bend=bend, flyers=flyers, coherence=coherence,
                            cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner,
                            view_range_m=_view_range(raw),
                            raw=(raw if isinstance(raw, dict) else None))

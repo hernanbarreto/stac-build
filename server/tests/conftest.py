@@ -31,4 +31,6 @@ def _hole_audit_evidence_on_cpu():
     chat_tools.use_device("cpu")         # the chat's measurements: the torch path, on the CPU
     from bim import comparison as bim_comparison
     bim_comparison.use_device("cpu")     # the BIM comparison's distances: the torch path, on the CPU
+    from precision import decide
+    decide.use_device("cpu")             # the decision by zone's measure, on the CPU
     yield

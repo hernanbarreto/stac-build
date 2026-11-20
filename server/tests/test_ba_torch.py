@@ -353,3 +353,29 @@ def test_a_rung_solved_in_chunks_lands_where_the_one_piece_solve_does(monkeypatc
     assert abs(r1.final_cost - r2.final_cost) <= 1e-6 * r1.final_cost, (r1.final_cost, r2.final_cost)
     assert np.max(np.abs(r1.w2c - r2.w2c)) < 1e-6 and np.max(np.abs(np.subtract(r1.params_by_block, r2.params_by_block))) < 1e-4
     assert abs(r1.fit_rms_px - r2.fit_rms_px) < 1e-6
+
+
+def test_held_cameras_stay_exactly_where_they_started_and_the_rest_is_solved_around_them(monkeypatch):
+    """The decision by zone (USER 2026-11-20): the stage solved again with a zone HELD to the state it started from.
+    The held cameras' poses are the start's bit for bit; the others and the landmarks converge around them; the
+    result is a constrained optimum (never below the free one); the same on the large-problem path."""
+    w2c, pts, groups, X = _scene()
+    rng = np.random.default_rng(7)
+    w0, X0 = _perturb(w2c, X, rng)
+    held = np.zeros(len(w2c), bool)
+    held[[2, 3, 4]] = True
+    kw = dict(sigmas=np.full(len(w2c), 0.5), prior_w2c=w0)
+    free = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
+    r = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", held=held, **kw)
+    assert np.array_equal(r.w2c[held], w0[held])
+    assert np.max(np.abs(r.w2c[~held][1:] - w0[~held][1:])) > 1e-4
+    assert r.final_cost < r.initial_cost and r.final_cost >= free.final_cost
+    none = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", held=np.zeros(len(w2c), bool), **kw)
+    assert np.array_equal(none.w2c, free.w2c)                       # nothing held = the free solve, bit for bit
+    with pytest.raises(BA.BATorchError, match="nothing is left"):
+        BA.run_rung_torch("R0", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", held=np.ones(len(w2c), bool), **kw)
+    monkeypatch.setattr(BA, "CHUNKED_ABOVE_OBS", 0)
+    monkeypatch.setattr(BA, "CHUNK_OBS", 211)
+    rc = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", held=held, **kw)
+    assert np.array_equal(rc.w2c[held], w0[held])
+    assert abs(rc.final_cost - r.final_cost) <= 1e-6 * r.final_cost and np.max(np.abs(rc.w2c - r.w2c)) < 1e-6
