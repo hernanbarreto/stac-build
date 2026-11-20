@@ -412,6 +412,9 @@ class CloudConfig:
     no_birth_without_parallax: bool   # USER 2026-11-08: a keyframe I1 made by ROTATION (no parallax) votes as a
                                       # witness but gives birth to no point — COLMAP registers such an image by
                                       # PnP and triangulates nothing from it
+    vote_batch: int = 0         # USER 2026-11-20 ("todo lo que no cambie el resultado debe programarse mas rapido"):
+                                # 0 = THE RECORD (one witness at a time, its maps uploaded at every pair); N ≥ 1 = the
+                                # session's maps resident on the device, the witnesses N at a time — the same bits
 
 
 # ── depth on F5 (USER 2026-10-01: the epoch-7 recipe, precision/depth_on_f5.py) ──
@@ -889,7 +892,11 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         fusion_occlusion_veto=bool(cl.get("fusion_occlusion_veto", False)),
                         fusion_majority=bool(cl.get("fusion_majority", False)),
                         fusion_in_place=bool(cl.get("fusion_in_place", False)),
-                        no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)))
+                        no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)),
+                        vote_batch=cl.get("vote_batch", 0))
+    if isinstance(cloud.vote_batch, bool) or not isinstance(cloud.vote_batch, int) or cloud.vote_batch < 0:
+        raise ValueError(f"precision.cloud.vote_batch {cloud.vote_batch!r}: 0 (the record: one witness at a time) or "
+                         f"the number of witnesses voted at a time with the session's maps resident on the device")
     if cloud.fusion_rule not in ("colmap", "tau", "adjust"):
         raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau' | 'adjust'")
     _gone(cl, "fusion_witness_max_m", "cloud", "USER 2026-11-09: ONE range for every stage — reconstruction.view_range_m")

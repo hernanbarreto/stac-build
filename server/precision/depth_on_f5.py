@@ -452,7 +452,7 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
                       neighbors, tau_quantile: float, repair_min_views: int, rescue_below_floor: bool,
                       log: Callable = print, bars_out: Optional[dict] = None,
                       extra: Optional[Dict[int, List[int]]] = None, min_parallax_deg: Optional[float] = None,
-                      min_support: int = 0, fusion: Optional[dict] = None, no_birth=()):
+                      min_support: int = 0, fusion: Optional[dict] = None, no_birth=(), vote_batch: int = 0):
     """pccr EPOCH 8 (USER 2026-10-01: "es la mejor, incorporar al pipeline"), on the bent depth
     `dep` (every `valid` pixel; `passed` = above the ONE confidence floor):
      1. tau = the `tau_quantile` percentile of the neighbour disagreement on INTERIOR pixels;
@@ -480,7 +480,10 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
         agreeing witnesses for a kept or admitted pixel, the agreeing surface's views for a repaired or rescued
         one. A pixel the vote keeps, repairs, admits or rescues enters only with a support of at least
         ``min_support``; the support is the agree map returned (the cloud's ``confidence`` column).
-        ``min_parallax_deg`` None = every agreeing view counts and no floor (before 2026-11-07)."""
+        ``min_parallax_deg`` None = every agreeing view counts and no floor (before 2026-11-07).
+    ``vote_batch`` (cloud.vote_batch): 0 = THE RECORD — one witness at a time, its maps uploaded at every pair;
+    N ≥ 1 = the same vote with the session's maps resident on the device and the witnesses N at a time
+    (f6_torch.two_sided_vote_fast: every map the same bit for bit — tests/test_f6_vote_fast.py)."""
     import torch
     from precision import corrected_cloud as CC
     from precision import f6_torch as FT
@@ -506,12 +509,22 @@ def edge_keeping_vote(frames: List[int], dep: Dict[int, np.ndarray], valid: Dict
     extra = extra or {}
     final, tot = {}, {}
     tau_margins: Dict[int, Optional[dict]] = {}
+    res = None
+    if int(vote_batch) > 0:
+        res = FT.Resident(dep, passed)               # (after the snap: the maps the vote reads, once)
+        log(f"{LOG_TAG} vote: {len(dep)} maps resident on {FT.device()}, witnesses {int(vote_batch)} at a time, "
+            f"z-buffer by {FT.zbuffer_method()} (cloud.vote_batch; the record's bits)")
     # USER 2026-10-08: the vote on the card — dense [H, W] tensors per keyframe (f6_torch), the
     # decisions below are the same rules on the candidate pixels
     for i, f in enumerate(frames):
         cand = valid[f] & (passed[f] | edge[f])           # below-floor interior pixels stay out
-        v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau,
-                              extra=extra.get(f, ()), min_parallax_deg=min_parallax_deg, fusion=fusion)
+        if res is not None:
+            v = FT.two_sided_vote_fast(i, frames, res, cand, K, c2w, w2c, neighbors, tau,
+                                       extra=extra.get(f, ()), min_parallax_deg=min_parallax_deg, fusion=fusion,
+                                       batch=int(vote_batch))
+        else:
+            v = FT.two_sided_vote(i, frames, dep, passed, cand, K, c2w, w2c, neighbors, tau,
+                                  extra=extra.get(f, ()), min_parallax_deg=min_parallax_deg, fusion=fusion)
         candt = FT._t(cand, torch.bool)
         if fusion is not None and str(fusion.get("mode", "keep")) == "adjust":
             # ADJUST (USER 2026-11-08: "no es un filtro, es un ajuste … buscar la posición correcta de los
@@ -1390,7 +1403,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                                         bars_out=vote_bars, extra=t_extra,
                                         min_parallax_deg=float(pcfg.refine.min_tri_deg),
                                         min_support=int(pcfg.cloud.min_support_views),
-                                        fusion=fusion, no_birth=no_birth)
+                                        fusion=fusion, no_birth=no_birth,
+                                        vote_batch=int(getattr(pcfg.cloud, "vote_batch", 0)))
     cover = vst["out"] / float(N * H * W)
     _p(65, f"vote done: coverage {cover * 100:.1f} %")
     del dep, valid, passed

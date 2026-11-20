@@ -29,6 +29,8 @@ from __future__ import annotations
 import functools
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from collections import OrderedDict
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -492,17 +494,51 @@ def splat(depth, enter, K: np.ndarray, c2w_src: np.ndarray, w2c_dst: np.ndarray,
     u, v, zd, ok = project(Xd, K, H, W)
     p = (v * W + u)[ok]
     zp = zd[ok]
-    n_pix = H * W
-    p_all = torch.cat([torch.arange(n_pix, dtype=torch.int64, device=d.device), p])
-    z_all = torch.cat([torch.full((n_pix,), float("inf"), dtype=torch.float64, device=d.device), zp])
+    return zbuffer_sorted(p, zp, H * W).reshape(H, W)
+
+
+def zbuffer_sorted(p: torch.Tensor, zp: torch.Tensor, n_pix: int) -> torch.Tensor:
+    """THE RECORD's z-buffer: per pixel the nearest of the depths ``zp`` landing at the flat pixels ``p``, +inf
+    where nothing lands — a stable SORT by (pixel, depth) with a sentinel entry per pixel and the first entry of
+    each pixel; no scatter, no atomics."""
+    p_all = torch.cat([torch.arange(n_pix, dtype=torch.int64, device=zp.device), p])
+    z_all = torch.cat([torch.full((n_pix,), float("inf"), dtype=torch.float64, device=zp.device), zp])
     o1 = torch.sort(z_all, stable=True).indices
     p1 = p_all[o1]; z1 = z_all[o1]
     o2 = torch.sort(p1, stable=True).indices
     p2 = p1[o2]; z2 = z1[o2]
     first = torch.ones_like(p2, dtype=torch.bool)
     first[1:] = p2[1:] != p2[:-1]
-    pos = first.nonzero()[:, 0]                      # exactly H*W entries, in pixel order (the sentinels)
-    return z2[pos].reshape(H, W)
+    pos = first.nonzero()[:, 0]                      # exactly n_pix entries, in pixel order (the sentinels)
+    return z2[pos]
+
+
+def zbuffer_min(p: torch.Tensor, zp: torch.Tensor, n_pix: int) -> torch.Tensor:
+    """The same z-buffer as ONE reduction: the minimum of the depths landing at each pixel over a +inf start.
+    A minimum of finite doubles is exact and does not depend on the order it is taken in — the same bits as
+    :func:`zbuffer_sorted` (two stable sorts of n_pix + landed entries per witness: most of a vote's time)."""
+    out = torch.full((int(n_pix),), float("inf"), dtype=torch.float64, device=zp.device)
+    return out.scatter_reduce(0, p, zp, reduce="amin", include_self=True)
+
+
+_ZBUFFER: Dict[str, str] = {}
+
+
+def zbuffer_method() -> str:
+    """How the fast vote z-buffers on THIS device — "min" when the reduction is available under the strict
+    deterministic mode and gives the record's bits on a probe with collisions and ties, else "sorted" (the
+    record's own). Decided once per device and recorded (:func:`record`): never a silent difference."""
+    if _DEVICE not in _ZBUFFER:
+        g = torch.Generator(device="cpu").manual_seed(7)
+        n_pix = 257
+        p = torch.randint(0, n_pix, (4096,), generator=g).to(_DEVICE)
+        zp = torch.randint(1, 64, (4096,), generator=g).to(torch.float64).to(_DEVICE)           # many exact ties
+        try:
+            same = bool(torch.equal(zbuffer_min(p, zp, n_pix), zbuffer_sorted(p, zp, n_pix)))
+            _ZBUFFER[_DEVICE] = "min" if same else "sorted"
+        except RuntimeError:                          # no deterministic kernel for it on this device
+            _ZBUFFER[_DEVICE] = "sorted"
+    return _ZBUFFER[_DEVICE]
 
 
 def window_extremes(depth: torch.Tensor, valid: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -713,6 +749,210 @@ def two_sided_vote(i: int, order: List[int], depth: Dict[int, np.ndarray], judge
     if qualify:
         out["agree_q"] = agree_q
         out["par_splat"] = (torch.stack(par_s) if par_s
+                            else torch.zeros((0, H, W), dtype=torch.bool, device=z.device))
+    elif fusion is not None:
+        out["agree_q"] = agree_q
+        out["par_splat"] = torch.zeros((0, H, W), dtype=torch.bool, device=z.device)
+    if fusion is not None:
+        out["thru_q"] = thru_q
+        out["in_range"] = in_range
+    return out
+
+
+class Resident:
+    """EVERY MAP THE VOTE READS, ON THE DEVICE ONCE (USER 2026-11-20: "todo lo que no cambie el resultado debe
+    programarse mas rapido"). The record's vote uploads a witness's depth and judge maps from numpy at EVERY
+    (keyframe, witness) pair — pccr 2026-08-24: 781,066 pairs, four uploads each — though the whole session's
+    maps are a few GB. Here they are uploaded once, in their own dtype; :meth:`depth` gives what ``_t`` gives
+    (float64, the exact widening of the same float32 values). ``surface(g)`` keeps a witness's judged surface in
+    the world (the splat's first half, the same for every keyframe it votes on) within a byte budget."""
+
+    def __init__(self, depth: Dict[int, np.ndarray], judge: Dict[int, np.ndarray], surface_bytes: int = 12 << 30):
+        self._d = {int(f): torch.as_tensor(np.ascontiguousarray(a), device=_DEVICE) for f, a in depth.items()}
+        self._j = {int(f): torch.as_tensor(np.ascontiguousarray(a), device=_DEVICE).to(torch.bool)
+                   for f, a in judge.items()}
+        self._surf: "OrderedDict[int, torch.Tensor]" = OrderedDict()
+        self._surf_bytes, self._budget = 0, int(surface_bytes)
+
+    def depth(self, f: int) -> torch.Tensor:
+        return self._d[int(f)].to(torch.float64)
+
+    def judge(self, f: int) -> torch.Tensor:
+        return self._j[int(f)]
+
+    def surface(self, g: int, K: np.ndarray, c2w_g: np.ndarray) -> torch.Tensor:
+        """splat()'s source side for witness ``g`` — its judged pixels as world points, the record's own lines."""
+        g = int(g)
+        if g in self._surf:
+            self._surf.move_to_end(g)
+            return self._surf[g]
+        d = self.depth(g); e = self.judge(g)
+        rays = camera_rays(d.shape[0], d.shape[1], np.asarray(K, np.float64))
+        Rs = _t(c2w_g[:3, :3]); ts = _t(c2w_g[:3, 3])
+        idx = e.reshape(-1).nonzero()[:, 0]
+        z = d.reshape(-1)[idx]
+        r = rays.reshape(-1, 3)[idx]
+        Xw = (r * z[:, None]) @ Rs.T + ts
+        self._surf[g] = Xw
+        self._surf_bytes += Xw.numel() * 8
+        while self._surf_bytes > self._budget and len(self._surf) > 1:
+            _, old = self._surf.popitem(last=False)
+            self._surf_bytes -= old.numel() * 8
+        return Xw
+
+
+def _splat_resident(res: Resident, g: int, K: np.ndarray, c2w_g: np.ndarray, w2c_dst: np.ndarray, shape,
+                    zbuf) -> torch.Tensor:
+    """splat(depth[g], judge[g], K, c2w[g], w2c_dst, shape) from the resident maps: the same products on the same
+    operands (the surface's world points kept between keyframes), the z-buffer by ``zbuf``."""
+    H, W = int(shape[0]), int(shape[1])
+    Xw = res.surface(g, K, c2w_g)
+    Rd = _t(w2c_dst[:3, :3]); td = _t(w2c_dst[:3, 3])
+    Xd = Xw @ Rd.T + td
+    u, v, zd, ok = project(Xd, np.asarray(K, np.float64), H, W)
+    return zbuf((v * W + u)[ok], zd[ok], H * W).reshape(H, W)
+
+
+def two_sided_vote_fast(i: int, order: List[int], res: Resident, cand, K: np.ndarray, c2w: Dict[int, np.ndarray],
+                        w2c: Dict[int, np.ndarray], neighbors, tau: float, extra=(),
+                        min_parallax_deg: Optional[float] = None, fusion: Optional[dict] = None,
+                        batch: int = 32) -> dict:
+    """:func:`two_sided_vote` — every entry of its result, bit for bit — with the session's maps RESIDENT on the
+    device (``res``), the witnesses taken ``batch`` at a time and the z-buffer as one reduction.
+
+    What is the same call as the record's, one witness at a time: every matrix product (a BLAS product's last
+    bit belongs to its operands' shapes — they are the record's). What is batched over the witnesses: the
+    elementwise arithmetic, the comparisons, the gathers and the counts — each pixel's value does not depend on
+    what is computed beside it. The z-buffer: :func:`zbuffer_method`."""
+    f = order[i]
+    z = res.depth(f)
+    H, W = int(z.shape[0]), int(z.shape[1])
+    K = np.asarray(K, np.float64)
+    candt = _t(cand, torch.bool)
+    rays = camera_rays(H, W, K)
+    Rf = _t(c2w[f][:3, :3]); C = _t(c2w[f][:3, 3])
+    ray = rays @ Rf.T                                          # world directions
+    one = torch.ones_like(z); zero = torch.zeros_like(z)
+    nan = torch.full_like(z, float("nan"))
+    agree = torch.zeros((H, W), dtype=torch.int32, device=z.device)
+    contra = torch.zeros_like(agree); contra_fwd = torch.zeros_like(agree)
+    cands, splats = [z[None]], []
+    Xw = C + z[..., None] * ray
+    witnesses = [order[i + int(d)] for d in neighbors if 0 <= i + int(d) < len(order)]
+    witnesses += [int(g) for g in extra]
+    qualify = min_parallax_deg is not None and fusion is None
+    zbuf = zbuffer_min if zbuffer_method() == "min" else zbuffer_sorted
+    tiny = torch.finfo(torch.float64).tiny
+    if fusion is not None:
+        fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
+        U0 = torch.arange(W, dtype=torch.float64, device=z.device)[None, :].expand(H, W)
+        V0 = torch.arange(H, dtype=torch.float64, device=z.device)[:, None].expand(H, W)
+        Tf = _t(w2c[f])
+        cos_wide = float(np.cos(np.radians(float(fusion["tri_max_deg"]))))
+        cos_narrow = float(np.cos(np.radians(float(fusion["tri_min_deg"]))))
+        max_px = float(fusion["max_reproj_px"]); max_rel = float(fusion["max_depth_rel"])
+        agree_q = torch.zeros_like(agree)
+        adjust = str(fusion.get("mode", "keep")) == "adjust"
+        max_dist = float(fusion.get("witness_max_m", 0.0))
+        cons = [torch.where(candt, z.to(torch.float64), nan.to(torch.float64))[None]] if adjust else None
+        in_range = ((torch.linalg.norm(Xw - C, dim=-1) <= max_dist) if max_dist > 0
+                    else torch.ones_like(candt))
+        thru_q = torch.zeros_like(agree)
+        a_ = C - Xw                                             # (the same at every witness)
+        na_ = torch.linalg.norm(a_, dim=-1)
+        cull = bool(fusion.get("repair")) or bool(fusion.get("in_place"))
+    if qualify:
+        cos_max = float(np.cos(np.radians(float(min_parallax_deg))))
+        agree_q = torch.zeros_like(agree)
+        par_s = []
+
+        def _parallax_ok(X, Cg):
+            a = C - X
+            b = Cg - X
+            c = (a * b).sum(-1) / (torch.linalg.norm(a, dim=-1) * torch.linalg.norm(b, dim=-1)).clamp_min(tiny)
+            return c <= cos_max
+    step = max(1, int(batch))
+    for c0 in range(0, len(witnesses), step):
+        G = witnesses[c0:c0 + step]
+        B = len(G)
+        Ts = [_t(w2c[g]) for g in G]
+        # the record's products, one witness at a time (the same operands, the same shapes)
+        a = torch.stack([T[2, :3] @ C + T[2, 3] for T in Ts])[:, None, None]
+        b = torch.stack([ray @ T[2, :3] for T in Ts])
+        Xg = torch.stack([Xw @ T[:3, :3].T + T[:3, 3] for T in Ts])
+        u, v, zg, ok = project(Xg, K, H, W)
+        del Xg
+        ok = ok & candt
+        idx = (v.clamp(0, H - 1) * W + u.clamp(0, W - 1)).reshape(B, -1)
+        del u, v
+        D = torch.stack([res.depth(g).reshape(-1) for g in G])
+        dg = torch.where(ok, torch.gather(D, 1, idx).reshape(B, H, W), zero)
+        del D
+        J = torch.stack([res.judge(g).reshape(-1) for g in G])
+        jg = torch.gather(J, 1, idx).reshape(B, H, W)
+        del J
+        ok = ok & jg & (dg > 0)
+        e = torch.where(ok, (zg - dg) / torch.where(ok, dg, one), zero)
+        ag = ok & (torch.abs(e) <= tau) & (torch.abs(b) > 0)
+        Cg = torch.stack([_t(np.asarray(c2w[g], np.float64)[:3, 3]) for g in G])[:, None, None, :]
+        if fusion is not None:
+            rg = rays.reshape(-1, 3)[idx].reshape(B, H, W, 3)        # the witnesses' rays at the landed pixels
+            Xb = []
+            for k, g in enumerate(G):
+                Rg = _t(c2w[g][:3, :3]); tg = _t(c2w[g][:3, 3])
+                xb = (rg[k] * dg[k][..., None]) @ Rg.T + tg           # its surface there, in the world
+                Xb.append(xb @ Tf[:3, :3].T + Tf[:3, 3])              # back into this keyframe
+            Xb = torch.stack(Xb)
+            del rg
+            zb = Xb[..., 2]
+            okb = ok & (zb > 0)
+            zs = torch.where(okb, zb, one)
+            du = fx * Xb[..., 0] / zs + cx - U0
+            dv = fy * Xb[..., 1] / zs + cy - V0
+            del Xb
+            err_px = torch.sqrt(du * du + dv * dv)
+            b_ = Cg - Xw
+            cs = (a_ * b_).sum(-1) / (na_ * torch.linalg.norm(b_, dim=-1)).clamp_min(tiny)
+            band = (cs <= cos_narrow) & (cs >= cos_wide)
+            near = ((torch.linalg.norm(Xw - Cg, dim=-1) <= max_dist) if max_dist > 0
+                    else torch.ones_like(okb))
+            ag = okb & band & near & (err_px <= max_px) & (torch.abs(e) <= max_rel) & (torch.abs(b) > 0)
+            agree_q = agree_q + ag.sum(0).to(torch.int32)
+            thru_q = thru_q + (ok & band & near & (e < -max_rel)).sum(0).to(torch.int32)
+            if adjust:
+                q = okb & band & (err_px <= max_px) & (torch.abs(b) > 0)
+                if max_dist > 0:
+                    q = q & (dg <= max_dist)
+                t_g = (dg - a) / torch.where(torch.abs(b) > 0, b, one)
+                cons.append(torch.where(q & (t_g > 0), t_g.to(torch.float64), nan.to(torch.float64)))
+        fwd = ok & (e < -tau)
+        s = torch.stack([_splat_resident(res, g, K, c2w[g], w2c[f], (H, W), zbuf) for g in G])
+        landed = torch.isfinite(s)
+        s0 = torch.where(landed, s, zero)
+        front = landed & (z - s0 > tau * s0)
+        if fusion is not None and max_dist > 0:
+            fwd = fwd & near
+            front = front & (torch.linalg.norm(C + s0[..., None] * ray - Cg, dim=-1) <= max_dist)
+        agree = agree + ag.sum(0).to(torch.int32)
+        contra_fwd = contra_fwd + fwd.sum(0).to(torch.int32)
+        contra = contra + (fwd | front).sum(0).to(torch.int32)
+        cands.append(torch.where(ag, (dg - a) / torch.where(torch.abs(b) > 0, b, one), nan))
+        sp_g = torch.where(landed, s, nan)
+        if fusion is not None and cull and max_dist > 0:
+            far = torch.linalg.norm(C + s0[..., None] * ray - Cg, dim=-1) > max_dist
+            sp_g = torch.where(far, nan, sp_g)
+        splats.append(sp_g)
+        if qualify:
+            agree_q = agree_q + (ag & _parallax_ok(Xw, Cg)).sum(0).to(torch.int32)
+            par_s.append(landed & _parallax_ok(C + s0[..., None] * ray, Cg))
+    zmed = nanmedian0(torch.cat(cands))
+    sp = torch.cat(splats) if splats else torch.zeros((0, H, W), dtype=torch.float64, device=z.device)
+    out = {"z": z, "agree": agree, "contra": contra, "contra_fwd": contra_fwd, "zmed": zmed, "splats": sp}
+    if fusion is not None and str(fusion.get("mode", "keep")) == "adjust":
+        out["cons"] = torch.cat(cons)
+    if qualify:
+        out["agree_q"] = agree_q
+        out["par_splat"] = (torch.cat(par_s) if par_s
                             else torch.zeros((0, H, W), dtype=torch.bool, device=z.device))
     elif fusion is not None:
         out["agree_q"] = agree_q
