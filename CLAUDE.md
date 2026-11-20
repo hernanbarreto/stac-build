@@ -1490,6 +1490,56 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   diciembre uno de los puntos a mejorar es justamente la velocidad"). Reference: pccr 2408 (2765 kf, 150 concepts)
   VLM 48.5 min + SAM3 ~10.5 h at ~4.1 min / concept even with the shared backbone (3ccb7c6); pccr 3108 (547 kf,
   87 concepts) SAM3 1 h 43 min. Robustness stays the bar: speed is never bought with a lost mask or a looser geometry.
+- ⭐⭐ THE PRECISION CORE'S TIME — F4, F5, F6 (USER 2026-11-20: "estas F4, F5 y F6 son las que se comen todo el
+  tiempo, hay manera de hacerlas mas rapido?, deben ser lo mas rapido posible, por ahi paralelizanod algo,
+  investiga a fondo como optimizar el tiempo en cada uno"). INVESTIGATED READ-ONLY (the copy's run holds the card;
+  NOTHING of server/precision may be edited in the live tree while it runs — every later stage of the job is a
+  new process that imports it). WAITING FOR HIS WORD on what is implemented.
+  MEASURED (each step's own timing files, the ORIGINAL pccr 2026-08-24, 2765 keyframes, 11.46 h of precision
+  core): F4 tracks 350.9 min (51 %) · F5 refine 149.2 min (22 %) · F6 173.1 min (25 %) · F2 9.2 · f6_check 3.3 ·
+  F3 1.7. (pccr 3108, 547 kf: 34.1 / 26.9 / 22.1; zaragoza 10.7 / 11.0 / 26.1; observatorio 6.2 / 1.7 / 17.1;
+  bufferStop 7.1 / 2.9 / 14.8.) ⚠ "refine 5.7 h" written earlier in this file for the original was wrong: 2.5 h.
+  · F4 (precision/tracks.py): 4741 windows (230 keyframe of 24 frames, 1926 loop of ≤ 18, 2585 witness), 4.43 s a
+    window on average (keyframe ~8.5 s, loop ~6.6 s, witness ~2.5 s: the copy's first windows are the slow
+    kinds); EVERY window runs the VGGSfM tracker TWICE (once per query frame), FP32, no autocast, TF32 off,
+    strict determinism; its cost is the fine stage (refine_track: a 31x31 patch per track per frame, ~67,000
+    patches a call, 64 GB of the card). THE CARD IS SATURATED (sampler on the copy: 94 % utilisation, 299 W; the
+    process's main thread 99 %): nothing to gain by parallel work on ONE card. Repeated work is small (the coarse
+    feature maps once per query frame instead of once per window; track_split_of hashes 37.6 M tracks in a
+    Python loop, ~1 min). The levers are the arithmetic (TF32 — off by the determinism plan's points 12 / 27 /
+    91 so that results do not depend on the card's generation; on, it is still the same bits on this card, but
+    other bits than the validated recipe: HIS decision, on a measurement and his eye) and MORE CARDS (the windows
+    are independent).
+  · F5 (precision/refine.py, ba_torch.py): solves 7102 s of the 149 min — R0 816 s (43 iterations) + its
+    continuation 1171 s (59), R1 505 (15) + 2137 (59), R2 1410 (31) + 331 (8), R3 457 (19) + 275 (14). THE
+    CONTINUATIONS (a second solve from the rung's end, to MEASURE the solver's own error — the judge's bar) ARE
+    55 % of it (65 min). R3 (12 min) is "measured and reported only" by policy (plan point 62): never applied.
+    Applied rung R1; R2 tried, not taken. Per LM trial (19–45 s): the chunked problem makes each chunk's
+    Jacobians THREE times (linearize, Schur, back-substitution) and REBUILDS each chunk's pair plan at every
+    step ("the plan is per chunk, not kept": pair_indices + a stable argsort of the pair keys + a Python loop
+    over the groups) though it is the same at every iteration — it could be kept (host memory, ~21 GB of int32
+    for ~2.6e9 pairs) with the same result. CAMERA_DAMPING "hessian" (Ceres' own; station's R3: 37 iterations
+    in 12 s against 42 in 22 s) is coded and OFF: "the USER's call" (another path, the same optimum within the
+    solver's tolerance).
+  · F6 (precision/depth_on_f5.py, f6_torch.py): compute 9434 s + publish 935 s. PointDiT 3164 s (2 tiles a
+    keyframe as ONE batch, bf16, VRAM peak 18.9 GB of 80). The rest of compute ~6000 s is mostly THE VOTE:
+    781,066 (keyframe, witness) pairs looped one by one in Python — each pair UPLOADS the witness's depth and
+    judge maps from numpy again (f6_torch._t: no cache; four uploads a pair) though every map of the session
+    is ~9 GB, and z-buffers the witness into the keyframe with TWO stable sorts of ~772,000 entries (splat),
+    plus ~100 small float64 kernels; then a sort along the witnesses for the medians. A reorganisation (maps
+    resident on the card, witnesses in batches, the z-buffer without the double sort if scatter-amin is exact
+    and allowed under strict determinism) keeps every decision. Also sequential: the 2765 records read one by
+    one (zlib), each frame's JPEG decoded twice (PointDiT, publish). Publish: chunks written (16 GB), the
+    cleaner, read back, the octree.
+  THE LEVERS AS GIVEN TO HIM (estimates until measured on the card): 1 F6 vote reorganised (60–85 min, same
+  result) · 2 F5 pair plan kept + Jacobians not repeated (20–40 min, same result) · 3 F5 without R3 (12 min; its
+  report line goes) · 4 F4 TF32 (1.5–3 h; last decimals, his eye) · 5 F5 "hessian" damping (30–60 min; within
+  tolerance) · 6 PointDiT in larger batches (15–25 min; last decimals) · 7 more cards for F4 / F6 / the cubes
+  (time divided by the cards at the same total cost; a multi-card pod and deterministic sharding).
+  PASSIVE RECORDS LEFT RUNNING ON THE COPY (scratchpad, read only): stage_sampler.py → stage_usage.csv (every
+  5 s: stage, card utilisation / memory / power, the stage process's CPU and its busiest threads) and
+  stage_log_stamped.txt (every stage line of the log with its UTC time) — they give the real split of F5's
+  iterations and F6's phases when the copy reaches them.
 - ⭐⭐ THE CUBE STAGE'S STEPS THAT RUN ON THE CPU WITH THE CARD IDLE — TO BE PORTED, HIS ORDER (USER 2026-11-19,
   watching the copy of pccr 2026-08-24: "No entiendo por qué siguen habiendo tantas partes que no usan la placa.
   Todo debe hacerse en placa" / "anota los pasos"). All in vendor/VGGT-Long/loop_utils/cube_run.py (process_cubes)
