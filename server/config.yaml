@@ -2714,7 +2714,9 @@ reconstruction:
       # the shape the cube graph closed. A TEST VARIANT (2026-11-20: on pccr 2026-08-24's copy along_walk applied
       # x0.81–x1.25, moved cameras up to 2.3 m after the graph had closed the revisits and moved the 774 honoured
       # ones 24 cm at the median); which one the pipeline uses is THE USER'S decision.
-      profile: along_walk
+      # ⭐ USER 2026-11-20, shown that along_walk re-opened what the cube graph had closed: "Eso está mal!!!, hay que
+      # revisarlo porque rompe escenas" / "La manera es una única escala y que no rompa nada" — constant is THE RULE.
+      profile: constant
       heldout_confidence: 0.95          # declared confidence of the held-out comparisons (the
                                         # same bar as correction_graph.graph.heldout_confidence)
       smooth_grid: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
@@ -2774,7 +2776,7 @@ reconstruction:
       # at a time (precision/npz_threads.py): the same arrays; the file itself is then the same at every run
       # (numpy stamps each member with the clock). The thread count is no parameter of the tracks: it is
       # written in tracks.timing.json, beside the time the write took.
-      npz_threads: 0
+      npz_threads: 16                   # USER 2026-11-20: "aplica todas las mejoras de tiempo" (0 = numpy's own writer)
     # F5 — joint pose + session camera refinement, witness localisation (precision/refine.py)
     refine:
       enabled: true                     # false = no bundle adjustment (the evaluation battery's variant "sin F5",
@@ -3015,7 +3017,7 @@ reconstruction:
                                         # surface behind it beyond the depth tolerance). Census 2026-11-09: pccr
                                         # 3108's kept pixels — a median 90 % of the views that can test them
                                         # confirm, 94.1 % pass; zaragoza — 63 %, 74.6 % pass (its doubles/floaters)
-      vote_batch: 0                     # HOW the vote is computed, never what it decides (USER 2026-11-20: "todo lo
+      vote_batch: 32                    # HOW the vote is computed, never what it decides (USER 2026-11-20: "todo lo
                                         # que no cambie el resultado debe programarse mas rapido"). 0 = THE RECORD: one
                                         # witness at a time, its depth and judge maps uploaded from the host at every
                                         # (keyframe, witness) pair and its surface z-buffered by two stable sorts —
