@@ -276,7 +276,7 @@ def test_the_tracks_file_on_threads_is_the_records_product(sess):
     from either file, and the timing file says how it was written and how long the write took."""
     from dataclasses import replace
     pdir = sess.session_dir / "output" / "precision"
-    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    _run_tracks(sess.session_dir, replace(TCFG, npz_threads=0), track_fn=_truth_fn(sess), log=lambda *a: None)   # the record
     rec, rec_report = T.load_tracks_v2(sess.session_dir), (pdir / T.REPORT_NAME).read_bytes()
     rec_threads = T.load_tracks_v2(sess.session_dir, threads=4)             # numpy's file, the threaded reader
     assert json.loads((pdir / T.TIMING_NAME).read_text())["npz_threads"] == 0

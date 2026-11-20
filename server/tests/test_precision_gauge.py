@@ -20,7 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from precision import gauge as G                                # noqa: E402
 from precision.config import load_precision_config              # noqa: E402
 
-GCFG = load_precision_config().gauge
+# the tests below hold the model ALONG THE WALK (what gauge.profile: along_walk applies); the pipeline's rule since
+# 2026-11-20 is ONE scale for the session (profile: constant, USER: "La manera es una única escala y que no rompa
+# nada") — test_one_scale_for_the_session_keeps_a_closed_walk_closed holds that one
+GCFG = replace(load_precision_config().gauge, profile="along_walk")
 WALK_M = 60.0
 
 
@@ -548,7 +551,7 @@ def test_one_scale_for_the_session_keeps_a_closed_walk_closed(tmp_path, monkeypa
     import precision.poses_epoch as PE
     monkeypatch.setattr(PE, "load_poses", lambda out: (frames, poses))
     base = {**GCFG.__dict__, "instruments": ("da3_windows", "da3_mono")}
-    assert base["profile"] == "along_walk", "config.yaml keeps the record"
+    assert load_precision_config().gauge.profile == "constant", "config.yaml holds THE RULE: one scale for the session"
     rec = G.run_gauge(tmp_path, SimpleNamespace(**base), apply=False, log=lambda *a: None)
     one = G.run_gauge(tmp_path, SimpleNamespace(**{**base, "profile": "constant"}), apply=False, log=lambda *a: None)
     assert "profile" not in rec and "constant" not in rec and "profile" not in rec["params"]
@@ -580,8 +583,8 @@ def test_the_gauge_profile_is_typed_and_a_session_frozen_before_the_key_is_the_r
     from config import cfg as raw_cfg
     from precision.config import PrecisionConfigError
     raw = copy.deepcopy(dict(raw_cfg))
-    assert load_precision_config(raw).gauge.profile == "along_walk"
-    raw["reconstruction"]["precision"]["gauge"].pop("profile")
+    assert load_precision_config(raw).gauge.profile == "constant"          # the rule (USER 2026-11-20)
+    raw["reconstruction"]["precision"]["gauge"].pop("profile")             # a session frozen before the key: as it was made
     assert load_precision_config(raw).gauge.profile == "along_walk"
     raw["reconstruction"]["precision"]["gauge"]["profile"] = "constant"
     assert load_precision_config(raw).gauge.profile == "constant"

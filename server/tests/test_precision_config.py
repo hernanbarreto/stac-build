@@ -200,7 +200,7 @@ def test_the_tracks_file_threads_are_typed_and_a_session_frozen_before_the_key_i
     import copy
     from config import cfg as raw_cfg
     from precision.config import PrecisionConfigError, load_precision_config
-    assert load_precision_config().tracks.npz_threads == 0, "config.yaml keeps the record"
+    assert load_precision_config().tracks.npz_threads == 16, "switched on 2026-11-20 (USER: 'aplica todas las mejoras de tiempo')"
     raw = copy.deepcopy(dict(raw_cfg))
     raw["reconstruction"]["precision"]["tracks"].pop("npz_threads")
     assert load_precision_config(raw).tracks.npz_threads == 0
