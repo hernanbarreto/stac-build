@@ -264,6 +264,46 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   adopted with the stages' profile, ~3× slower for the chat). The voice: `scripts/serve_voice.sh` (env `voice`,
   built by `scripts/build_voice_env.sh`; 127.0.0.1:8798, `logs/voice_latest.log`). From a shell vLLM needs `setsid nohup`
   (launched from a short python it dies with it) and ≥ 40 GB free. Restart the backend to pick up new stages / routes.
+- ⭐ THE PAGE FROM ANY BROWSER, WITHOUT THE SSH TUNNEL (USER 2026-11-20: "la idea es que pueda verlo desde cualquier
+  navegador, sin necesidad de abrir la consola, lo hacemos?" / "en la pc no puedo instalar tailscale porque es
+  laboral y no tengo permisos de administrador" / "si, dale"). `bash scripts/remote_access.sh start | link | status
+  | rotate | gate | stop` — called by init_pod.sh (START_REMOTE=0 skips it; never fatal):
+  · tailscaled on the pod (userspace, the identity of August on the volume: the node `stac-pod` of his tailnet
+    tail9cfdd1.ts.net) and TAILSCALE FUNNEL → https://stac-pod.tail9cfdd1.ts.net — public, a valid certificate,
+    THE SAME ADDRESS whatever IP / port the provider gives the pod. He enabled Funnel for the node himself (the
+    link `tailscale funnel` prints and WAITS on — as `tailscale up` waits when the node must be authorised
+    again: the script shows their words with a time limit, never swallows them).
+  · THE GATE in front (scripts/remote/gate.nginx.conf.template, its own instance of the image's nginx 1.24 on
+    127.0.0.1:8770): several of the backend's routes answer WITHOUT a login and a new host name is found by
+    scanners within minutes, so NOTHING passes — page, backend, source — but a browser that once opened the
+    secret link `/__gate?k=<STAC_GATE_KEY>`, which leaves a cookie (a year; Secure, HttpOnly). Behind it: `/` →
+    the interface's dev server ([::1]:5173, Host rewritten: no vite change, his page was not reloaded), the
+    backend's routes (the dev proxy's list + /app, /static) straight to https://127.0.0.1:8765; no buffering,
+    no temp file, websockets, ranges. The key: `STAC_GATE_KEY` in .env (PRIVATE, never committed); the rendered
+    nginx file holds it and lives on the LOCAL disk (/tmp/stac_gate, mode 600 — the volume shows every file
+    world-readable), made again at every start. `rotate` draws a new key (every browser opens the new link).
+    Inside the tailnet too the address goes through the gate (August's `tailscale serve` served the backend
+    bare; the AR server stays on :8443, tailnet only; scripts/tailscale_up.sh is the tailnet-only variant).
+  · CHECKED FROM THE INTERNET SIDE (requests from the pod to the public name): the certificate valid; without
+    the secret 403 on /, /api/tasks, /src/App.tsx and with a wrong key; the secret link → 302 + the cookie; with
+    it the page 200, /health, the API in 0.15 s, a byte range 206, the live-reload websocket connected. HIS
+    FIRST SCREENSHOT: "403 Forbidden" on the bare address from the work PC — the gate, before the secret link
+    (so the work network reaches ts.net). NOT TRIED IN A BROWSER BY THE ASSISTANT.
+  · ✓ HE ENTERED FROM THE WORK PC (USER 2026-11-20 ~03:00 UTC: "entre si") — the page, the sessions' list and
+    the tasks' poll through the public address. The secret link had only been ANNOUNCED to him ("cual es el
+    enlace largo papa, no lo tengo, no puedo entrar"): after a start the link is GIVEN to him, in the reply.
+    HIS WORRY THE SAME MINUTE ("fijate si intento abrir el asistente matalo" / "entre si, pero mata al
+    asistente"): the page asks `GET /api/voice/status?start=true` at EVERY load. CHECKED: the server answered
+    "busy" and started nothing — voice/api.py and voice/service.start both ask
+    semantic.service.engine_available_to, the chat model's launcher asks it first too, and the engine lease is
+    the pipeline's for the WHOLE job; the card held the copy's process alone, no chat / voice process, ports
+    8798 / 8799 closed, the voice's log untouched. Nothing to kill.
+  · LEFT, told to him: (a) THE POD DOES NOT START ITS SERVICES BY ITSELF — init_pod.sh is run by hand after
+    every pod start (PID 1 is the provider's /start.sh): making it automatic is a setting of the pod (its
+    start command), changed with the pod STOPPED — after the copy; (b) a login on EVERY backend route, so the
+    gate is not the only wall (a backend change: never restarted while a job runs); (c) the dev server is what
+    is published (his live changes): a public address WITHOUT the gate would have to serve the built app
+    (ui/dist is of 2026-11-09) — never the dev server, which shows the source.
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);
   `GET /api/pipelines/active` (running / queued jobs and their stages); scan keys `<date>/<source>` from `GET
   /sessions/<id>/scans`. A session lives in `server/projects/<id>/scans/<date>/src_<source>/`.

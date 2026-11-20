@@ -50,6 +50,16 @@ tmux send-keys -t arserver "$CONDA && $ENV && cd /workspace/stac-build && bash s
 tmux new-session -d -s vite
 tmux send-keys -t vite "$CONDA && conda activate nodejs && cd /workspace/stac-build/ui && npm run dev:web" Enter
 
+# 3r. THE PAGE FROM ANY BROWSER, WITHOUT AN SSH TUNNEL (USER 2026-11-20: "la idea es que pueda verlo desde
+#     cualquier navegador, sin necesidad de abrir la consola"): the gate + tailscaled + the funnel — a fixed
+#     https address behind a secret link (scripts/remote_access.sh; the address and the link: `... link`).
+#     Flag: START_REMOTE=0 to skip. Never fatal: the pod's services start whatever Tailscale answers.
+START_REMOTE="${START_REMOTE:-1}"
+if [ "$START_REMOTE" = "1" ]; then
+    bash /workspace/stac-build/scripts/remote_access.sh start \
+        || echo "⚠ remote access not up — see the lines above; again with: bash scripts/remote_access.sh start"
+fi
+
 # 3a. ELECTRON DESKTOP (headless pod → viewable over noVNC on :6080/vnc.html).
 #     Brings up Xvfb + x11vnc + noVNC, waits for Vite, then runs the app.
 #     Flag: set START_ELECTRON=0 to skip (e.g. no display stack needed).
