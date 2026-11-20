@@ -278,6 +278,19 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   ~105 MB of context views, and EVERY cube stays on disk until the cubes are placed: 86 cubes ≈ 67 GB, 170 ≈
   133 GB; the I3 window depth (25.8 GB on 2756 keyframes) stays until F2 unless `intake.walk.delete_windows`
   removes it (F2 regenerates it, ~30 min of the card).
+- ⚠ THE LOCAL DISK IS THE CLEANER'S SCRATCH — INCIDENT 2026-11-20 19:01 UTC, THE ASSISTANT'S ERROR (two hours of
+  his card). F6's cleaner works in `postprocessing.clean_scratch_dir` (/tmp/stac_clean, the container's 50 GB disk)
+  and needs 40 bytes a point: 21.9 GB for the 588.8 M voted points of pccr 2026-08-24. The assistant had filled
+  that disk with its own test data (/root/dev_data: 23 GB of real cubes kept for tests; its scratchpad 4.9 GB) and,
+  WHILE F6 RAN, copied a 3.4 GB scan there for the next test, having looked only at "21 GB free". F6 computed for
+  1 h 52 (PointDiT, the vote: coverage 55.0 %), the cleaner refused at its first line ("17.3 GB free, … needs up to
+  21.9 GB"), and F6 KEEPS NOTHING when its publication fails: the whole step ran again (relaunched 19:03 UTC with
+  33 GB free). THE RULES IT LEAVES: (1) while a reconstruction is alive NOTHING is written to the local disk —
+  test data goes to the volume or is removed first; before a run: `df /root` must show the cleaner's need (40 B ×
+  the expected points) with room to spare; (2) OWED IN THE CODE, as soon as that run ends (it touches what the run
+  uses): the cleaner takes a scratch on the volume, declared, when the local one is short — it never fails for
+  that; and F6 keeps its voted chunks until the publication has succeeded, so a failed publication resumes AT the
+  publication.
 - INCIDENT 2026-11-08 (an hour of his pod): at 09:12 CDMX everything stopped during F5 — no traceback, no OOM, the
   log silent until the pod restarted at 10:14; cause not determined (a provider stop or the volume freezing). The
   first resume then hung in `intake.run`: its main thread in the kernel's `request_wait_answer` (a FUSE request never
