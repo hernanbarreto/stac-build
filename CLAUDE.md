@@ -1526,8 +1526,11 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     TOUCHED (no import, no screen, no vite plugin for its run-time assets: Build/Cesium/{Workers, Assets,
     ThirdParty, Widgets}, 342 files, ~7 MB). ITS OFFLINE WORLD MAP IS COARSE: Natural Earth II, 43 tiles,
     levels 0–2 (~20 km a pixel) — a globe seen from space; each work seen from near needs open imagery (and
-    terrain) of its zone stored on the pod: THE IMPLEMENTATION IS DEFINED WITH HIM NEXT ("luego definimos cómo
-    implementarlo").
+    terrain) of its zone stored on the pod: THE IMPLEMENTATION IS DEFINED WITH HIM ("luego definimos cómo
+    implementarlo") — AND NOT YET (USER 2026-11-20, later: "Lo de cesium todavía no lo defino, déjame pensarlo
+    bien"): installed and left alone; not to be raised again until he does. Asked of him, unanswered: where each
+    work is, which session goes on the globe first, a place by hand or from points of known coordinates. The
+    kit after the install: capture run, drift.py — THE KIT IS THE POD (a598422).
   · HIS TO DECIDE: where a work's place comes from; the base map (CesiumJS itself is Apache-2.0 and self-hosted;
     Cesium ion's terrain / imagery is an outside service with an account — against "no paid external APIs,
     everything local": an open map online without an account, or the five zones' tiles served by us); ONE
