@@ -1156,6 +1156,7 @@
   min-height: 0;
   background: var(--surface-0);
   overflow: hidden;
+  container-type: size;          /* the keyframe is sized against THIS box (below) */
 }
 
 .stac-seg__canvas--loading {
@@ -1191,6 +1192,11 @@
   display: block;
   max-width: 100%;
   max-height: calc(90vh - var(--legend-h) - var(--sp-10));
+  /* THE WHOLE KEYFRAME (USER 2026-11-20: "muchas cosas … quedan ocultas segun la resolucion"): the share of the
+     window above ignored the bars and the thumbnails' strip — on a 1366 × 768 screen the image's bottom was under
+     them. It now fits the box it is drawn in. */
+  max-width: 100cqw;
+  max-height: 100cqh;
   user-select: none;
   pointer-events: none;
 }
@@ -1214,6 +1220,7 @@
 
 .stac-seg__footer {
   display: flex;
+  flex-wrap: wrap;               /* its field and five buttons go to a second line; none is cut (Propagate was) */
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-4);
@@ -1287,7 +1294,8 @@
   z-index: 5;
   width: 300px;
   max-width: calc(100% - 2 * var(--sp-4));
-  max-height: calc(100% - 2 * var(--sp-4) - var(--toolbar-float-h));
+  /* between the toolbar's row above and its own place above the bottom chips: it scrolls, it covers neither */
+  max-height: calc(100% - 2 * var(--sp-4) - 2 * var(--toolbar-float-h) - var(--hud-inset) - var(--sp-2));
   overflow-y: auto;
   box-sizing: border-box;
   display: flex;

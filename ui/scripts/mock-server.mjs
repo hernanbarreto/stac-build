@@ -44,9 +44,9 @@ const SCANS = {
   'patio-taller': [],
 }
 const INSTANCES = [
-  { id: 1, instance_id: 1, global_id: 'wall_1', label: 'wall', color: '#1285ed', total_points: 2_140_000, excluded: false, obb: { center: [0, 1.5, -3], half_extents: [4, 1.5, 0.15], rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] } },
-  { id: 2, instance_id: 2, global_id: 'column_2', label: 'column', color: '#15afa4', total_points: 380_000, excluded: false, obb: { center: [2, 1.5, 0], half_extents: [0.3, 1.5, 0.3], rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] } },
-  { id: 3, instance_id: 3, global_id: 'floor_3', label: 'floor', color: '#a08b67', total_points: 5_600_000, excluded: false, obb: { center: [0, 0, 0], half_extents: [4, 0.05, 3], rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] } },
+  { id: 1, instance_id: 1, global_id: 'equipment_rack_432', label: 'equipment_rack', color: '#1285ed', total_points: 2_140_000, excluded: false, obb: { center: [0, 1.5, -3], half_extents: [4, 1.5, 0.15], rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] } },
+  { id: 2, instance_id: 2, global_id: 'large_white_object_701', label: 'large_white_object', color: '#15afa4', total_points: 380_000, excluded: false, obb: { center: [2, 1.5, 0], half_extents: [0.3, 1.5, 0.3], rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] } },
+  { id: 3, instance_id: 3, global_id: 'glass_enclosure_12', label: 'glass_enclosure', color: '#a08b67', total_points: 5_600_000, excluded: false, obb: { center: [0, 0, 0], half_extents: [4, 0.05, 3], rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] } },
 ]
 const PIPELINE = { session_id: 'tunel-norte', status: 'running', current_stage_idx: 1, stages: [
   { id: 'recon', label: 'Reconstrucción', icon: '', enabled: true, status: 'done', pct: 100, message: 'nube métrica lista', elapsed: 4120 },
@@ -205,6 +205,13 @@ const server = http.createServer(async (req, res) => {
   if (p.startsWith('/api/sessions/') && p.endsWith('/keyframes')) return json(res, { keyframes: [], total: 0 })
   if (p.startsWith('/api/bim/auto_match/')) return json(res, { matches: COMPARE.results.map(r => ({ segment_label: r.label, element_key: r.element_key, ifc_type: r.ifc_type })) })
   if (p === '/api/bim/compare') return json(res, COMPARE)
+  // common points (2026-11-18): three points of the project, marked on the scan on screen and on the other one
+  if (/^\/api\/project\/[^/]+\/common_points\/solve/.test(p)) return json(res, { scan: '2026-09-02/default', reference: '2026-09-10/default', scale: 1.01834, scale_source: 'points', yaw_deg: 0.42, translation: [0.012, -0.004, 0.031], rms_m: 0.0041, max_m: 0.0068, baseline_m: 7.42, pairs: 3, points: [{ id: 'cp1', name: 'esquina del rack 12', residual_m: 0.0032 }, { id: 'cp2', name: 'zócalo de la puerta norte', residual_m: 0.0068 }, { id: 'cp3', name: 'P3', residual_m: 0.0021 }], stale: [] })
+  if (/^\/api\/project\/[^/]+\/common_points/.test(p)) return json(res, { points: [
+    { id: 'cp1', name: 'esquina del rack 12', marks: { '2026-09-02/default': { position: [1, 0.4, -2], geometry_epoch: 0, stale: false }, '2026-09-10/default': { position: [1.02, 0.4, -2.01], geometry_epoch: 0, stale: false } } },
+    { id: 'cp2', name: 'zócalo de la puerta norte', marks: { '2026-09-02/default': { position: [-2, 0, 1.5], geometry_epoch: 0, stale: false }, '2026-09-10/default': { position: [-2.03, 0, 1.52], geometry_epoch: 0, stale: false } } },
+    { id: 'cp3', name: 'P3', marks: { '2026-09-10/default': { position: [0.5, 1.2, 0.1], geometry_epoch: 0, stale: true } } },
+  ] })
   if (p.startsWith('/api/project/')) return json(res, { ok: true, scans: {} })
   if (p.startsWith('/api/spatial_qa')) return json(res, { answer: 'La holgura mínima entre la columna y el muro es de 1.72 m (medida con get_clearance).', tool_trace: [{ tool: 'get_clearance', arguments: {}, result: { clearance_m: 1.72 } }] })
   if (p === '/api/ar/sessions') return json(res, { sessions: [] })

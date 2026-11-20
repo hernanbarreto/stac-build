@@ -115,6 +115,42 @@ const STATES = {
   // the menus of the header: the longest one, and the one at the right edge
   toolsmenu: { scenario: 'cloud', run: async page => { await loadSession(page); await clickIf(page.getByRole('button', { name: T('menu.tools'), exact: true }).first()); await page.waitForTimeout(300) }, keepPointer: true },
   usermenu: { scenario: 'cloud', run: async page => { await loadSession(page); await clickIf(page.getByRole('button', { name: /hbarreto/ }).first()); await page.waitForTimeout(300) }, keepPointer: true },
+  // the deviation sheet as the page draws it — its legend, the comparison's buttons and chip in the toolbar. The
+  // mock has no BIM model to compare, so the main module is served with those five expressions forced (the
+  // source under test is not edited)
+  deviation: { scenario: 'cloud', patch: [
+    ['colorMode: sabanaVisible ? "deviation" : "rgb"', 'colorMode: "deviation"'],
+    [/deviationRange: sabanaVisible && sabanaMetrics \? \{[^}]*\} : null/, 'deviationRange: { maxMm: 100, toleranceMm: 50 }'],
+    ['available: bimModels.length > 0 && segments.length > 0', 'available: true'],
+    ['hasResult: hasSabanaResult', 'hasResult: true'],
+    ['showing: sabanaVisible,', 'showing: true,'],
+    ['chip: sabanaMetrics ?', 'chip: !sabanaMetrics ? "1209 de 1214 elementos" : false ?'],
+  ], run: async page => { await loadSession(page) } },
+  // windows of the tools: opened from the menus, as a user does (the mock has no data for them: their frame, their
+  // footers and what they cover are what is looked at)
+  commonpoints: { scenario: 'cloud', run: async page => {
+    await loadSession(page)
+    await clickIf(page.getByRole('button', { name: T('menu.tools'), exact: true }).first())
+    await clickIf(page.getByRole('menuitemcheckbox', { name: new RegExp(T('commonPoints.menu')) }).first())
+    await page.waitForTimeout(700)
+  } },
+  reference: { scenario: 'cloud', run: async page => {
+    await loadSession(page)
+    await clickIf(page.getByRole('button', { name: T('menu.tools'), exact: true }).first())
+    await clickIf(page.getByRole('menuitemcheckbox', { name: new RegExp(T('toolbar.referenceDistance')) }).first())
+    await page.waitForTimeout(900)
+  } },
+  physics: { scenario: 'cloud', layout: { dockOpen: true, dockTab: 'jobs' }, run: async page => {
+    await loadSession(page)
+    await clickIf(page.getByRole('button', { name: T('menu.tools'), exact: true }).first())
+    await clickIf(page.getByRole('menuitemcheckbox', { name: new RegExp(T('physics.title')) }).first())
+    await page.waitForTimeout(700)
+  } },
+  segmanager: { scenario: 'cloud', run: async page => {
+    await loadSession(page)
+    await clickIf(byLabel(page, 'sessions.segmentManual'))
+    await page.waitForTimeout(1200)
+  } },
   nosession: { scenario: 'sessions', run: async () => {} },
   settings: { scenario: 'sessions', run: async page => { await clickIf(byLabel(page, 'menu.settings')); await page.waitForTimeout(400) } },
   login: { scenario: 'sessions', loggedOut: true, run: async () => {} },
@@ -204,6 +240,18 @@ for (const sn of sizeNames) {
     page.on('pageerror', e => errors.push(String(e).slice(0, 160)))
     try {
       await setScenario(state.scenario)
+      if (state.patch) {
+        await page.route('**/src/App.tsx*', async route => {
+          const res = await route.fetch()
+          let body = await res.text()
+          for (const [from, to] of state.patch) {
+            const before = body
+            body = body.replace(from, to)
+            if (body === before) errors.push(`patch not applied: ${String(from).slice(0, 50)}`)
+          }
+          await route.fulfill({ response: res, body })
+        })
+      }
       if (state.loggedOut) {
         await page.addInitScript(lang => { try { localStorage.clear(); localStorage.setItem('stac.lang', lang) } catch { /* */ } }, LANG)
         await page.goto(`${PAGE}/`, { waitUntil: 'networkidle', timeout: 60000 })

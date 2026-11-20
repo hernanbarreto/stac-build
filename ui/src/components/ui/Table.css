@@ -103,6 +103,23 @@
   text-align: right;
 }
 
+/* A COLUMN OF ROW CONTROLS IS AS WIDE AS ITS CONTROLS (USER 2026-11-20: "muchas cosas … quedan ocultas"). Every
+   cell is `max-width: 0` so that long text gives way; a column of buttons under an empty header then got only its
+   padding — of four buttons one showed, Delete. */
+.stac-table__th--fit {
+  width: 1%;
+}
+
+.stac-table__td--fit {
+  width: 1%;
+  max-width: none;
+  overflow: visible;
+}
+
+.stac-table__td--fit .stac-row {
+  gap: var(--sp-half);          /* a row's controls sit close together, as a tree row's do */
+}
+
 .stac-table__td--center {
   text-align: center;
 }

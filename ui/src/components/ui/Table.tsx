@@ -14,8 +14,14 @@ export interface Column<T> {
   align?: 'left' | 'right' | 'center'
   mono?: boolean
   width?: string
+  /** the column is as wide as its cells' content and never clips it — a column of row CONTROLS. A column with no
+   *  header text is one by default (measured 2026-11-20: under an empty header it got 32 px of a 608-px table and
+   *  three of its four buttons were invisible — only Delete showed). */
+  fit?: boolean
   sortValue?: (row: T) => number | string | null | undefined
 }
+
+const isFit = <T,>(c: Column<T>) => c.fit ?? (c.header === '' || c.header == null)
 
 interface TableProps<T> {
   columns: Column<T>[]
@@ -74,7 +80,7 @@ export function Table<T>({ columns, rows, rowKey, selectedKey, onRowClick, empty
         <thead className="stac-table__head">
           <tr>
             {columns.map(c => (
-              <th key={c.id} scope="col" className={`stac-table__th stac-table__th--${c.align ?? 'left'} ${c.sortValue ? 'stac-table__th--sortable' : ''}`.trim()}
+              <th key={c.id} scope="col" className={`stac-table__th stac-table__th--${c.align ?? 'left'} ${c.sortValue ? 'stac-table__th--sortable' : ''} ${isFit(c) ? 'stac-table__th--fit' : ''}`.trim()}
                 style={{ '--col-w': c.width ?? 'auto' } as React.CSSProperties}
                 aria-sort={sort?.id === c.id ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}>
                 {c.sortValue ? (
@@ -98,7 +104,7 @@ export function Table<T>({ columns, rows, rowKey, selectedKey, onRowClick, empty
                 tabIndex={onRowClick ? 0 : undefined}
                 onKeyDown={onRowClick ? e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(row) } } : undefined}>
                 {columns.map(c => (
-                  <td key={c.id} className={`stac-table__td stac-table__td--${c.align ?? 'left'} ${c.mono ? 'stac-mono' : ''}`.trim()}>{c.cell(row)}</td>
+                  <td key={c.id} className={`stac-table__td stac-table__td--${c.align ?? 'left'} ${c.mono ? 'stac-mono' : ''} ${isFit(c) ? 'stac-table__td--fit' : ''}`.trim()}>{c.cell(row)}</td>
                 ))}
               </tr>
             )

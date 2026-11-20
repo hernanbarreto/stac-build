@@ -455,7 +455,8 @@
   flex-direction: column;
   border-right: var(--bw) solid var(--border-1);
   background: var(--surface-1);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;              /* a window too short for its head, list and form: the column scrolls */
 }
 
 .stac-ref__side-head {
@@ -473,7 +474,7 @@
 
 .stac-ref__list {
   flex: 1;
-  min-height: 0;
+  min-height: calc(var(--row-h) * 4);   /* the list always shows a few rows (under a tall form it was left none) */
   overflow-y: auto;
 }
 
@@ -545,7 +546,8 @@
   border-top: var(--bw) solid var(--border-1);
   overflow-y: auto;
   max-height: 60%;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-height: calc(var(--row-h) * 4);
 }
 
 .stac-ref__chips {

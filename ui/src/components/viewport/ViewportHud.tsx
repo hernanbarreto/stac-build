@@ -94,6 +94,7 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
         <ViewCube getQuaternion={getQuaternion} onOrient={onOrient} onOrbit={onOrbit} onHome={onHome} />
       </div>
 
+      <div className="stac-hud__bottom">
       <div className="stac-hud__bottomleft">
         <Tooltip label={t('view.gravity')} side="right">
           <div className="stac-hud__gravity" aria-label={t('view.gravity')} role="img">
@@ -118,6 +119,7 @@ export function ViewportHud({ onView, getQuaternion, onOrient, onOrbit, onHome, 
               categories={deviationRange ? [{ color: '--measure', label: t('deviation.tolerance'), value: fmt.mm(deviationRange.toleranceMm, 0) }] : undefined} />
         </div>
       )}
+      </div>
 
       <svg className="stac-hud__guides" aria-hidden>
         {readouts.filter(r => r.visible && r.kind !== 'ticket').map(r => <line key={r.id} x1={r.ax} y1={r.ay} x2={r.x} y2={r.y} className="stac-hud__guide" />)}

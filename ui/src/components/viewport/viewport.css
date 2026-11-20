@@ -232,14 +232,30 @@
 
 .stac-viewcube__home svg { width: 14px; height: 14px; }
 
-.stac-hud__bottomleft {
+/* THE VIEWER'S BOTTOM EDGE IS ONE LINE THAT WRAPS (USER 2026-11-20: "muchas cosas … quedan ocultas"): the chips on
+   the left, the deviation's legend on the right; when the viewer is too narrow for both, the legend goes ABOVE the
+   chips — it lay over the scale bar and the grid's text whenever the viewer was under about 890 px. */
+.stac-hud__bottom {
   position: absolute;
   left: var(--hud-inset);
+  right: var(--hud-inset);
   bottom: var(--hud-inset);
   z-index: var(--z-hud);
   display: flex;
+  flex-wrap: wrap-reverse;
   align-items: flex-end;
-  gap: var(--sp-3);
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-3);
+  pointer-events: none;
+}
+
+.stac-hud__bottomleft {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-2) var(--sp-3);
+  min-width: 0;
+  max-width: 100%;
   pointer-events: none;
 }
 
@@ -297,18 +313,19 @@
 /* the deviation's legend: a thin bar along the bottom (USER 2026-11-19: "el panel de desviación hay que ubicarlo
    mejor abajo, horizontal, y mas finito") */
 .stac-hud__legend--bar {
-  top: auto;
-  right: var(--hud-inset);
-  bottom: var(--hud-inset);
-  max-width: none;
+  position: static;
+  margin-left: auto;
+  max-width: 100%;
+  pointer-events: auto;
   --legend-w: calc(var(--sp-1) * 1.5);
   --legend-h: calc(var(--sp-8) * 5);
 }
 
 .stac-hud__legend--bar .stac-legend {
   flex-direction: row;
+  flex-wrap: wrap;               /* a viewer narrower than the bar itself: its parts wrap, none is cut */
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-1) var(--sp-3);
   padding: var(--sp-1) var(--sp-3);
   white-space: nowrap;
 }

@@ -88,7 +88,8 @@ export function CommonPointsDialog(p: Props) {
       : m.stale ? <Badge size="sm" tone="warn" title={t('commonPoints.staleHint')}>{t('commonPoints.stale')}</Badge>
         : <Badge size="sm" tone="ok">{t('commonPoints.marked')}</Badge>
     return [
-      { id: 'name', header: t('commonPoints.point'), sortValue: r => r.name, cell: r => r.name },
+      // (the point's name takes what the other columns leave: it is what tells one point from another)
+      { id: 'name', header: t('commonPoints.point'), width: '100%', sortValue: r => r.name, cell: r => <span title={r.name}>{r.name}</span> },
       { id: 'here', header: t('commonPoints.onThis'), cell: r => state(p.scanKey ? r.marks[p.scanKey] : undefined) },
       { id: 'other', header: t('commonPoints.onOther'), cell: r => state(p.other ? r.marks[p.other] : undefined) },
       { id: 'residual', header: t('commonPoints.residual'), align: 'right', mono: true, sortValue: r => residual.get(r.id) ?? null,
@@ -109,7 +110,7 @@ export function CommonPointsDialog(p: Props) {
 
   return (
     <Dialog open={p.open} title={t('commonPoints.title')} subtitle={[p.sessionId, p.scanKey].filter(Boolean).join(', ') || undefined}
-      size="lg" nonBlocking position="right" onClose={p.onClose}>
+      size="md" nonBlocking position="right" onClose={p.onClose}>
       <Stack gap={3}>
         {p.loadError && <Banner tone="err">{t('commonPoints.loadFailed', { detail: p.loadError })}</Banner>}
         {p.placing && (
