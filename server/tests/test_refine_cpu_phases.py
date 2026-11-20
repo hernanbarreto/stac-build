@@ -201,9 +201,8 @@ def test_the_torch_problem_reads_groups_made_by_refine_run_as_main(monkeypatch):
     assert all(np.array_equal(x, y) for x, y in zip(a[1:], b[1:]))
     with pytest.raises(BA.BATorchError):
         BA._problem_inputs_reference(g_main, X)
-    # a rung whose landmarks reach no observation is refused, never solved on the priors alone
-    from tests.test_ba_torch import CFG
+    # a rung whose landmarks reach no observation is refused, never solved on the graph's edges alone
+    from tests.test_ba_torch import CFG, _graph
     w2c = np.tile(np.eye(4), (len(frames), 1, 1))
     with pytest.raises(RF.RefineError):
-        BA.run_rung_torch("R0", w2c, CAM, WH, g_main, {10 ** 9: np.zeros(3)}, np.full(len(frames), 0.5), CFG,
-                          device="cpu")
+        BA.run_rung_torch("R0", w2c, CAM, WH, g_main, {10 ** 9: np.zeros(3)}, _graph(w2c), CFG, device="cpu")

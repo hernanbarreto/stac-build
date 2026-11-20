@@ -984,12 +984,35 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     state before it): across the ray better in every zone (neighbours 1.19 → 0.46 cm, other passes 1.68 → 1.12 cm);
     along the ray: neighbours 1.10 → 1.45 cm, other passes 4.98 → 4.50 cm; by zone: 4 better, 1 WORSE (cube 0:
     neighbours along the ray 0.87 → 1.44 cm) — today's F5 would be solved again there with cube 0 held.
-  · TOLD TO HIM, HIS OK PENDING — the measure's own numbers in config.yaml (`reconstruction.precision.coherence`),
-    the assistant's: every 4th pixel, shifts searched up to 8 px, 1 px of smoothing, a pair measured from 500 common
-    pixels, same surface = 3 robust sigmas, 2000 resamples; and the definition "a zone is WORSE when ANY of its four
-    series (neighbours / other passes x along / across) is".
+  · HIS OK (USER 2026-11-20: "ok con tus valores elegidos, vamos a probar con eso a ver como responde") to the
+    measure's own numbers in config.yaml (`reconstruction.precision.coherence`), the assistant's: every 4th pixel,
+    shifts searched up to 8 px, 1 px of smoothing, a pair measured from 500 common pixels, same surface = 3 robust
+    sigmas, 2000 resamples; and to the definition "a zone is WORSE when ANY of its four series (neighbours / other
+    passes x along / across) is". How they respond is read on the final run of pccr.
   · NOT DONE IN IT: nothing ran on the card (the tests and the reading are on the CPU); F5 end to end with the
     decision has no test of its own (its pieces have: the measure 7, the decision 7, the hold 1).
+  · line 4 (conclusion 9: F5 carries the cube graph) DONE, the commit after 1852390 — his word: "ok" to "¿arranco la
+    4 mientras esperamos los tests de la 3?". `precision/graph_prior.py`: `graph_edges` reads what the cube run left
+    (`maplong_run/chunk_sim3.json`: the keyframes each cube holds; `chunk_graph.json`: seams, closures, solved poses)
+    → a STAR per cube (each keyframe tied to the cube's middle keyframe; the cubes overlap, so the seams are carried by
+    the stars; sigma = the median residual of the cube's own seams) + ONE EDGE PER CLOSURE between the two keyframes
+    of its revisit (sigma = hypot(its fit's residual, what it disagrees by with the solved graph at its surfaces —
+    the fork's `edge_surface_error_m`): no threshold, a bridge the graph could not honour ties nothing). Translation
+    in metres (sigma), rotation in radians (sigma / lever): the graph's own weights. The reference of every edge = the
+    relative pose of the state F5 starts from. In the solver (`ba_torch._Graph`): 6 x 12 blocks summed into the dense
+    camera system by a plan made once (sorted targets, run sums — no atomics); ONE keyframe held for the gauge.
+    DELETED: the independent position prior per keyframe (`prior_sigmas`), F5's reading of F2's sigma
+    (`_gauge_sigma`: F5 no longer reads gauge.json), and THE CERES PATH of F5 with its keys `refine.solver` /
+    `refine.ceres_threads` (it only knew position priors; told to him) — F5's solver is `precision/ba_torch.py` alone.
+    MEASURED on the real graphs: bufferStop_prueba 329 edges (297 within cubes at ~3 cm, 32 closures at 10 cm –
+    1.4 m); pccr2408_prueba 12,445 edges (10,719 within cubes, median 2.0 cm; 1,726 closures: 140 under 5 cm, 594 at
+    5 – 20 cm, 320 at 0.2 – 1 m, 672 over 1 m = no hold). Tests (CPU): the edges and their derivatives 5, the solver
+    22 (its dense reference of the damped system now carries the edges' rows), F5's own 19 + the 2 stale ones.
+    ⚠ A SESSION OF ONE CUBE has no seam, so nothing weighs its edges: `graph_edges` FAILS naming it (none of the
+    project's sessions is one cube) — told to him, his to decide what such a session does.
+    ALSO in that commit: F5's step in the chain reads the graph files and, for the decision, the records, the
+    frames and intake/cubes.json, and its stamp covers `coherence`, `bend`, `tracks` (line 3 had left that out).
+    A READ-ONLY TRIAL of F5's first rung with the graph on bufferStop_prueba (CPU) was running at the commit.
   WHAT THIS SUPERSEDES BELOW: the F6 test with `bend.scope: session` on the copy of pccr 2026-08-24 was stopped on
   his order (that copy still shows the morning's cloud, a factor per keyframe; its chain can no longer resume: the
   steps' stamps changed) and "config.yaml keeps `scope: keyframe` until his eye" — the key no longer exists.

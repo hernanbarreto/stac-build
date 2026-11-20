@@ -1,23 +1,21 @@
 """F5's bundle adjustment on the GPU (USER 2026-11-01: "todo debe correr en gpu, en modo determinista, sin
-comprometer la calidad" — Ceres ran ONE thread for bit-identity, ~60 min per pccr run on a rented card).
+comprometer la calidad").
 
-The same problem ``precision.refine.run_rung`` hands Ceres — the reprojection residuals of the fit tracks
-under the OPENCV camera (fx fy cx cy k1 k2 p1 p2) with a Huber loss at ``huber_px``, the poses, the
-landmarks and the camera freedom of the rung (R0 none; R1 focal + principal point; R2 + distortion), plus EITHER the absolute position priors of the gauge (σ per keyframe) OR the relative
-solved by Levenberg-Marquardt
-with the Schur complement over the landmarks:
+The problem ``precision.refine.run_rung`` hands it — the reprojection residuals of the fit tracks under the OPENCV
+camera (fx fy cx cy k1 k2 p1 p2) with a Huber loss at ``huber_px``, the poses, the landmarks and the camera freedom
+of the rung (R0 none; R1 focal + principal point; R2 + distortion), and THE CUBE GRAPH'S EDGES between keyframes
+(:class:`_Graph`, precision/graph_prior.py — USER 2026-11-20: no camera has a prior of its own) — solved by
+Levenberg-Marquardt with the Schur complement over the landmarks:
 
 * residuals and analytic Jacobians batched over every observation (float64);
 * the landmark blocks H_pp (3×3) and the reduced camera system S = H_cc − H_cp H_pp⁻¹ H_pc accumulated
   with SORTED segment sums (cumsum differences) — never an atomic add, so two runs are bit-identical on
   the same device; S is dense (≤ 6·N + 8·blocks unknowns) and solved by Cholesky;
 * Ceres' stopping rules (function 1e-6, parameter 1e-8, gradient 1e-8, the iteration cap) and cost
-  definition (½ Σ ρ(‖r‖²) + ½ Σ ‖prior residual‖²), so the rungs' reports compare like with like.
+  definition (½ Σ ρ(‖r‖²) + ½ Σ ‖edge residual‖²), so the rungs' reports compare like with like.
 
-What differs from Ceres and is DECLARED: the robust step is the IRLS weighting ρ'(s) (Ceres also applies
-its second-order corrector); both converge to stationary points of the same robust cost, the path
-differs, so the two solvers agree to the tolerance, not to the bit. The acceptance bar of this solver on a
-real session is the held-out track residual against Ceres' (beyond its own noise), never a declaration.
+The robust step is the IRLS weighting ρ'(s) (Ceres also applies its second-order corrector: the same stationary
+points of the same robust cost by another path).
 """
 from __future__ import annotations
 
@@ -209,15 +207,85 @@ def project_jac(Xc, cam, cam_free: Sequence[int]):
     return torch.stack([u, v], -1), J_X, J_cam, front
 
 
+# ── the cube graph's edges ──────────────────────────────────────────
+
+class _Graph:
+    """The cube graph's edges inside the camera system (precision/graph_prior.py, USER 2026-11-20: F5 carries the cube
+    graph): relative-pose residuals between keyframes, against the relative poses of the state F5 starts from. Their
+    6 x 12 blocks are summed into the dense camera Hessian and gradient through a plan made ONCE — the targets sorted,
+    then sums of consecutive runs: the solver's own deterministic sums, no atomics."""
+
+    def __init__(self, torch, device, N: int, n_c: int, graph: dict):
+        from precision import graph_prior as GP
+        self.GP, self.torch = GP, torch
+        d = {"dtype": torch.float64, "device": device}
+        k = np.asarray(graph["k"], np.int64).ravel()
+        l = np.asarray(graph["l"], np.int64).ravel()
+        if len(k) == 0 or len(k) != len(l):
+            raise BATorchError("the cube graph came without edges")
+        if int(min(k.min(), l.min())) < 0 or int(max(k.max(), l.max())) >= N or bool(np.any(k == l)):
+            raise BATorchError(f"an edge of the cube graph names a keyframe outside 0 … {N - 1}, or ties one to itself")
+        sig = np.asarray(graph["sigma_m"], np.float64).ravel()
+        lev = np.asarray(graph["lever_m"], np.float64).ravel()
+        ref = np.asarray(graph["ref_w2c"], np.float64)
+        if ref.shape != (N, 4, 4):
+            raise BATorchError(f"the edges' reference poses are {ref.shape}, the problem has {N} cameras")
+        self.E = int(len(k))
+        self.k = torch.as_tensor(k, device=device)
+        self.l = torch.as_tensor(l, device=device)
+        self.sig_t = torch.as_tensor(sig, **d)                            # metres
+        self.sig_r = torch.as_tensor(sig / lev, **d)                      # radians: the same metres at the edge's arm
+        self.R0, self.t0 = GP.relative(torch.as_tensor(ref[:, :3, :3], **d), torch.as_tensor(ref[:, :3, 3], **d),
+                                       self.k, self.l)
+        six = torch.arange(6, device=device)
+        self.cols = torch.cat([6 * self.k[:, None] + six[None, :], 6 * self.l[:, None] + six[None, :]], 1)   # (E,12)
+        tgt = (self.cols[:, :, None] * int(n_c) + self.cols[:, None, :]).reshape(-1)
+        self.h_order = torch.argsort(tgt, stable=True)
+        ts = tgt[self.h_order]
+        self.h_ends = segment_ends(ts)
+        self.h_tgt = ts[self.h_ends]
+        gt = self.cols.reshape(-1)
+        self.g_order = torch.argsort(gt, stable=True)
+        gs = gt[self.g_order]
+        self.g_ends = segment_ends(gs)
+        self.g_tgt = gs[self.g_ends]
+
+    def terms(self, R, t, with_jac: bool = True):
+        """(e (E, 6), Jk, Jl (E, 6, 6)) at (R, t) — see graph_prior.edge_terms."""
+        return self.GP.edge_terms(R, t, self.k, self.l, self.R0, self.t0, self.sig_t, self.sig_r, with_jac=with_jac)
+
+    def cost(self, R, t) -> float:
+        e, _jk, _jl = self.terms(R, t, with_jac=False)
+        return 0.5 * float((e * e).sum())
+
+    def add(self, H, g, terms) -> float:
+        """H += JᵀJ and g += Jᵀe of the edges, IN PLACE; returns their cost ½|e|²."""
+        torch = self.torch
+        e, Jk, Jl = terms
+        J = torch.cat([Jk, Jl], -1)                                       # (E,6,12)
+        blocks = (J.transpose(1, 2) @ J).reshape(-1)
+        H.view(-1)[self.h_tgt] += run_sums(blocks[self.h_order][:, None], self.h_ends)[:, 0]
+        gb = torch.einsum("eai,ea->ei", J, e).reshape(-1)
+        g[self.g_tgt] += run_sums(gb[self.g_order][:, None], self.g_ends)[:, 0]
+        return 0.5 * float((e * e).sum())
+
+    def apply(self, terms, dc):
+        """J·Δc of the edges, (E, 6)."""
+        torch = self.torch
+        _e, Jk, Jl = terms
+        d = dc[self.cols]                                                 # (E,12)
+        return torch.einsum("eai,ei->ea", Jk, d[:, :6]) + torch.einsum("eai,ei->ea", Jl, d[:, 6:])
+
+
 # ── the problem ────────────────────────────────────────────────────────────────────────────
 
 class _Problem:
     def __init__(self, w2c0: np.ndarray, params_by_block0: List[List[float]], block_of: np.ndarray,
                  cam_idx: np.ndarray, pt_idx: np.ndarray, uv: np.ndarray, X0: np.ndarray, huber_px: float,
-                 cam_free: Sequence[int], *, device, sigmas: Optional[np.ndarray] = None,
-                 prior_centres: Optional[np.ndarray] = None, torch_ba=None, gauge: bool = True,
-                 lazy_cols: bool = False):
-        """``gauge=False``: a CHUNK of a :class:`_ChunkedProblem` (its priors live in the whole problem, not here);
+                 cam_free: Sequence[int], *, device, graph: Optional[dict] = None, torch_ba=None,
+                 gauge: bool = True, lazy_cols: bool = False):
+        """``graph``: the cube graph's edges (k, l, sigma_m, lever_m, ref_w2c — :class:`_Graph`).
+        ``gauge=False``: a CHUNK of a :class:`_ChunkedProblem` (the edges live in the whole problem, not here);
         ``lazy_cols``: the (M, 6 + nf) unknown columns of the observations are made when a step needs them, not
         kept (the chunks' memory)."""
         torch = _torch()
@@ -244,15 +312,14 @@ class _Problem:
         if int((counts == 0).sum()):
             raise BATorchError("a landmark without observations entered the problem")
         self.seg_len = counts
-        # priors
-        self.sigmas = torch.as_tensor(np.asarray(sigmas, np.float64), **d) if sigmas is not None else None
-        self.prior_C = torch.as_tensor(np.asarray(prior_centres, np.float64), **d) if prior_centres is not None else None
         # unknown layout: poses first (6 each), then the free camera params per block (nf each)
         self.n_pose = 6 * self.N
         self.n_c = self.n_pose + self.nf * self.B
         self.free = torch.ones(self.n_c, dtype=torch.bool, device=device)
-        if gauge and self.sigmas is None and self.nf == 0:
-            raise BATorchError("a gauge is needed: priors or free camera parameters")
+        # what holds the cameras where the images say nothing: the cube graph's edges (no camera has a prior of its own)
+        self.graph = _Graph(torch, device, self.N, self.n_c, graph) if graph is not None else None
+        if gauge and self.graph is None and self.nf == 0:
+            raise BATorchError("a gauge is needed: the cube graph's edges or free camera parameters")
         # THE INDEX PLANS — every permutation and segment boundary the step needs, computed ONCE: the
         # observation → landmark runs (already sorted by landmark), the observation → camera and → block
         # orders, the unknown columns of every observation, and (lazily, it is large) the landmark pair
@@ -351,36 +418,13 @@ class _Problem:
         rho = torch.where(s <= a2, s, 2.0 * self.huber * torch.sqrt(s.clamp_min(TINY)) - a2)
         return 0.5 * float(torch.where(front, rho, torch.zeros_like(rho)).sum())
 
-    def prior_terms(self, R, t):
-        """(residual vector (K,), Jacobian (K, n_c)) of the priors at (R, t) — dense, K small."""
-        torch = self.torch
-        rows, jacs = [], []
-        if self.sigmas is not None:
-            C = -torch.einsum("nji,nj->ni", R, t)
-            e = (C - self.prior_C) / self.sigmas[:, None]                               # (N,3)
-            J = torch.zeros(self.N, 3, self.n_c, dtype=R.dtype, device=self.device)
-            RT = R.transpose(1, 2)
-            dC_dw = -RT @ skew(t)                                                        # (N,3,3)
-            dC_dt = -RT
-            ar = torch.arange(self.N, device=self.device)
-            for a in range(3):
-                for b in range(3):
-                    J[ar, a, 6 * ar + b] = dC_dw[:, a, b] / self.sigmas
-                    J[ar, a, 6 * ar + 3 + b] = dC_dt[:, a, b] / self.sigmas
-            rows.append(e.reshape(-1)); jacs.append(J.reshape(-1, self.n_c))
-        if not rows:
-            return (torch.zeros(0, dtype=R.dtype, device=self.device),
-                    torch.zeros(0, self.n_c, dtype=R.dtype, device=self.device))
-        return torch.cat(rows), torch.cat(jacs)
-
     def total_cost(self, R=None, t=None, cam=None, X=None) -> float:
         R = self.R if R is None else R; t = self.t if t is None else t
         cam = self.cam if cam is None else cam; X = self.X if X is None else X
         r, front = self.residuals(R, t, cam, X, with_jac=False)
         s = (r * r).sum(-1)
         c = self.robust_cost(s, front)
-        e, _ = self.prior_terms(R, t)
-        return c + 0.5 * float((e * e).sum())
+        return c + (self.graph.cost(R, t) if self.graph is not None else 0.0)
 
     # ── one LM step ──
     def linearize(self):
@@ -396,14 +440,12 @@ class _Problem:
         H = torch.zeros(self.n_c, self.n_c, dtype=torch.float64, device=self.device)
         g = torch.zeros(self.n_c, dtype=torch.float64, device=self.device)
         self._accumulate_camera(H, g, J_c, r_w, nco)
-        e_p, J_p = self.prior_terms(self.R, self.t)
-        if e_p.shape[0]:
-            H = H + J_p.T @ J_p
-            g = g + J_p.T @ e_p
-            cost = cost + 0.5 * float((e_p * e_p).sum())
+        gt = self.graph.terms(self.R, self.t) if self.graph is not None else None
+        if gt is not None:
+            cost = cost + self.graph.add(H, g, gt)
         W = J_c.transpose(1, 2) @ J_pt                                      # (M,nco,3)
         self._lin = {"r_w": r_w, "J_c": J_c, "J_pt": J_pt, "Hpp": Hpp, "gp": gp, "H": H, "g": g,
-                     "e_p": e_p, "J_p": J_p, "W": W, "cost": cost}
+                     "graph": gt, "W": W, "cost": cost}
         return self._lin
 
     def _weighted(self):
@@ -426,8 +468,8 @@ class _Problem:
     def step(self, lam: float, pair_chunk: int = 3_000_000):
         torch = self.torch
         L = self._lin if getattr(self, "_lin", None) is not None else self.linearize()
-        r_w, J_c, J_pt, Hpp, gp, H, g, e_p, J_p, W, cost = (L[k] for k in (
-            "r_w", "J_c", "J_pt", "Hpp", "gp", "H", "g", "e_p", "J_p", "W", "cost"))
+        r_w, J_c, J_pt, Hpp, gp, H, g, gt, W, cost = (L[k] for k in (
+            "r_w", "J_c", "J_pt", "Hpp", "gp", "H", "g", "graph", "W", "cost"))
         nco = 6 + self.nf
         Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
         Hpp_l = Hpp + lam * torch.diag_embed(Dp)
@@ -452,9 +494,9 @@ class _Problem:
         JD = (torch.einsum("mai,mi->ma", J_c, dc_obs)
               + torch.einsum("mai,mi->ma", J_pt, dp[self.pt_idx]))                 # (M,2) weighted J·Δ
         pred = -float((JD * (r_w + 0.5 * JD)).sum())
-        if e_p.shape[0]:
-            Jp_d = J_p @ dc
-            pred = pred - float((Jp_d * (e_p + 0.5 * Jp_d)).sum())
+        if gt is not None:
+            Jg_d = self.graph.apply(gt, dc)
+            pred = pred - float((Jg_d * (gt[0] + 0.5 * Jg_d)).sum())
         return (dc, dp), cost, pred, ""
 
     def _camera_solve(self, H, S, g_red, lam):
@@ -625,7 +667,6 @@ class _ChunkedProblem:
 
     huber_weights = _Problem.huber_weights
     robust_cost = _Problem.robust_cost
-    prior_terms = _Problem.prior_terms
     apply = _Problem.apply
     norm_x = _Problem.norm_x
     _camera_solve = _Problem._camera_solve
@@ -664,8 +705,8 @@ class _ChunkedProblem:
 
     def __init__(self, w2c0: np.ndarray, params_by_block0: List[List[float]], block_of: np.ndarray,
                  cam_idx: np.ndarray, pt_idx: np.ndarray, uv: np.ndarray, X0: np.ndarray, huber_px: float,
-                 cam_free: Sequence[int], *, device, sigmas: Optional[np.ndarray] = None,
-                 prior_centres: Optional[np.ndarray] = None, torch_ba=None, chunk_obs: Optional[int] = None):
+                 cam_free: Sequence[int], *, device, graph: Optional[dict] = None, torch_ba=None,
+                 chunk_obs: Optional[int] = None, gauge: bool = True):
         torch = _torch()
         self.tb = torch_ba
         d = {"dtype": torch.float64, "device": device}
@@ -692,13 +733,12 @@ class _ChunkedProblem:
         self.huber = float(huber_px)
         self.cam_free = tuple(int(i) for i in cam_free)
         self.nf = len(self.cam_free)
-        self.sigmas = torch.as_tensor(np.asarray(sigmas, np.float64), **d) if sigmas is not None else None
-        self.prior_C = torch.as_tensor(np.asarray(prior_centres, np.float64), **d) if prior_centres is not None else None
         self.n_pose = 6 * self.N
         self.n_c = self.n_pose + self.nf * self.B
         self.free = torch.ones(self.n_c, dtype=torch.bool, device=device)
-        if self.sigmas is None and self.nf == 0:
-            raise BATorchError("a gauge is needed: priors or free camera parameters")
+        self.graph = _Graph(torch, device, self.N, self.n_c, graph) if graph is not None else None
+        if gauge and self.graph is None and self.nf == 0:
+            raise BATorchError("a gauge is needed: the cube graph's edges or free camera parameters")
         X0 = np.asarray(X0, np.float64)
         self.chunks = []
         for p0, p1, o0, o1 in landmark_chunks(counts, int(CHUNK_OBS if chunk_obs is None else chunk_obs)):
@@ -738,8 +778,7 @@ class _ChunkedProblem:
             r, front = sub.residuals(R, t, cam, X[p0:p1], with_jac=False)
             c += self.robust_cost((r * r).sum(-1), front)
             del r, front
-        e, _ = self.prior_terms(R, t)
-        return c + 0.5 * float((e * e).sum())
+        return c + (self.graph.cost(R, t) if self.graph is not None else 0.0)
 
     def linearize(self):
         torch = self.torch
@@ -763,18 +802,16 @@ class _ChunkedProblem:
                 self._jac[ci] = (r_w, J_c, J_pt)                           # (the step's two passes read them)
                 self._jac_bytes += n
             del r_w, J_c, J_pt
-        e_p, J_p = self.prior_terms(self.R, self.t)
-        if e_p.shape[0]:
-            H = H + J_p.T @ J_p
-            g = g + J_p.T @ e_p
-            cost = cost + 0.5 * float((e_p * e_p).sum())
-        self._lin = {"Hpp": Hpp, "gp": gp, "H": H, "g": g, "e_p": e_p, "J_p": J_p, "cost": cost}
+        gt = self.graph.terms(self.R, self.t) if self.graph is not None else None
+        if gt is not None:
+            cost = cost + self.graph.add(H, g, gt)
+        self._lin = {"Hpp": Hpp, "gp": gp, "H": H, "g": g, "graph": gt, "cost": cost}
         return self._lin
 
     def step(self, lam: float, pair_chunk: int = 3_000_000):
         torch = self.torch
         L = self._lin if getattr(self, "_lin", None) is not None else self.linearize()
-        Hpp, gp, H, g, e_p, J_p, cost = (L[k] for k in ("Hpp", "gp", "H", "g", "e_p", "J_p", "cost"))
+        Hpp, gp, H, g, gt, cost = (L[k] for k in ("Hpp", "gp", "H", "g", "graph", "cost"))
         nco = 6 + self.nf
         Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
         Hpp_inv = torch.linalg.inv(Hpp + lam * torch.diag_embed(Dp))
@@ -813,9 +850,9 @@ class _ChunkedProblem:
                   + torch.einsum("mai,mi->ma", J_pt, dpc[sub.pt_idx]))
             pred += -float((JD * (r_w + 0.5 * JD)).sum())
             del r_w, J_c, J_pt, dc_obs, back, JD
-        if e_p.shape[0]:
-            Jp_d = J_p @ dc
-            pred = pred - float((Jp_d * (e_p + 0.5 * Jp_d)).sum())
+        if gt is not None:
+            Jg_d = self.graph.apply(gt, dc)
+            pred = pred - float((Jg_d * (gt[0] + 0.5 * Jg_d)).sum())
         return (dc, dp), cost, pred, ""
 
 
@@ -856,11 +893,12 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
         # the start, decomposed (a cost far above Σ residual² means the problem is not the one meant)
         r, front = problem.residuals(with_jac=False)
         n = torch.linalg.norm(r, dim=-1)
-        e_p, _ = problem.prior_terms(problem.R, problem.t)
+        g_cost = problem.graph.cost(problem.R, problem.t) if problem.graph is not None else 0.0
+        g_rows = 6 * problem.graph.E if problem.graph is not None else 0
         log(f"start: {int(r.shape[0]):,} observations, {int((~front).sum()):,} behind the camera, |r| median "
             f"{float(n[front].median()) if bool(front.any()) else float('nan'):.3f} px, max {float(n[front].max()) if bool(front.any()) else float('nan'):.3e} px, "
             f"{int((n[front] > 100.0).sum()):,} over 100 px; robust cost {problem.robust_cost((r * r).sum(-1), front):.4e}, "
-            f"prior cost {0.5 * float((e_p * e_p).sum()):.4e} over {int(e_p.shape[0])} prior row(s)")
+            f"graph cost {g_cost:.4e} over {g_rows} row(s) of the cube graph's edges")
         # the worst observation, and what pycolmap's own camera makes of the same point and pose
         k = int(torch.argmax(torch.where(front, n, torch.zeros_like(n))))
         ci, pi = int(problem.cam_idx[k]), int(problem.pt_idx[k])
@@ -993,12 +1031,14 @@ def _problem_inputs_reference(fit_groups, X_start):
 
 
 def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh: Tuple[int, int],
-                   fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: Optional[np.ndarray],
+                   fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], graph: Optional[dict],
                    cfg, block_of: Optional[np.ndarray] = None, params_by_block0: Optional[List[List[float]]] = None,
                    prior_w2c: Optional[np.ndarray] = None, flags_of: Optional[str] = None,
                    device: Optional[str] = None, log=None, held: Optional[np.ndarray] = None):
-    """The same inputs and the same RungResult as precision.refine.run_rung, solved on the device. ``held``: per
-    keyframe, True = its pose is not solved (:func:`hold_cameras`)."""
+    """One bundle adjustment of precision.refine.run_rung, solved on the device. ``graph``: the cube graph's edges
+    (precision.graph_prior.graph_edges: k, l, sigma_m, lever_m, held) — their reference is the relative poses of
+    ``prior_w2c`` (the state F5 starts from; default ``w2c_start``), and ``graph["held"]`` is the keyframe that fixes
+    the gauge. ``held``: per keyframe, True = its pose is not solved either (:func:`hold_cameras`)."""
     from precision.refine import RefineError, RungResult
     torch = _torch()
     dev = device_for(device)
@@ -1009,7 +1049,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
         import pickle
         with open(_dump, "wb") as fh:
             pickle.dump({"name": name, "w2c_start": np.asarray(w2c_start), "params_start": list(params_start), "wh": tuple(wh),
-                         "fit_groups": fit_groups, "X_start": X_start, "sigmas": (None if sigmas is None else np.asarray(sigmas)),
+                         "fit_groups": fit_groups, "X_start": X_start, "graph": graph,
                          "block_of": block_of, "params_by_block0": params_by_block0,
                          "prior_w2c": (None if prior_w2c is None else np.asarray(prior_w2c)), "flags_of": flags_of}, fh, protocol=4)
     N = len(w2c_start)
@@ -1044,8 +1084,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     n_rep0 = int(len(uv))
     n_off = 0
     probe = make_problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
-                     sigmas=(np.ones(N) if sigmas is None else np.asarray(sigmas, np.float64)),
-                     prior_centres=np.zeros((N, 3)), torch_ba=cfg.torch_ba)
+                         torch_ba=cfg.torch_ba, gauge=False)
     r0, front0 = probe.residuals(with_jac=False)
     bad = (~front0) | (torch.linalg.norm(r0, dim=-1) > diag)
     if bool(bad.any()):
@@ -1074,13 +1113,16 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     n_rep = int(len(uv))
     prior_w2c = w2c_start if prior_w2c is None else np.asarray(prior_w2c, np.float64)
     if prior_w2c.shape != np.asarray(w2c_start).shape:
-        raise RefineError(f"{name}: {len(prior_w2c)} prior poses for {N} keyframes")
-    C = -np.einsum("nji,nj->ni", prior_w2c[:, :3, :3], prior_w2c[:, :3, 3])
+        raise RefineError(f"{name}: {len(prior_w2c)} reference poses for {N} keyframes")
+    if graph is None:
+        raise RefineError(f"{name}: F5 holds the cube graph — it was given no edges")
     prob = make_problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
-                    sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba)
+                        graph={"k": graph["k"], "l": graph["l"], "sigma_m": graph["sigma_m"],
+                               "lever_m": graph["lever_m"], "ref_w2c": prior_w2c}, torch_ba=cfg.torch_ba)
+    hold_cameras(prob, np.asarray(graph["held"], np.int64))             # the gauge: one keyframe stays where it is
     if held is not None:
         hold_cameras(prob, np.flatnonzero(np.asarray(held, bool)))
-    n_prior = N
+    n_prior = int(prob.graph.E)                                         # one residual block per edge
     if log is None and os.environ.get("STAC_BA_TORCH_TRACE"):
         log = lambda m: print(f"[ba_torch {name}] {m}", flush=True)       # noqa: E731
     lap(f"{tag}.problem")

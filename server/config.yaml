@@ -2794,25 +2794,14 @@ reconstruction:
                                         #   NEVER change in production — true is the validated chain
       min_tri_deg: 2.0                  # BOUND: a landmark's rays span at least this (degrees)
       huber_px: 1.0                     # BOUND: Huber scale of the reprojection loss (native px)
-      max_iterations: 500               # BOUND: Ceres iterations per rung (colmap_ba._tune_ceres)
-      ceres_threads: 1                  # MUST STAY 1 for bit-identical results (the load refuses
-                                        # any other value). MEASURED 2026-09-28: the same BA at 8
-                                        # threads differs run to run by up to 1.8e-11 in the poses
-                                        # (multi-threaded evaluation / Schur accumulation order);
-                                        # at 1 thread, with the alignment RANSAC seeded, it is bit
-                                        # for bit the same, allocation history included
+      max_iterations: 500               # BOUND: Levenberg-Marquardt iterations per rung
       heldout_confidence: 0.95          # declared confidence (as everywhere else)
       permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
       seed: 0                           # their fixed seed
       min_witness_corr: 12              # BOUND: 2D-3D correspondences a witness needs for PnP
-      solver: torch                     # torch = the default since 2026-11-01 (USER: "hacelo todo a GPU ya mismo"); ceres (pycolmap, ONE CPU thread, hours on pccr) | torch:
-                                        #   precision/ba_torch.py — the same residuals, loss, priors and camera freedom
-                                        #   on the GPU in float64, Schur complement, sorted reductions (bit-identical
-                                        #   between runs); USER 2026-11-01: 'todo debe correr en gpu, en modo determinista'.
-                                        #   Validated against Ceres on a synthetic scene (tests/test_ba_torch.py); on a
-                                        #   real session the bar is the held-out residual against Ceres' (his rule)
-      torch_ba:                         # the torch solver's stopping rules and damping = Ceres' (colmap_ba._tune_ceres
-                                        #   and Ceres' defaults), so the GPU solve stops where the CPU one did
+      torch_ba:                         # the solver (precision/ba_torch.py: float64 on the card, every sum in a
+                                        #   fixed order — USER 2026-11-01: 'todo debe correr en gpu, en modo
+                                        #   determinista'): its stopping rules and damping, Ceres' own defaults
         function_tolerance: 1.0e-6
         parameter_tolerance: 1.0e-8
         gradient_tolerance: 1.0e-8

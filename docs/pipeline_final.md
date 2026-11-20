@@ -57,7 +57,7 @@ keyframe and weighs in no fit, pairing, scale, closure, co-visibility or statist
 | F2 | `precision.gauge` | the continuous metric gauge along the walk (DA3 windows vs mono, by held-out); refuses unless epoch 0 |
 | F4 | `precision.tracks` | native-pixel tracks: keyframe windows, revisit windows, witness windows; 20 % held out |
 | F3 | `precision.omega_probe` | VGGT-Ω resolution probe — report only |
-| F5 | `precision.refine` | joint refinement (torch LM): poses, camera, landmarks within the range; rungs R0 → R3, each taken only when the held-out improves beyond 1.1 × its own error with ≥ 5 judges |
+| F5 | `precision.refine` | joint refinement (torch LM): poses, camera, landmarks within the range; rungs R0 → R2, each taken only when the held-out improves beyond 1.1 × its own error with ≥ 5 judges. Since 2026-11-20 it CARRIES THE CUBE GRAPH (`precision/graph_prior.py`: every keyframe tied to its cube's middle keyframe as well as the cube's seams agree, the two keyframes of every closure as far as the solved graph honours it; no camera has a prior of its own) and its result is a CANDIDATE: measured against the state it started from, zone by zone, before it is applied (`precision/decide.py`) |
 | F6 | `precision.depth_on_f5` | THE PRODUCT — see 1.4 |
 | check | `precision.chunk_check` | floor / ceiling / camera per keyframe and per cube — report only |
 

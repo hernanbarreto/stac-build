@@ -34,6 +34,13 @@ def _error_factor() -> float:
 FAC = _error_factor()
 
 
+def _graph(n, sigma=0.02, lever=2.0):
+    """Edges as a session's cube graph gives them (precision.graph_prior.graph_edges): every keyframe tied to
+    keyframe 0 within 2 cm (and 0.01 rad), keyframe 0 the held one."""
+    return {"k": np.zeros(n - 1, np.int64), "l": np.arange(1, n), "sigma_m": np.full(n - 1, float(sigma)),
+            "lever_m": np.full(n - 1, float(lever)), "held": np.array([0])}
+
+
 def _rot(yaw_deg):
     a = np.radians(yaw_deg)
     return np.array([[np.cos(a), 0, np.sin(a)], [0, 1, 0], [-np.sin(a), 0, np.cos(a)]])
@@ -97,7 +104,7 @@ def test_a_wrong_focal_and_real_distortion_are_recovered_by_the_distortion_rung(
     track, frame, uv = _observe(X, c2w, gt, 0.3, 1, kf)
     init = [515.0, 515.0, 319.5, 239.5, 0.0, 0.0, 0.0, 0.0]
     core = R.refine_core(np.linalg.inv(_perturb(c2w, 0.2, 0.02, 2)), init, WH, track, frame, uv,
-                         _split(track), kf, 0.01, CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
+                         _split(track), kf, _graph(len(kf)), CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
     best = core["best"]
     assert best.name == "R2", core["rungs"]
     fx = best.params_by_block[0][0]
@@ -114,7 +121,7 @@ def test_a_perfect_camera_without_distortion_stays_at_R0():
     kf = list(range(len(c2w)))
     track, frame, uv = _observe(X, c2w, gt, 0.3, 4, kf)
     core = R.refine_core(np.linalg.inv(_perturb(c2w, 0.1, 0.01, 5)), gt, WH, track, frame, uv,
-                         _split(track), kf, 0.01, CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
+                         _split(track), kf, _graph(len(kf)), CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
     assert core["best"].name == "R0", core["rungs"]
     assert not core["rungs"]["R1"]["taken"] and not core["rungs"]["R2"]["taken"]
 
@@ -124,7 +131,7 @@ def test_witnesses_localise_within_the_keyframes_error():
     gt = [500.0, 500.0, 319.5, 239.5, -0.05, 0.01, 0.0, 0.0]
     kf = list(range(0, 2 * len(c2w), 2))                 # keyframes 0, 2, 4, …
     track, frame, uv = _observe(X, c2w, gt, 0.3, 7, kf)
-    core = R.refine_core(np.linalg.inv(c2w), gt, WH, track, frame, uv, _split(track), kf, 0.01,
+    core = R.refine_core(np.linalg.inv(c2w), gt, WH, track, frame, uv, _split(track), kf, _graph(len(kf)),
                          CFG, SOLVER, error_factor=FAC, log=lambda *a: None)
     # witnesses halfway between keyframes (odd frame numbers)
     wc2w = []
@@ -170,7 +177,7 @@ def test_the_ladder_and_the_witnesses_are_bit_identical_run_to_run():
     for rep in range(2):
         junk = [np.random.default_rng(rep).random(1000 * (rep + 1) + 17) for _ in range(5)]
         pycolmap.set_random_seed(12345 + rep)             # someone else used the PRNG
-        core = R.refine_core(w2c0, init, WH, track, frame, uv, _split(track), kf, 0.01, CFG,
+        core = R.refine_core(w2c0, init, WH, track, frame, uv, _split(track), kf, _graph(len(kf)), CFG,
                              SOLVER, error_factor=FAC, log=lambda *a: None)
         loc = R.localize_witnesses(core["best"], core["X"], wt, wf, wuv, wframes, WH, 1e9, CFG)
         runs.append((_bits(core), {f: (np.asarray(r["c2w"]).tobytes(), r["rms_px"])
@@ -179,13 +186,6 @@ def test_the_ladder_and_the_witnesses_are_bit_identical_run_to_run():
     assert runs[0][0] == runs[1][0]
     assert runs[0][1] == runs[1][1]
     assert all(np.isfinite(r[1]) for r in runs[0][1].values())
-
-
-def test_prior_sigmas_grow_with_the_walk():
-    c = np.cumsum(np.ones((6, 3)) * [1.0, 0.0, 0.0], axis=0)
-    s = R.prior_sigmas(c, 0.01)
-    assert np.all(np.diff(s) >= 0) and s[0] > 0
-    assert abs(s[-1] - 0.01 * np.sqrt(5)) < 1e-12
 
 
 # the F5 ladder on this file's scene, in a fresh interpreter: prints the sha256 of every solved
@@ -203,7 +203,7 @@ kf = list(range(0, 2 * len(c2w), 2))
 track, frame, uv = T._observe(X, c2w, gt, 0.3, 7, kf)
 init = [510.0, 510.0, 319.5, 239.5, 0.0, 0.0, 0.0, 0.0]
 w2c0 = np.linalg.inv(T._perturb(c2w, 0.2, 0.02, 9))
-core = R.refine_core(w2c0, init, T.WH, track, frame, uv, T._split(track), kf, 0.01, T.CFG, T.SOLVER,
+core = R.refine_core(w2c0, init, T.WH, track, frame, uv, T._split(track), kf, T._graph(len(kf)), T.CFG, T.SOLVER,
                      error_factor=T.FAC, log=lambda *a: None)
 b = core["best"]
 h = hashlib.sha256()

@@ -26,8 +26,7 @@ def _tb(plans=0.0, jac=0.0):
 def _problem(tb, cam_free=(0, 1, 2, 3), blocks=1, chunk_obs=97):
     w2c, cam_idx, pt_idx, uv, X0 = T._flat_problem()
     block_of = (np.arange(len(w2c)) * blocks // len(w2c)).astype(int)
-    kw = dict(device="cpu", sigmas=np.full(len(w2c), 0.05),
-              prior_centres=-np.einsum("nji,nj->ni", w2c[:, :3, :3], w2c[:, :3, 3]) + 0.01, torch_ba=tb)
+    kw = dict(device="cpu", graph=T._graph(w2c, sigma=0.05, shift=0.01), torch_ba=tb)
     return BA._ChunkedProblem(w2c, [list(T.CAM)] * blocks, block_of, cam_idx, pt_idx, uv, X0, 1.0, cam_free,
                               chunk_obs=chunk_obs, **kw)
 
@@ -99,7 +98,7 @@ def test_a_whole_solve_and_a_whole_rung_are_the_records(monkeypatch):
     # the rung interface (precision.refine's contract), in chunks
     w2c, pts, groups, X = T._scene()
     w0, X0 = T._perturb(w2c, X, np.random.default_rng(7))
-    kw = dict(sigmas=np.full(len(w2c), 0.5), prior_w2c=w0)
+    kw = dict(graph=T._graph(w0), prior_w2c=w0)
     monkeypatch.setattr(BA, "CHUNKED_ABOVE_OBS", 0)
     monkeypatch.setattr(BA, "CHUNK_OBS", 211)
     cfg0 = SimpleNamespace(**{**vars(T.CFG), "torch_ba": _tb()})

@@ -160,31 +160,6 @@ def test_tracker_weights_are_pinned_by_content():
         load_precision_config(raw)
 
 
-def test_ceres_threads_must_stay_one():
-    """More than one Ceres thread sums in a run-dependent order: the refinement would
-    not be bit-identical run to run (measured, see config.yaml) — refused at load."""
-    raw = _raw()
-    assert raw["reconstruction"]["precision"]["refine"]["ceres_threads"] == 1
-    raw["reconstruction"]["precision"]["refine"]["ceres_threads"] = 8
-    with pytest.raises(PrecisionConfigError, match="ceres_threads.*bit-identical"):
-        load_precision_config(raw)
-
-
-def test_refine_solver_is_an_enum_and_mandatory():
-    import copy
-    from precision.config import PrecisionConfigError, load_precision_config
-    raw = _raw()
-    assert load_precision_config(raw).refine.solver in ("ceres", "torch")
-    raw["reconstruction"]["precision"]["refine"]["solver"] = "torch"
-    assert load_precision_config(raw).refine.solver == "torch"
-    raw["reconstruction"]["precision"]["refine"]["solver"] = "cuda"
-    with pytest.raises(PrecisionConfigError):
-        load_precision_config(raw)
-    del raw["reconstruction"]["precision"]["refine"]["solver"]
-    with pytest.raises(PrecisionConfigError):
-        load_precision_config(raw)
-
-
 def test_the_torch_solvers_rules_are_declared_and_mandatory():
     raw = _raw()
     tb = load_precision_config(raw).refine.torch_ba

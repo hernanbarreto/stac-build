@@ -26,6 +26,17 @@ def _rot(axis, deg):
     return np.eye(3) + math.sin(a) * K + (1 - math.cos(a)) * K @ K
 
 
+def _graph(w2c, sigma=0.5, lever=2.0, shift=0.0):
+    """Edges as a session's cube graph gives them (precision.graph_prior.graph_edges): every camera tied to camera 0,
+    camera 0 the held one — and, for a problem built by hand, their reference poses (``shift`` metres off camera by
+    camera, so that the edges pull)."""
+    n = len(w2c)
+    ref = np.asarray(w2c, np.float64).copy()
+    ref[:, :3, 3] += shift * np.arange(n)[:, None]
+    return {"k": np.zeros(n - 1, np.int64), "l": np.arange(1, n), "sigma_m": np.full(n - 1, float(sigma)),
+            "lever_m": np.full(n - 1, float(lever)), "held": np.array([0]), "ref_w2c": ref}
+
+
 def _scene(n_cam=10, n_pts=300, noise_px=0.2, seed=0, curve=False):
     """Cameras on a gentle arc 3 m from a wall of points, looking at it; OPENCV projections + noise.
     ``curve``: the centres leave the line (y and z swing) — COLMAP's Sim3 alignment to the priors needs
@@ -115,8 +126,7 @@ def test_the_full_residual_jacobian_matches_the_step_apply_makes():
     uv = np.concatenate([np.array([p for _, p in groups[t]]) for t in tracks])
     X0 = np.array([X[t] for t in tracks])
     prob = BA._Problem(w2c, [list(CAM)], np.zeros(len(w2c), int), cam_idx, pt_idx, uv, X0, 2.0, (0, 1, 2, 3),
-                       device="cpu", sigmas=np.full(len(w2c), 0.5), prior_centres=-np.einsum("nji,nj->ni", w2c[:, :3, :3], w2c[:, :3, 3]),
-                       torch_ba=TB)
+                       device="cpu", graph=_graph(w2c, shift=0.01), torch_ba=TB)
     r0, front, J_pose, J_pt, J_cam = prob.residuals()
     assert bool(front.all())
     h = 1e-6
@@ -143,14 +153,14 @@ def test_the_full_residual_jacobian_matches_the_step_apply_makes():
         R2, t2, cam2, X2 = prob.apply(-dc, dp)
         num = (prob.residuals(R1, t1, cam1, X1, with_jac=False)[0] - prob.residuals(R2, t2, cam2, X2, with_jac=False)[0]) / (2 * h)
         assert torch.allclose(num, J_cam[:, :, k], atol=1e-4, rtol=1e-5), k
-    # the prior rows too
-    e0, Jp = prob.prior_terms(prob.R, prob.t)
+    # the cube graph's edges too: one pose parameter of EVERY camera moved together
+    _e0, Jk, Jl = prob.graph.terms(prob.R, prob.t)
     for col in range(6):
         dc = torch.zeros(prob.n_c, dtype=torch.float64); dc[col:n_pose:6] = h
         R1, t1, _, _ = prob.apply(dc, torch.zeros_like(prob.X))
         R2, t2, _, _ = prob.apply(-dc, torch.zeros_like(prob.X))
-        num = (prob.prior_terms(R1, t1)[0] - prob.prior_terms(R2, t2)[0]) / (2 * h)
-        assert torch.allclose(num, (Jp[:, col:n_pose:6]).sum(1), atol=1e-4, rtol=1e-5), col
+        num = (prob.graph.terms(R1, t1, with_jac=False)[0] - prob.graph.terms(R2, t2, with_jac=False)[0]) / (2 * h)
+        assert torch.allclose(num, Jk[:, :, col] + Jl[:, :, col], atol=1e-4, rtol=1e-5), col
 
 
 def test_the_segment_sum_and_the_pairs_are_exact_and_ordered():
@@ -168,7 +178,7 @@ def test_a_perturbed_scene_is_recovered_and_the_solve_is_bit_identical():
     w2c, pts, groups, X = _scene()
     rng = np.random.default_rng(7)
     w0, X0 = _perturb(w2c, X, rng)
-    kw = dict(sigmas=np.full(len(w2c), 0.5), prior_w2c=w0)
+    kw = dict(graph=_graph(w0), prior_w2c=w0)
     r1 = BA.run_rung_torch("R0", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
     r2 = BA.run_rung_torch("R0", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
     assert r1.termination == "CONVERGENCE" and r1.final_cost < r1.initial_cost * 0.05
@@ -186,53 +196,17 @@ def test_a_perturbed_scene_is_recovered_and_the_solve_is_bit_identical():
     assert r1.fit_rms_px < 0.5
 
 
-def _ceres_or_skip():
-    """The Ceres path runs through pycolmap 4.x (the chain's env mapanything); an older pycolmap (env da3
-    has 3.13) lacks the API precision.refine.run_rung uses — the comparison is skipped there, named."""
-    pycolmap = pytest.importorskip("pycolmap")
-    if not hasattr(pycolmap.Camera, "create_from_model_name"):
-        pytest.skip(f"pycolmap {pycolmap.__version__}: no Camera.create_from_model_name — the Ceres path needs 4.x")
-    return pycolmap
-
-
-def test_the_camera_rungs_recover_an_injected_focal_error():
-    """R1 from a 2 % focal error: the solve lands at the noisy problem's own optimum — the bar is
-    Ceres' answer on the same problem (within the solver tolerance), not the truth, which the 0.1 px
-    noise and the frontal scene place ~2 px away for both solvers."""
+def test_the_camera_rung_recovers_an_injected_focal_error():
+    """R1 from a 2 % focal error (8 px): the solve converges and takes most of the error out — the 0.1 px noise and
+    the frontal scene leave the optimum itself a couple of pixels from the truth."""
     w2c, pts, groups, X = _scene(noise_px=0.1, curve=True)
     cam_wrong = list(CAM); cam_wrong[0] *= 1.02; cam_wrong[1] *= 1.02
-    sig = np.full(len(w2c), 0.05)
-    r = BA.run_rung_torch("R1", w2c, cam_wrong, WH, groups, X, sigmas=sig, cfg=CFG, prior_w2c=w2c, device="cpu")
+    r = BA.run_rung_torch("R1", w2c, cam_wrong, WH, groups, X, graph=_graph(w2c, sigma=0.05), cfg=CFG, prior_w2c=w2c,
+                          device="cpu")
     fx, fy = r.params_by_block[0][:2]
     assert r.termination == "CONVERGENCE", r.termination
-    _ceres_or_skip()
-    from precision.refine import run_rung
-    rc = run_rung("R1", w2c, cam_wrong, WH, groups, X, sig, CFG, prior_w2c=w2c)
-    fxc, fyc = rc.params_by_block[0][:2]
-    assert abs(fx - fxc) < 0.1 and abs(fy - fyc) < 0.1, ((fx, fy), (fxc, fyc), CAM[:2])
-    assert abs(r.fit_rms_px - rc.fit_rms_px) < 0.01, (r.fit_rms_px, rc.fit_rms_px)
-
-
-def test_ceres_and_torch_agree_on_the_same_problem():
-    _ceres_or_skip()
-    from precision.refine import run_rung
-    w2c, pts, groups, X = _scene()
-    rng = np.random.default_rng(3)
-    w0, X0 = _perturb(w2c, X, rng, t_m=0.01, rot_deg=0.2, x_m=0.02)
-    # 2 cm priors: the gauge (the metre above all — reprojection alone is scale-free) is pinned, so the two
-    # solvers' solutions are comparable point for point; with soft priors they differed by a 0.13 % scale
-    sig = np.full(len(w2c), 0.02)
-    rc = run_rung("R0", w0, CAM, WH, groups, X0, sig, CFG, prior_w2c=w0)
-    rt = BA.run_rung_torch("R0", w0, CAM, WH, groups, X0, sig, CFG, prior_w2c=w0, device="cpu")
-    assert abs(rt.final_cost - rc.final_cost) <= 0.02 * rc.final_cost + 1e-9, (rt.final_cost, rc.final_cost)
-    # the two solvers reach stationary points of the same robust cost by different paths (Ceres' corrector
-    # vs IRLS); with 20 cm priors the gauge is soft, so the comparison is the SHAPE: relative poses to kf 0
-    def rel(W):
-        return np.stack([W[k] @ np.linalg.inv(W[0]) for k in range(len(W))])
-    d_rel = np.linalg.norm(rel(rt.w2c)[:, :3, 3] - rel(rc.w2c)[:, :3, 3], axis=1)
-    d_abs = np.linalg.norm(rt.w2c[:, :3, 3] - rc.w2c[:, :3, 3], axis=1)
-    assert np.max(d_rel) < 2e-3 and np.max(d_abs) < 5e-3, (d_rel, d_abs)
-    assert abs(rt.fit_rms_px - rc.fit_rms_px) < 0.02, (rt.fit_rms_px, rc.fit_rms_px)
+    assert abs(fx - CAM[0]) < 0.5 * abs(cam_wrong[0] - CAM[0]) and abs(fy - CAM[1]) < 0.5 * abs(cam_wrong[1] - CAM[1]), (fx, fy)
+    assert r.fit_rms_px < 0.5
 
 
 @pytest.mark.parametrize("damping", ["hessian", "schur"])
@@ -253,21 +227,24 @@ def test_the_step_is_the_dense_damped_system(cam_free, blocks, damping, monkeypa
     X0 = np.array([X[t] for t in tracks]) + np.random.default_rng(1).normal(0, 0.02, (len(tracks), 3))
     block_of = (np.arange(len(w2c)) * blocks // len(w2c)).astype(int)
     prob = BA._Problem(w2c, [list(CAM)] * blocks, block_of, cam_idx, pt_idx, uv, X0, 1.0, cam_free,
-                       device="cpu", sigmas=np.full(len(w2c), 0.05),
-                       prior_centres=-np.einsum("nji,nj->ni", w2c[:, :3, :3], w2c[:, :3, 3]) + 0.01, torch_ba=TB)
+                       device="cpu", graph=_graph(w2c, sigma=0.05, shift=0.01), torch_ba=TB)
     L = prob.linearize()
     M, P, nc = int(L["r_w"].shape[0]), int(prob.P), int(prob.n_c)
     cols = torch.cat([prob.pose_idx, prob.cam_cols], 1) if prob.nf else prob.pose_idx      # (N, nco)
-    J = torch.zeros(2 * M + int(L["e_p"].shape[0]), nc + 3 * P, dtype=torch.float64)
+    e_g, Jk_g, Jl_g = L["graph"]
+    E = int(e_g.shape[0])
+    J = torch.zeros(2 * M + 6 * E, nc + 3 * P, dtype=torch.float64)
     r = torch.zeros(J.shape[0], dtype=torch.float64)
     rows = torch.arange(2 * M).reshape(M, 2)
     for m in range(M):
         J[rows[m][:, None], cols[prob.cam_idx[m]][None, :]] = L["J_c"][m]
         J[rows[m][:, None], (nc + 3 * prob.pt_idx[m] + torch.arange(3))[None, :]] = L["J_pt"][m]
         r[rows[m]] = L["r_w"][m]
-    if L["e_p"].shape[0]:
-        J[2 * M:, :nc] = L["J_p"]
-        r[2 * M:] = L["e_p"]
+    for i in range(E):                                          # the cube graph's edges, row by row
+        rws = 2 * M + 6 * i + torch.arange(6)
+        J[rws[:, None], prob.graph.cols[i][None, :6]] = Jk_g[i]
+        J[rws[:, None], prob.graph.cols[i][None, 6:]] = Jl_g[i]
+        r[rws] = e_g[i]
     keep = torch.cat([prob.free, torch.ones(3 * P, dtype=torch.bool)])
     Jk = J[:, keep]
     A = Jk.T @ Jk
@@ -309,8 +286,7 @@ def test_the_chunked_problem_is_the_one_piece_problem(cam_free, blocks):
     of the summation order — and with ONE chunk, the same bits."""
     w2c, cam_idx, pt_idx, uv, X0 = _flat_problem()
     block_of = (np.arange(len(w2c)) * blocks // len(w2c)).astype(int)
-    kw = dict(device="cpu", sigmas=np.full(len(w2c), 0.05),
-              prior_centres=-np.einsum("nji,nj->ni", w2c[:, :3, :3], w2c[:, :3, 3]) + 0.01, torch_ba=TB)
+    kw = dict(device="cpu", graph=_graph(w2c, sigma=0.05, shift=0.01), torch_ba=TB)
     args = (w2c, [list(CAM)] * blocks, block_of, cam_idx, pt_idx, uv, X0, 1.0, cam_free)
     one = BA._Problem(*args, **kw)
     many = BA._ChunkedProblem(*args, chunk_obs=97, **kw)
@@ -342,7 +318,7 @@ def test_a_rung_solved_in_chunks_lands_where_the_one_piece_solve_does(monkeypatc
     w2c, pts, groups, X = _scene()
     rng = np.random.default_rng(7)
     w0, X0 = _perturb(w2c, X, rng)
-    kw = dict(sigmas=np.full(len(w2c), 0.5), prior_w2c=w0)
+    kw = dict(graph=_graph(w0), prior_w2c=w0)
     r1 = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
     monkeypatch.setattr(BA, "CHUNKED_ABOVE_OBS", 0)
     monkeypatch.setattr(BA, "CHUNK_OBS", 211)
@@ -364,7 +340,7 @@ def test_held_cameras_stay_exactly_where_they_started_and_the_rest_is_solved_aro
     w0, X0 = _perturb(w2c, X, rng)
     held = np.zeros(len(w2c), bool)
     held[[2, 3, 4]] = True
-    kw = dict(sigmas=np.full(len(w2c), 0.5), prior_w2c=w0)
+    kw = dict(graph=_graph(w0), prior_w2c=w0)
     free = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", **kw)
     r = BA.run_rung_torch("R1", w0, CAM, WH, groups, X0, cfg=CFG, device="cpu", held=held, **kw)
     assert np.array_equal(r.w2c[held], w0[held])

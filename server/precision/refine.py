@@ -3,20 +3,22 @@ landmarks, and the localisation of the witness frames (claude_stac.txt §4-F5).
 
 Unknowns: an SE(3) per keyframe, ONE session camera (OPENCV: fx, fy, cx, cy, k1,
 k2, p1, p2 — F0's ``camera.json``), the landmarks. Residuals: reprojection in
-NATIVE pixels under a Huber loss (``huber_px``). Engine: pycolmap / COLMAP's Ceres
-(``reconstruction.colmap_ba``: ``_tune_ceres``, ``_solve_checked`` — a rung that
-does not converge fails, no fallback), Ceres on ONE thread (``ceres_threads`` must be
-1: its multi-threaded accumulation is not bit-reproducible) and every COLMAP RANSAC
-seeded (``seed``) — identical inputs give bit-identical outputs.
+NATIVE pixels under a Huber loss (``huber_px``). Engine: precision/ba_torch.py —
+Levenberg-Marquardt with Ceres' stopping rules, float64 on the declared device,
+every sum in a fixed order: identical inputs give bit-identical outputs.
 
 Initialisation: the current keyframe poses (Omega × F2's gauge when it was
 applied), F0's camera, landmarks triangulated from the FIT tracks (F4
 ``track_split`` 0) seen from at least ``min_tri_deg`` apart.
 
-The gauge: no fixed prior. Each keyframe's centre is held by a soft prior whose σ
-grows with the walk the way consecutive-distance priors of relative σ_gauge
-(F2's measured scatter of its applied instrument) accumulate: σ_k =
-σ_gauge · sqrt(Σ d_i²) over the steps up to k.
+F5 CARRIES THE CUBE GRAPH (USER 2026-11-20, precision/graph_prior.py): what the cube
+stage knows about the cameras is inside the cost as relative-pose edges between
+keyframes — each keyframe tied to its cube's middle keyframe as well as the cube's
+seams agree, the two keyframes of every closure as far as the solved graph honours
+it — against the relative poses of the state F5 starts from. No camera has a prior
+of its own (until that date: one independent position prior per keyframe, its σ
+grown along the walk — an open chain that knew nothing of the closures, so where the
+tracks said nothing F5 moved the cameras freely). The gauge is one held keyframe.
 
 The ladder, each rung judged ONLY on the held-out tracks (split 1: never
 optimised — triangulated with the rung's own poses and camera and reprojected):
@@ -31,7 +33,7 @@ THE JUDGE (docs/plan_determinismo.md points 46, 59, 60, 61 — USER 2026-10-07, 
 HIGHER Ceres cost than R1 whose parameter space it contains, and F6 bent every depth map
 through that lens: floor undulation 14.6 → 45.1 cm):
   * every rung is WARM-STARTED from the solution of the rung it contains (poses, landmarks,
-    camera), the position priors staying at the gauge poses for all of them; a nested rung
+    camera), the graph's edges staying at the state F5 started from for all of them; a nested rung
     that still ends above its parent's final Ceres cost is logged and NOT taken (point 61);
   * after each rung a CONTINUATION solve runs from its end state with the same settings; the
     median paired change of the held-out statistic between the two IS the solver's own error
@@ -547,15 +549,7 @@ def heldout_rms_blocks(groups: Dict[int, List], w2c: np.ndarray, params_by_block
     return _rms_per_track(groups, X, w2c, lambda ii: pb[bo[ii]])
 
 
-def prior_sigmas(centres: np.ndarray, sigma_rel: float) -> np.ndarray:
-    """σ_k = σ_rel · sqrt(Σ_{i≤k} d_i²): consecutive-distance priors of relative σ
-    accumulated along the walk (the first keyframe carries its first step's)."""
-    d = np.linalg.norm(np.diff(centres, axis=0), axis=1)
-    acc = np.sqrt(np.concatenate([[d[0] ** 2 if len(d) else 0.0], np.cumsum(d ** 2)]))
-    return float(sigma_rel) * np.maximum(acc, acc[acc > 0].min() if (acc > 0).any() else 1.0)
-
-
-# ── one rung (pycolmap) ──────────────────────────────────────────────────
+# ── one rung ─────────────────────────────────────────────────────────
 
 @dataclass
 class RungResult:
@@ -582,129 +576,18 @@ class RungResult:
 
 
 def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh: Tuple[int, int],
-             fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: np.ndarray,
+             fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], graph: dict,
              cfg, block_of: Optional[np.ndarray] = None,
              params_by_block0: Optional[List[List[float]]] = None,
              prior_w2c: Optional[np.ndarray] = None, held: Optional[np.ndarray] = None) -> RungResult:
-    """One pose-prior bundle adjustment. ``w2c_start`` / ``params_start`` / ``X_start``: where the
-    solve STARTS (the gauge for R0; the rung it contains for R1, R2 and the continuation solves —
-    point 61). ``prior_w2c``: the poses whose centres hold the gauge priors — the GAUGE poses for
-    every rung (default: ``w2c_start``, the pre-2026-10-07 behaviour, kept for callers that start at
-    the gauge). The position prior σ per keyframe is ``sigmas``. ``held``: per keyframe, True = its pose is not
-    solved — it stays where the solve starts (the decision by zone, USER 2026-11-20)."""
-    if str(getattr(cfg, "solver", "ceres")) == "torch":
-        from precision.ba_torch import run_rung_torch
-        return run_rung_torch(name, w2c_start, params_start, wh, fit_groups, X_start, sigmas, cfg, block_of=block_of,
-                              params_by_block0=params_by_block0, prior_w2c=prior_w2c, held=held)
-    if held is not None and np.asarray(held, bool).any():
-        raise RefineError(f"{name}: holding the cameras of a zone is solved by the torch solver — "
-                          f"'reconstruction.precision.refine.solver' is {str(getattr(cfg, 'solver', 'ceres'))!r}")
-    import pycolmap
-    _vendor_path()
-    from reconstruction.colmap_ba import _rigid, _tune_ceres, _solve_checked
-    N = len(w2c_start)
-    prior_w2c = w2c_start if prior_w2c is None else np.asarray(prior_w2c, np.float64)
-    if prior_w2c.shape != w2c_start.shape:
-        raise RefineError(f"{name}: {len(prior_w2c)} prior poses for {N} keyframes")
-    block_of = np.zeros(N, int) if block_of is None else np.asarray(block_of, int)
-    blocks = sorted(set(block_of.tolist()))
-    pb0 = params_by_block0 or [list(params_start) for _ in blocks]
-    rec = pycolmap.Reconstruction()
-    for b in blocks:
-        cam = pycolmap.Camera.create_from_model_name(b + 1, "OPENCV", float(pb0[b][0]),
-                                                     int(wh[0]), int(wh[1]))
-        cam.params = [float(v) for v in pb0[b]]
-        cam.camera_id = b + 1
-        rec.add_camera_with_trivial_rig(cam)
-    fit_groups = listed(fit_groups)                       # this path reads the per-track lists
-    per_img: Dict[int, List[Tuple[int, np.ndarray]]] = {i: [] for i in range(N)}
-    for t, obs in fit_groups.items():
-        if t in X_start:
-            for i, p in obs:
-                per_img[i].append((t, p))
-    p2d: Dict[Tuple[int, int], int] = {}
-    for i in range(N):
-        pts = [pycolmap.Point2D(np.asarray(p, float)) for _, p in per_img[i]]
-        im = pycolmap.Image(name=f"{i}.jpg", camera_id=int(block_of[i]) + 1, points2D=pts)
-        im.image_id = i + 1
-        rec.add_image_with_trivial_frame(im, _rigid(w2c_start[i], pycolmap))
-        for k, (t, _p) in enumerate(per_img[i]):
-            p2d[(i, t)] = k
-    n_pts = 0
-    pid_of: Dict[int, int] = {}
-    for t, X in X_start.items():
-        tr = pycolmap.Track()
-        for i, _p in fit_groups[t]:
-            if (i, t) in p2d:
-                tr.add_element(pycolmap.TrackElement(i + 1, p2d[(i, t)]))
-        if tr.length() >= 2:
-            pid_of[t] = int(rec.add_point3D(np.asarray(X, float), tr))
-            n_pts += 1
-    priors = []
-    for i in range(N):
-        pp = pycolmap.PosePrior()
-        pp.position = -prior_w2c[i, :3, :3].T @ prior_w2c[i, :3, 3]
-        pp.position_covariance = np.eye(3) * float(sigmas[i]) ** 2
-        pp.coordinate_system = pycolmap.PosePriorCoordinateSystem.CARTESIAN
-        pp.corr_data_id = rec.image(i + 1).data_id
-        priors.append(pp)
-    opts = pycolmap.BundleAdjustmentOptions()
-    opts.refine_focal_length = name in ("R1", "R2")
-    opts.refine_principal_point = name in ("R1", "R2")
-    opts.refine_extra_params = name == "R2"
-    opts.refine_points3D = True
-    opts.refine_rig_from_world = True
-    opts.ceres.loss_function_type = pycolmap.LossFunctionType.HUBER
-    opts.ceres.loss_function_scale = float(cfg.huber_px)
-    _tune_ceres(opts, int(cfg.max_iterations))
-    # ONE thread (the config refuses any other value): Ceres' multi-threaded evaluation
-    # and Schur accumulation sum in a run-dependent order — measured 1.8e-11 in the
-    # poses between two identical solves at 8 threads, bit for bit the same at 1
-    opts.ceres.solver_options.num_threads = int(cfg.ceres_threads)
-    bcfg = pycolmap.BundleAdjustmentConfig()
-    for i in range(N):
-        bcfg.add_image(i + 1)
-    popts = pycolmap.PosePriorBundleAdjustmentOptions()
-    popts.prior_position_fallback_stddev = float(np.max(sigmas))
-    # the adjuster first aligns the reconstruction to the priors by RANSAC; with COLMAP's
-    # default seed (-1) and its PRNG unseeded, every solve of identical inputs differed
-    # (measured) — both are fixed, so a rung does not depend on what ran before it
-    popts.alignment_ransac.random_seed = int(cfg.seed)
-    popts.alignment_ransac.num_threads = 1
-    pycolmap.set_random_seed(int(cfg.seed))
-    summary = _solve_checked(pycolmap.create_pose_prior_bundle_adjuster(
-        opts, popts, bcfg, priors, rec), f"refine {name}")
-    cs = _ceres_summary(summary)
-    w2c = np.tile(np.eye(4), (N, 1, 1))
-    for i in range(N):
-        w2c[i, :3, :4] = np.asarray(rec.image(i + 1).cam_from_world().matrix())
-    # pycolmap 4 reports the STORED point errors: refresh them, or they read 0
-    rec.update_point_3d_errors()
-    errs = np.array([float(pt.error) for pt in rec.points3D.values()], np.float64)
-    diag = float(np.hypot(wh[0], wh[1]))
-    ok = np.isfinite(errs) & (errs >= 0.0) & (errs <= diag)
-    fit_med = float(np.median(errs[ok])) if ok.any() else float("nan")
-    X_out = {t: np.asarray(rec.point3D(pid).xyz, np.float64).copy() for t, pid in pid_of.items()}
-    return RungResult(name, w2c, [list(rec.camera(b + 1).params) for b in blocks], block_of,
-                      fit_med, n_pts, str(getattr(summary, "termination_type", "")),
-                      int((~ok).sum()), X=X_out,
-                      initial_cost=float(cs["initial_cost"]), final_cost=float(cs["final_cost"]),
-                      iterations=int(cs["num_successful_steps"]) + int(cs["num_unsuccessful_steps"]),
-                      seconds=float(cs["total_time_in_seconds"]))
-
-
-def _ceres_summary(summary) -> dict:
-    """Ceres' own summary of a solve (pycolmap 4: ``BundleAdjustmentSummary.todict()
-    ['ceres_summary']``): the costs and step counts the nested-rung check (point 61) and the
-    report read. Missing fields FAIL — a rung whose cost cannot be read cannot be compared."""
-    d = summary.todict() if hasattr(summary, "todict") else {}
-    cs = d.get("ceres_summary") if isinstance(d, dict) else None
-    need = ("initial_cost", "final_cost", "num_successful_steps", "num_unsuccessful_steps",
-            "total_time_in_seconds")
-    if not isinstance(cs, dict) or any(k not in cs for k in need):
-        raise RefineError(f"pycolmap's bundle-adjustment summary carries no Ceres summary with "
-                          f"{need} — the rungs' costs cannot be compared (point 61)")
-    return cs
+    """One bundle adjustment under the cube graph. ``w2c_start`` / ``params_start`` / ``X_start``: where the solve
+    STARTS (the state F5 started from for R0 and R1; the rung it contains for R2 and the continuation solves — point
+    61). ``graph``: the cube graph's edges (precision.graph_prior.graph_edges); ``prior_w2c``: the poses whose
+    relative poses the edges hold — the state F5 STARTED FROM, for every rung (default: ``w2c_start``). ``held``: per
+    keyframe, True = its pose is not solved — it stays where the solve starts (the decision by zone)."""
+    from precision.ba_torch import run_rung_torch
+    return run_rung_torch(name, w2c_start, params_start, wh, fit_groups, X_start, graph, cfg, block_of=block_of,
+                          params_by_block0=params_by_block0, prior_w2c=prior_w2c, held=held)
 
 
 # ── the refinement ───────────────────────────────────────────────────────
@@ -835,16 +718,16 @@ def _rung_report(r: RungResult, held_r: Dict[int, float], dropped: dict, cont: R
                              "termination": cont.termination, **err}}
 
 
-def _rung_and_continuation(name: str, start: RungResult, wh, fit_g, held_g, sig, cfg, solver,
+def _rung_and_continuation(name: str, start: RungResult, wh, fit_g, held_g, graph, cfg, solver,
                            prior_w2c: np.ndarray, log: Callable, **kw):
     """One rung from ``start``'s solution, then the continuation solve from the rung's own end
     state (point 59). Returns (rung, its held-out, its dropped ledger, continuation, solver error)."""
     LAP_TAG[0] = ""
-    r = run_rung(name, start.w2c, start.params_by_block[0], wh, fit_g, start.X, sig, cfg,
+    r = run_rung(name, start.w2c, start.params_by_block[0], wh, fit_g, start.X, graph, cfg,
                  prior_w2c=prior_w2c, **kw)
     lap(f"{name}.result")
     LAP_TAG[0] = "+"
-    cont = run_rung(name, r.w2c, r.params_by_block[0], wh, fit_g, r.X, sig, cfg,
+    cont = run_rung(name, r.w2c, r.params_by_block[0], wh, fit_g, r.X, graph, cfg,
                     prior_w2c=prior_w2c,
                     **({**kw, "params_by_block0": r.params_by_block} if "block_of" in kw else kw))
     lap(f"{name}+.result")
@@ -890,10 +773,11 @@ def within_range(track: np.ndarray, frame: np.ndarray, uv: np.ndarray, kf_frames
 
 def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 track: np.ndarray, frame: np.ndarray, uv: np.ndarray, split: np.ndarray,
-                kf_frames: Sequence[int], sigma_rel: float, cfg, solver: dict, *,
+                kf_frames: Sequence[int], graph: dict, cfg, solver: dict, *,
                 error_factor: float, log: Callable = print, solve: bool = True,
                 range_m: float = 0.0, hold: Optional[np.ndarray] = None) -> Dict[str, Any]:
-    """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split).
+    """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split). ``graph``: the cube graph's
+    edges every rung holds (precision.graph_prior.graph_edges), against the relative poses of ``w2c0``.
     ``hold``: per keyframe, True = its pose is HELD to ``w2c0`` in every rung (the decision by zone: the stage solved
     again with the zones that got worse held to the state it started from).
     ``error_factor``: ``correction_graph.graph.improvement_error_factor`` (the user's 2).
@@ -923,7 +807,6 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         raise RefineError(f"{len(X0)} fit track(s) triangulate at ≥ {cfg.min_tri_deg:g}° — "
                           f"nothing to refine against")
     clusters = track_clusters(held_g)
-    sig = prior_sigmas(np.array([-T[:3, :3].T @ T[:3, 3] for T in w2c0]), sigma_rel)
     base = RungResult("init", w2c0, [list(params0)], np.zeros(len(w2c0), int), float("nan"), 0, "",
                       X=X0)
     held: Dict[str, Dict[int, float]] = {}
@@ -935,7 +818,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             f"(held-out median {np.median(list(held['init'].values())) if held['init'] else float('nan'):.3f} px "
             f"over {len(held['init'])} tracks)")
         return {"best": base, "base": base, "rungs": {}, "held": held, "X": X0, "X0": X0, "fit_groups": fit_g,
-                "held_groups": held_g, "prior_sigma_m": sig,
+                "held_groups": held_g,
                 "solver_errors": {}, "clusters": clusters, "ladder": [],
                 "ladder_restricted_by": "refine.enabled: false", "error_factor": fac,
                 "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init}, "timing": {}}
@@ -953,7 +836,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         # 2026-10-07: cost 0.587605 → 0.587605, the focal stayed at F0's 362.56)
         start = base if name in ("R0", "R1") else parent
         r, held_r, dropped, cont, err = _rung_and_continuation(
-            name, start, wh, fit_g, held_g, sig, cfg, solver, w2c0, log,
+            name, start, wh, fit_g, held_g, graph, cfg, solver, w2c0, log,
             **({"held": np.asarray(hold, bool)} if hold is not None else {}))
         held[name] = held_r
         errors[name] = err
@@ -1012,7 +895,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         raise RefineError("no rung could be judged — the session camera cannot be refined; see the "
                           "rung reasons in the log")
     return {"best": best, "base": base, "rungs": rungs, "held": held, "X": best.X, "X0": X0, "fit_groups": fit_g,
-            "held_groups": held_g, "prior_sigma_m": sig,
+            "held_groups": held_g,
             "solver_errors": errors, "clusters": clusters, "ladder": list(ladder),
             "ladder_restricted_by": RUNGS_ENV if os.environ.get(RUNGS_ENV, "").strip() else None,
             "error_factor": fac, "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init},
@@ -1262,15 +1145,6 @@ def heldout_bound(per_frame: Dict[int, float], cfg) -> float:
 
 # ── session I/O ──────────────────────────────────────────────────────────
 
-def _gauge_sigma(output_dir: Path) -> Tuple[float, str]:
-    p = output_dir / "gauge.json"
-    if not p.exists():
-        raise RefineError(f"{p} is missing — the refinement's gauge priors come from F2 "
-                          f"(python -m precision.gauge --session <dir>)")
-    g = json.loads(p.read_text())
-    inst = g["applied_instrument"]
-    return float(g["sigma_by_instrument"][inst]), inst
-
 
 def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = print) -> Dict[str, Any]:
     from precision.camera import load_camera_json, save_camera_json, undistort_solver
@@ -1295,13 +1169,18 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     tid = tr["track_query_id"]
     split_obs = split_of_observations(tid, tr["track_split"], tr["obs_track"])
     lap("split")
-    sigma_rel, inst = _gauge_sigma(out)
-    log(f"{LOG_TAG} {len(kf)} keyframes, {len(tid):,} tracks, gauge σ {sigma_rel:.4f} ({inst})")
+    from precision import graph_prior as GP
+    graph = GP.graph_edges(out / "maplong_run", len(kf))
+    gsum = GP.summary(graph)
+    log(f"{LOG_TAG} {len(kf)} keyframes, {len(tid):,} tracks; the cube graph inside the cost: "
+        f"{gsum['within a cube']['edges']:,} edge(s) within cubes (sigma "
+        f"{gsum['within a cube']['sigma_m']['median'] * 100:.1f} cm at the median), {gsum['closure']['edges']:,} "
+        f"closure(s), keyframe {gsum['held_keyframe']} held")
     from precision.config import raw_of
     from reconstruction.loops.config import improvement_error_factor
     fac = float(improvement_error_factor(raw_of(pcfg)))   # the job's frozen configuration (point 69)
     core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
-                       tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
+                       tr["obs_uv_native"], split_obs, kf, graph, cfg, solver,
                        error_factor=fac, log=log, solve=bool(cfg.enabled), range_m=float(pcfg.view_range_m))
     best = core["best"]
     lap("ladder_end")
@@ -1323,7 +1202,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
             first_rungs = core["rungs"]               # the first ladder stays in the record;
             core = best = None                        # its landmarks and groups are made again by this solve
             core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
-                               tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver, error_factor=fac,
+                               tr["obs_uv_native"], split_obs, kf, graph, cfg, solver, error_factor=fac,
                                log=log, solve=True, range_m=float(pcfg.view_range_m), hold=hold)
             best = core["best"]
             return f"F5 {best.name}, {int(np.asarray(hold, bool).sum())} keyframe(s) held", best.w2c, _cam_of(best)
@@ -1378,9 +1257,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                      "solver_errors": core["solver_errors"]},
            "ladder": core["ladder"], "ladder_restricted_by": core["ladder_restricted_by"],
            "dropped": core["dropped"],
-           "gauge": {"sigma_rel": sigma_rel, "instrument": inst,
-                     "prior_sigma_m": {"first": float(core["prior_sigma_m"][0]),
-                                       "last": float(core["prior_sigma_m"][-1])}},
+           "graph": gsum,
            "rungs": core["rungs"], "applied_rung": best.name,
            "camera": {"before": list(cam.params), "after": best.params_by_block},
            "n_landmarks": len(core["X"]),

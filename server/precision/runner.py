@@ -135,11 +135,16 @@ STEPS: List[Step] = [
          reads=("frames", "output/camera.json"),
          writes=("output/precision/tracks.npz", "output/precision/tracks.json"), config=("tracks",)),
     Step("f5_refine", "F5 joint refinement", "mapanything", "precision.refine",
-         reads=_GEOMETRY_IN + ("output/gauge.json", "output/precision/tracks.npz"),
+         # the cube graph it holds inside its cost (precision/graph_prior.py) and, for the decision by zone before it
+         # applies its result (precision/decide.py), the keyframes' records, their frames and the first pass's map
+         reads=_GEOMETRY_IN + ("output/precision/tracks.npz", "output/maplong_run/chunk_graph.json",
+                               "output/maplong_run/chunk_sim3.json", "output/omega_run/results_output", "frames",
+                               "intake/cubes.json"),
          writes=("output/precision/refine.json", "output/precision/witness_poses.txt",
                  "output/precision/witness_frames.txt", "output/precision/refine_residuals.npz",
-                 "output/camera.json") + _POSE_FILES,
-         config=("refine", "camera")),
+                 "output/precision/decisions.json", "output/camera.json") + _POSE_FILES,
+         config=("refine", "camera", "coherence", "bend", "tracks", "raw:reconstruction.simple",
+                 "raw:correction_graph.graph")),
     Step("f6_bend", "F6 depth on F5: Omega's depth at the session's factor + multi-view vote (the product)", "da3",
          "precision.depth_on_f5", gpu=True,              # its maps and its vote run on the card (f6_torch.require_cuda)
          # intake/cubes.json: what each keyframe sees of every other — the co-visible keyframes of other moments

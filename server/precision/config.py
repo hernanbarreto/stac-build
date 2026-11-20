@@ -268,7 +268,6 @@ class TracksConfig:
 
 # ── F5: joint refinement + witness localisation ─────────────────────────
 
-SOLVERS = ("ceres", "torch")
 
 
 def _keep_gb(tb: dict, key: str) -> float:
@@ -307,15 +306,12 @@ class RefineConfig:
                                 # default reproduces the chain exactly)
     min_tri_deg: float          # BOUND: a landmark's rays must span at least this (degrees)
     huber_px: float             # BOUND: Huber scale of the reprojection loss (native px)
-    max_iterations: int         # BOUND: Ceres iterations per rung (reconstruction.colmap_ba)
-    ceres_threads: int          # must stay 1 for bit-identical results (validated at load)
+    max_iterations: int         # BOUND: Levenberg-Marquardt iterations per rung
     heldout_confidence: float   # declared confidence of the held-out comparisons
     permutations: int           # BOUND: permutation / bootstrap resamples of the tests
     seed: int                   # their fixed seed
     min_witness_corr: int       # BOUND: 2D-3D correspondences a witness needs for PnP
-    solver: str                 # 2026-11-01: ceres (pycolmap, one CPU thread) | torch (precision/ba_torch.py: the same
-                                #   problem on the GPU, deterministic by sorted reductions)
-    torch_ba: TorchBAConfig     # the torch solver's stopping rules and damping (used when solver is torch)
+    torch_ba: TorchBAConfig     # the solver's stopping rules and damping (precision/ba_torch.py)
     triangulation_device: str   # 2026-11-01: numpy (the path of record, LAPACK per track) | cpu | cuda — where the
                                 #   batched multi-view DLTs of F5 / F6 run (refine._dlt_stack_t); the same
                                 #   landmarks to 1e-9 (tests/test_triangulate_torch.py)
@@ -773,13 +769,11 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         min_tri_deg=_num(rf, "min_tri_deg", "refine", lo=0.0, lo_excl=True),
         huber_px=_num(rf, "huber_px", "refine", lo=0.0, lo_excl=True),
         max_iterations=_num(rf, "max_iterations", "refine", lo=1, integer=True),
-        ceres_threads=_num(rf, "ceres_threads", "refine", lo=1, integer=True),
         heldout_confidence=_num(rf, "heldout_confidence", "refine", lo=0.0, hi=1.0, lo_excl=True),
         permutations=_num(rf, "permutations", "refine", lo=1, integer=True),
         seed=_num(rf, "seed", "refine", lo=0, integer=True),
         # PnP needs four points (P3P + one to choose)
         min_witness_corr=_num(rf, "min_witness_corr", "refine", lo=4, integer=True),
-        solver=_enum(rf, "solver", "refine", SOLVERS),
         triangulation_device=_enum(rf, "triangulation_device", "refine", ("numpy", "cpu", "cuda")),
         torch_ba=TorchBAConfig(function_tolerance=_num(tb, "function_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
                                parameter_tolerance=_num(tb, "parameter_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
@@ -793,11 +787,6 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
     )
     if refine.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.refine.heldout_confidence' must be below 1")
-    if refine.ceres_threads != 1:
-        raise PrecisionConfigError(
-            f"'{SECTION}.refine.ceres_threads' = {refine.ceres_threads}: it must stay 1 — Ceres' "
-            f"multi-threaded evaluation and Schur accumulation sum in a run-dependent order, so "
-            f"the refined poses, camera and landmarks would not be bit-identical run to run")
 
     dp = _sub(sec, "depth", "")
     cm = _sub(dp, "colmap", "depth")
