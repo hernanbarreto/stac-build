@@ -1022,6 +1022,52 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
       08-24's size) · 8 an acceptance measure independent of the chain.
     – THE F6 TEST'S OWN FIRST FIGURE (its log, 17:25 UTC): with one factor the session's neighbour disagreement
       (τ, the 75th percentile) reads 1.15 % against 1.86 % with the factor per keyframe on the same F5.
+  · ⭐⭐ WHAT HE DECIDED ON THE AUDIT (2026-11-20, 18:20 – 18:50 UTC) — TWO TASKS, HIS WORDS: "de qué sirve la
+    auditoría si no la analizamos y no sacamos conclusiones" → the assistant's four conclusions (the skeleton —
+    cubes, seams, closures, graph — is right; ONE design flaw repeated three times: a later step decides again
+    what the graph fixed without carrying the graph — the old F2, F5, F6; nobody notices because every step is
+    checked against itself; much calculation decides nothing) and four proposals (A the scale decided once and
+    applied to cameras and depth together · B F5 with the graph inside · C an independent check after each step ·
+    D what is redundant, out). HIS ANSWER: "Coincido salvo con el C. Tenemos que armar un diagrama de flujo
+    correcto que toma cada paso de la etapa anterior … si empeora ese paso o esa decisión se vuelve al estado mejor
+    y se sigue con el siguiente paso del proceso. Debemos llegar a la publicación de la nube habiendo pasado por
+    todas las etapas y habiéndonos quedado con el mejor estado del sistema. No es de publica y listo, no no,
+    publicar no sirve de nada … hay que tomar decisiones sobre los resultados que se van obteniendo" / "Y
+    fundamentalmente no hacer ningún cálculo redundante ni paso que no agregue valor. Todo lo redundante que
+    detectaste ir quitándolo no debe quedar nada que no agregue valor en la cadena" / "Acá tenemos básicamente dos
+    tareas …: Eliminar lo que no agrega valor es redundante etc, y corregir correctamente la coherencia de cada
+    paso para que realmente agregue el valor que buscamos, y si no lo agrega para alguna sesión en particular
+    siempre garantizar el mejor estado posible en cada paso".
+    – THE DECISION RULE, AGREED ("cuál es el mejor estado de toda la sesión?, la mejor combinación de haber
+      aceptado o rechazado las correcciones … vos cómo lo propones Pensa bien" → the proposal → "Se entiende
+      perfecto y es la manera correcta de abordarlo"): there is always a BEST STATE (cameras + depth + scale). A
+      stage starts from it and solves the WHOLE session → a candidate. The candidate is measured ZONE BY ZONE (a
+      zone = a stretch of the walk, a cube's keyframes) against the best state with ONE measure that does not
+      depend on the stage (the agreement of different passes over the same surface and of neighbouring keyframes,
+      in the images; his rule: 95 %, 1.1 × the measured error). No zone worse → the candidate is the best state.
+      Some worse → the SAME stage is solved again with those zones HELD to the previous state, and measured
+      again; still worse somewhere → the stage is discarded, the best state stays, the reason is recorded. NEVER
+      CUT AND PASTE (two solutions joined leave a border — another duplicate): always one coherent state. The
+      guarantee is "no zone worse than before", not the best of all combinations. Decided ON THE FLY only what is
+      independent from one keyframe to the next (PointDiT's detail, the vote pixel by pixel). "Holding a zone to
+      the previous state" is the same mechanism as "F5 with the graph inside". The diagram sent to him:
+      scratchpad dl/flujo/flujo_decisiones_v2.png (flujo2.py). NOT STARTED IN CODE — it waits for his word.
+    – THE REMOVALS, UNDER WAY (each tested before it is applied): DONE 2026-11-20 — the depth graph
+      (`reconstruction.vggtomega.depth_graph: false`, c97c36a: six real cubes closed with and without it in both
+      closing modes, the 276 products byte-identical); the per-frame uncertainty maps (the fork bc93d56: 4 GB a
+      run on pccr 08-24, deleted unread; the report and its session median stay); the seams' scale bound and its
+      flag on the closures (same fork commit; 46 + 5 tests). ⚠ THE REBUILD KIT IS OWED for the fork's commit
+      bc93d56 (drift.py → capture.sh → commit → push), held until the F6 run on the copy publishes. NEXT, in the
+      order of the machine time they free: F4's witness windows with F5's localisation and the intake's witness
+      pass (one chain; a test of F4 + F5 without them on a scratch copy of bufferStop_prueba,
+      /root/dev_data/bs_lean on the LOCAL disk, ~12 min of the card) · F2 with its DA3 windows (leaves with F5's
+      new prior) · the cube check · the bridges over 6 m (his criterion first) · the coverage fill · the DA3 lock
+      per cube (the 15 m range needs another unit first) · the co-visibility budget · the duplicate of the cloud
+      (≈ 20 modules name it: correction/session, apply, calibration_api …) · the two viewer layers and their
+      route · what F6's loader opens and does not use (witness poses, F5's residual file).
+    – SEEN IN F6'S LOG WHILE IT RAN, to measure: a keyframe hears a median of 249 co-visible keyframes as
+      witnesses (773,446 pairs) and the turn frames of the cubes' SECOND pass are 2,044 views — a vote without
+      them, on one session, says whether that second pass of every cube adds anything.
   · HIS DECISIONS PENDING (asked, none taken): his eye on the copy's new cloud; then F5 (hold its camera steps where
     it has no information); which redundant / unused steps go; the 566 bridges over 6 m (42 min of card); THE REAL
     SIZE OF A TILE of that floor (published it reads 0.585 m — with 600 or 609.6 mm the cloud is 2.5–4 % small).
