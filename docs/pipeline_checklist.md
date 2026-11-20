@@ -1,101 +1,97 @@
-# The pipeline checklist — the roadmap, in the exact order of execution
+# The pipeline checklist — the single list
 
-USER 2026-11-20: *"hace un checklist con todas las conclusiones, lo que esta OK, marcalo como OK no se toca, lo que hay
-que hacer y ya esta hecho con ok, realizado, y lo que hay que hacer y no esta hecho marcalo como pendiente"* / *"no me
-lo pongas a mi aca, guardalo y es lo que vas actualizando, en la medida que vas avanzando"* / *"la lista no debe ser una
-ensalada de pendientes, debe ser exactamente la hoja de ruta de lo que se va a hacer"*.
+USER 2026-11-20: *"hay que armar una lista en la que este volcado esto, con las conclusiones de lo que esta bien, lo que
+hay que corregir, corregir es eliminar, o hacer bien, etc"* / *"guardalo y es lo que vas actualizando, en la medida que
+vas avanzando"* / *"la lista no debe ser una ensalada de pendientes, debe ser exactamente la hoja de ruta de lo que se
+va a hacer"*.
 
-This file is the single list. It is updated every time a step closes. The steps are executed in this order, one at a
-time; a step is not started without his order. "C-n" is conclusion n of the audit
-(`docs/pipeline_audit_2026-11-20.md`; the 36 conclusions are listed at the end of this file).
+ONE list: the 36 conclusions of the audit (`docs/pipeline_audit_2026-11-20.md`), one per line, never merged. Each line
+says what the conclusion is, what has to be done with it, and its state. "C" is the conclusion's own number: it never
+changes. "Order" is the order of execution of what is pending: the list is the roadmap, executed from 1 on, one line at
+a time, and no line is started without his order.
+
+What has to be done with a conclusion:
+- **NOT TO BE TOUCHED** — it is right and necessary as it is.
+- **REMOVE** — delete it from the code and refactor the code around it.
+- **DO IT RIGHT** — it is right in concept and wrong as applied: correct it.
+- **BUILD** — it does not exist yet.
+- **MEASURE, THEN DECIDE** — the audit could not judge it: measure it on one session and he decides.
 
 **THE RULE OF "DONE"** (USER 2026-11-20): *"cuando algo esta hecho, solo se considera hecho si el pipeline lo ejecuta,
 si esta en otro lado, escrito tirado en un costado, en test, eso no sirve, solo se considera hecho si en el pipeline al
 ejecutar la reconstrucion se ejecuta ese codigo, cuando algo debe eliminarse es eliminarse por completo, no un flag
 apagado en el config, es eliminar del codigo, refactorizar el codigo"*.
-- Something built or corrected is DONE only when the reconstruction pipeline EXECUTES that code.
-- Something to remove is DONE only when it is DELETED from the code and the code is refactored around it. A switch
-  turned off in the configuration is not a removal.
-- A step is DONE or PENDING. Nothing is "started".
+- Built or corrected: DONE only when the reconstruction pipeline EXECUTES that code. Written on the side, in a scratch
+  folder or only in a test: not done.
+- Removed: DONE only when it is DELETED from the code and the code refactored. A switch turned off is not a removal.
+- A line is DONE or PENDING. Nothing is "started".
 
-State on 2026-11-20: 16 steps, 0 done, 16 pending.
+State on 2026-11-20: 36 conclusions — 8 not to be touched, 1 done, 27 pending.
 
-## The roadmap
+## The list
 
-| Step | What is done in it | Closes | It is DONE when | State |
+| Order | C | Conclusion | What has to be done | State |
 |---|---|---|---|---|
-| 1 | The rebuild kit of the pod captured again (owed since the fork's commit bc93d56) | — | `drift.py` says the kit is the pod; committed and pushed | PENDING |
-| 2 | A run can no longer be lost at its last step: F6 keeps what it computed until its cloud is published and resumes AT the publication; the cleaner takes a scratch on the volume, declared, when the local disk is short | — | the pipeline's F6 and cleaner are that code; a failed publication resumes without computing again (tested) | PENDING |
-| 3 | **PointDiT deleted** — from F6's code, the configuration, the tests, its environment and weights on the pod, the rebuild kit, the documents (his order: *"hay que sacarlo, eliminalo de la cadena, del repo, de todo"*) | C-34 | F6 runs and no PointDiT code, key, weight or mention is left | PENDING |
-| 4 | F6 on the copy of pccr 2026-08-24 with ONE depth factor for the session — the run he is waiting for. After it, `correction/release.py` gets its two divisors back as integers | C-16 (his eye) | the cloud is published and he has looked at it | PENDING |
-| 5 | The coherence measure inside the pipeline: computed on the card after the cube graph and after F5, written with the session's products | C-31 (the measure) | a reconstruction run executes it and its numbers are in the session | PENDING |
-| 6 | F5 carries the cube graph: relative constraints between neighbouring cameras with the cubes' own uncertainty, and the closures, inside F5's cost; the independent position priors deleted. bufferStop first, then the copy | C-9 | the pipeline's F5 is that code; the measure and his eye on one session | PENDING |
-| 7 | The decision by zone after F5: no zone worse → the result is the best state; zones worse → solved again with those zones held to the previous state; still worse → the stage is discarded. The decision is written with the products | C-31 | the pipeline executes the decision after F5 and records it | PENDING |
-| 8 | F2 deleted: the scale along the walk, today's second estimate of the metre, the DA3 windows it generates again, and the intake's chain / walk length / chainage that only fed it | C-15, C-18, C-27 | no F2 step in the chain and no code of it left | PENDING |
-| 9 | The scale decided once and carried to the depth: F6 multiplies by the known factor; the code that fitted and "verified" a depth factor deleted | C-10, C-16, C-24 | the pipeline's F6 has no fitted factor and no code of it left | PENDING |
-| 10 | The cube stage: the DA3 lock per cube deleted and the 15 m range evaluated in units that can be trusted; the depth graph's code deleted; the co-visibility budget of the cut deleted | C-13, C-20, C-17, C-21 | the cube stage runs without that code existing | PENDING |
-| 11 | The closures between passes: verified by what they assert (the split-half test the code already has), weighted and selected by it; the graph judged (leave-one-out); a solve that does not converge stops the run. A bridge that fails its verification is not used | C-11, C-32, C-26 | the cube stage executes the verification and the judge | PENDING |
-| 12 | The decision by zone after the cube graph | C-31 | the pipeline executes the decision after the graph and records it | PENDING |
-| 13 | F4: the witness windows, F5's localisation of the witness frames and the intake's witness pass deleted; a loop window only where it links two passes | C-23, C-12 | F4 and F5 run without that code existing; loop windows are chosen by what they link | PENDING |
-| 14 | The intake: the brightness gate deleted; the coverage fill deleted | C-14, C-19 | the intake runs without that code existing | PENDING |
-| 15 | The publication: the cube check deleted; the second copy of the cloud deleted; the two viewer layers and their route deleted; the files nothing reads deleted | C-25, C-28, C-29, C-30 | the chain ends at the publication and none of those is written or served | PENDING |
-| 16 | To measure, then decide with him: whether the second pass of every cube adds anything; the vote's limit of 30° and "in place"; whether F5's two focal lengths should be one | C-33, C-35, C-36 | each is measured on one session and decided by him | PENDING |
+| 1 | 34 | PointDiT (the detail at the edges): a model under a non-commercial licence, an hour of the card, no result or need shown — *"hay que sacarlo, eliminalo de la cadena, del repo, de todo"* | REMOVE — from F6's code, the configuration, the tests, the pod's environment and weights, the rebuild kit, the documents | PENDING |
+| 2 | 16 | F6's depth factor per keyframe, and its "verification" on F5's own landmarks | DO IT RIGHT — one factor for the session; the run on the copy of pccr 2026-08-24 for his eye | PENDING |
+| 3 | 31 | Every step is judged against itself; none against an independent reference | BUILD — the decision by zone at the end of every stage, the best state kept (the flow below), with one measure computed on the card | PENDING |
+| 4 | 9 | F5 does not carry the cube graph: where the tracks say nothing it moves the cameras freely | DO IT RIGHT — relative constraints between neighbouring cameras and the closures inside F5's cost; the independent position priors deleted | PENDING |
+| 5 | 15 | The old F2 (a scale along the walk) | REMOVE — today it is only switched (`gauge.profile: constant`) | PENDING |
+| 6 | 18 | Today's F2 (a second estimate of the metre) and the DA3 windows it generates again | REMOVE | PENDING |
+| 7 | 27 | The chain, the walk length and the chainage of the intake's DA3 windows | REMOVE | PENDING |
+| 8 | 10 | The scale reaches the cameras and never the depth | DO IT RIGHT — the scale decided once and carried to cameras and depth together | PENDING |
+| 9 | 24 | The fit of F6's session factor (the factor is known) | REMOVE — F6 multiplies by the known factor | PENDING |
+| 10 | 20 | The DA3 lock per cube | REMOVE | PENDING |
+| 11 | 13 | The 15 m range is evaluated in each cube's own units, which cannot be trusted | DO IT RIGHT | PENDING |
+| 12 | 17 | The depth graph | REMOVE — today it is only switched off (`depth_graph: false`) | PENDING |
+| 13 | 21 | The co-visibility budget of the cut | REMOVE | PENDING |
+| 14 | 32 | The stronger verifications the code already has (a closure's split halves, the graph's leave-one-out) are not used on cubes | DO IT RIGHT — the cube stage executes them; a solve that does not converge stops the run | PENDING |
+| 15 | 11 | The closures between passes: a weight that does not measure what they assert, never verified, selected on any overlap | DO IT RIGHT — weighted and selected by their verification | PENDING |
+| 16 | 26 | The bridges over 6 m | REMOVE — a bridge that fails its verification is not used | PENDING |
+| 17 | 23 | F4's witness windows and F5's localisation of the witness frames | REMOVE — with the intake's witness pass | PENDING |
+| 18 | 12 | F4: three loop windows in four link no two passes | DO IT RIGHT — a loop window only where it links two passes | PENDING |
+| 19 | 14 | The brightness gate of the intake | REMOVE | PENDING |
+| 20 | 19 | The coverage fill | REMOVE | PENDING |
+| 21 | 25 | The cube check | REMOVE | PENDING |
+| 22 | 28 | The second copy of the cloud | REMOVE | PENDING |
+| 23 | 29 | The two viewer layers | REMOVE — with the route that serves them | PENDING |
+| 24 | 30 | The files nothing reads (the per-frame uncertainty maps are already deleted, fork bc93d56) | REMOVE | PENDING |
+| 25 | 33 | The second pass of every cube and the turn frames | MEASURE, THEN DECIDE | PENDING |
+| 26 | 35 | The vote's limit of 30°, and "in place" re-admitting what the majority or the veto rejected | MEASURE, THEN DECIDE | PENDING |
+| 27 | 36 | F5's two focal lengths: whether they should be one | MEASURE, THEN DECIDE | PENDING |
+| — | 22 | The seams' scale bound | REMOVE | **DONE** (2026-11-20: deleted from the fork's code, bc93d56 / 50fc503) |
+| — | 1 | The frames, and never more than 8 video frames without a keyframe | NOT TO BE TOUCHED | OK |
+| — | 2 | The first pass (who sees whom) | NOT TO BE TOUCHED | OK |
+| — | 3 | The cut into cubes by his numbers, and the owner of each keyframe | NOT TO BE TOUCHED | OK |
+| — | 4 | Each cube's pass, the seams, the closures between passes and the graph | NOT TO BE TOUCHED | OK |
+| — | 5 | The one scale (scale_align) and the first orientation | NOT TO BE TOUCHED | OK |
+| — | 6 | The first camera (F0), F4's tracks and F5's adjustment | NOT TO BE TOUCHED | OK |
+| — | 7 | F6's vote and the cleaner | NOT TO BE TOUCHED | OK |
+| — | 8 | The publication and the floor's levelling | NOT TO BE TOUCHED | OK |
 
-In every step: what still runs on the CPU in the stage that is touched moves to the card (*"todo en placa nada en
-cpu"*), and a change that alters what he sees is shown to him on ONE session before it reaches the others.
+## The flow agreed on 2026-11-20 (what line 3 builds)
 
-Already deleted from the code before this roadmap (2026-11-20, fork bc93d56): the seams' scale bound (C-22) and the
-per-frame uncertainty maps (a part of C-30). Only switched off, NOT done: the depth graph (`depth_graph: false`) and
-the old F2 (`gauge.profile: constant`) — steps 10 and 8 delete them.
+*"si empeora ese paso o esa decisión se vuelve al estado mejor y se sigue con el siguiente paso del proceso. Debemos
+llegar a la publicación de la nube habiendo pasado por todas las etapas y habiéndonos quedado con el mejor estado del
+sistema"* / *"Se entiende perfecto y es la manera correcta de abordarlo"*.
 
-## The 36 conclusions of the audit (their numbers never change)
+1. There is always a BEST STATE: cameras + depth + scale.
+2. A stage starts from the best state and solves the WHOLE session: a candidate.
+3. The candidate is measured ZONE BY ZONE against the best state, with one measure that does not depend on the stage
+   (how well different passes agree over the same surface, and how well neighbouring keyframes agree, in the images).
+   A zone is a stretch of the walk (a cube's keyframes). The rule is his: 95 % and 1.1 × the measured error.
+4. No zone worse → the candidate is the new best state.
+5. Some zone worse → the same stage is solved AGAIN with those zones held to the previous state, and measured again.
+6. Still worse somewhere → the stage is discarded, the best state stays, the reason is recorded.
+7. Never cut and paste two solutions: always ONE coherent state. After every stage no zone is worse than before.
+8. Decided on the fly, unit by unit, only what is independent from one keyframe to the next (the vote, pixel by
+   pixel).
+9. The cloud that is published is the best state's, with the record of every decision.
 
-Right and necessary — NOT TO BE TOUCHED:
-1. The frames, and never more than 8 video frames without a keyframe.
-2. The first pass (who sees whom).
-3. The cut into cubes by his numbers, and the owner of each keyframe.
-4. Each cube's pass, the seams, the closures between passes and the graph.
-5. The one scale (scale_align) and the first orientation.
-6. The first camera (F0), F4's tracks and F5's adjustment.
-7. F6's vote and the cleaner.
-8. The publication and the floor's levelling.
+## Besides the 36 (not conclusions of the audit; kept apart)
 
-Right in concept, wrong as applied — to correct:
-9. F5 does not carry the cube graph. → step 6
-10. The scale reaches the cameras and never the depth. → step 9
-11. The closures: a weight that does not measure what they assert, never verified, selected on any overlap. → step 11
-12. F4: three loop windows in four link no two passes. → step 13
-13. The 15 m range is evaluated in each cube's own units. → step 10
-
-Wrong by concept — to remove or replace:
-14. The brightness gate of the intake. → step 14
-15. The old F2. → step 8
-16. F6's depth factor per keyframe and its "verification" on F5's own landmarks. → steps 4 and 9
-17. The depth graph. → step 10
-
-Redundant — to remove:
-18. Today's F2 and the DA3 windows it generates again. → step 8
-19. The coverage fill. → step 14
-20. The DA3 lock per cube. → step 10
-21. The co-visibility budget of the cut. → step 10
-22. The seams' scale bound. → deleted (fork bc93d56)
-23. F4's witness windows and F5's localisation of the witness frames. → step 13
-24. The fit of F6's session factor (the factor is known). → step 9
-25. The cube check. → step 15
-26. The bridges over 6 m. → step 11
-27. The chain, the walk length and the chainage of the intake's DA3 windows. → step 8
-
-Duplicated, or written and not used — to remove:
-28. The second copy of the cloud. → step 15
-29. The two viewer layers. → step 15
-30. The per-frame uncertainty maps (deleted, fork bc93d56) and the other files nothing reads. → step 15
-
-The verification:
-31. Every step is judged against itself; none against an independent reference. → steps 5, 7, 12
-32. The stronger verifications the code already has (closures, graph) are not used on cubes. → step 11
-
-Not judged by the audit:
-33. The second pass of every cube and the turn frames. → step 16
-34. PointDiT — his decision of 2026-11-20: deleted. → step 3
-35. The vote's limit of 30° and "in place". → step 16
-36. F5's two focal lengths. → step 16
+- The rebuild kit of the pod captured again after the fork's commit bc93d56 — PENDING.
+- A run cannot be lost at its last step: F6 keeps what it computed until its cloud is published; the cleaner takes a
+  scratch on the volume when the local disk is short — PENDING.
+- `correction/release.py`: its two log divisors as integers again, once no chain waits on its old bytes — PENDING.
+- What still runs on the CPU in a stage moves to the card when that stage is touched — in every line above.
