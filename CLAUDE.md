@@ -1946,9 +1946,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   second copy of all the patches and their tests in /workspace/dev_patches_20261120.tar.gz; the clone
   /root/dev/stac-build on the LOCAL disk). The five apply in order to the live tree as it is (checked on a
   scratch index 2026-11-20 07:50 UTC). EVERY KEY THEY ADD IS AT THE RECORD'S VALUE: merging changes nothing in
-  what is computed — but it changes the steps' CODE and configuration sections, which are in their stamps: a
-  session stamped before the merge has its precision steps recomputed if its reconstruction is resumed after
-  it. Each key is switched after its measurement on the card.
+  what is computed — but it changes the steps' CODE and configuration sections, which are in their stamps
+  (precision/runner.py: "the first step whose stamp differs is where the chain starts again"): a session
+  stopped IN THE MIDDLE of its precision chain and resumed after the merge computes those steps again. A scan
+  whose cloud is PUBLISHED is not touched by it: a resume takes its reconstruction as complete by its artifact
+  (pipeline_manager._stage_is_complete → precision.product.product_is_live) and never enters the chain — read
+  in the code 2026-11-20. Each key is switched after its measurement on the card.
   PASSIVE RECORDS LEFT RUNNING ON THE COPY (scratchpad, read only): stage_sampler.py → stage_usage.csv (every
   5 s: stage, card utilisation / memory / power, the stage process's CPU and its busiest threads) and
   stage_log_stamped.txt (every stage line of the log with its UTC time) — they give the real split of F5's
