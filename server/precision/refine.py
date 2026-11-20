@@ -1236,7 +1236,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     w2c0 = np.linalg.inv(poses)
     use_device(cfg.triangulation_device)                 # every DLT of this stage on the declared device
     _t_load = time.perf_counter()
-    tr = load_tracks_v2(session_dir)
+    tr = load_tracks_v2(session_dir, threads=pcfg.tracks.npz_threads)
     _phase = {"load_tracks_s": round(time.perf_counter() - _t_load, 1)}
     tid = tr["track_query_id"]
     split_obs = split_of_observations(tid, tr["track_split"], tr["obs_track"])

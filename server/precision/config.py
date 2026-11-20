@@ -249,6 +249,10 @@ class TracksConfig:
     dense_matcher: str          # none | roma (optional, off)
     tracker_weights_url: str    # the tracker checkpoint at a PINNED revision (never 'main')
     tracker_weights_sha256: str     # its content: a file that does not hash to this is refused
+    npz_threads: int            # how tracks.npz is WRITTEN AND READ: 0 = THE RECORD (numpy's own writer and
+                                # reader, one member after another on one core: 9.2 min of idle card on pccr
+                                # 2026-08-24); N > 0 = its members deflated / inflated on N threads
+                                # (precision/npz_threads.py) — the same arrays
 
 
 # ── F5: joint refinement + witness localisation ─────────────────────────
@@ -754,6 +758,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         dense_matcher=_enum(tk, "dense_matcher", "tracks", DENSE_MATCHERS),
         tracker_weights_url=_str(tk, "tracker_weights_url", "tracks"),
         tracker_weights_sha256=_str(tk, "tracker_weights_sha256", "tracks").lower(),
+        npz_threads=_num(tk, "npz_threads", "tracks", lo=0, integer=True),
     )
     if len(tracks.tracker_weights_sha256) != 64 or \
             any(c not in "0123456789abcdef" for c in tracks.tracker_weights_sha256):

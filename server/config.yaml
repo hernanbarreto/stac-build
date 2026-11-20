@@ -2760,6 +2760,14 @@ reconstruction:
       # is refused
       tracker_weights_url: https://huggingface.co/facebook/VGGSfM/resolve/643a1eb2069dad9b4cff071960323542477272e3/vggsfm_v2_tracker.pt
       tracker_weights_sha256: 451f1d218be1ef661c81d6254cbc633a5190e7d6069fe51621cc29ba5d90a404
+      # how tracks.npz is WRITTEN at the end of F4 and READ by F5 / F6. 0 = THE RECORD: numpy's own writer deflates
+      # the 17 members one after another on one core (pccr 2026-08-24: 12.5 GB in 9.2 min, the card held and
+      # idle — USER 2026-11-20: "la veo ocupada pero no operativa") and its reader inflates them the same way.
+      # N > 0 = the members cut in pieces deflated N at a time and laid out in the same order, and read N members
+      # at a time (precision/npz_threads.py): the same arrays; the file itself is then the same at every run
+      # (numpy stamps each member with the clock). The thread count is no parameter of the tracks: it is
+      # written in tracks.timing.json, beside the time the write took.
+      npz_threads: 0
     # F5 — joint pose + session camera refinement, witness localisation (precision/refine.py)
     refine:
       enabled: true                     # false = no bundle adjustment (the evaluation battery's variant "sin F5",

@@ -76,6 +76,9 @@ import numpy as np
 TRACKS_NAME = "tracks.npz"
 REPORT_NAME = "tracks.json"
 TIMING_NAME = "tracks.timing.json"
+#: keys of the tracks configuration that say HOW the step runs, never what it computes: not recorded among the
+#: product's parameters (precision.config.TracksConfig)
+EXECUTION_ONLY = ("npz_threads",)
 INSTANCE_LOOPS_NAME = "instance_loops.json"
 TRACKS_VERSION = 2
 PROVENANCE = "tool_measured"
@@ -392,6 +395,18 @@ def vggsfm_track_fn(weights_url: str, weights_sha256: str, device: str = "cuda",
 # ── the held-out split, per track ───────────────────────────────────────
 
 _SPLIT_KEY = np.dtype([("seed", "<i8"), ("frame", "<i8"), ("u", "<f4"), ("v", "<f4")])
+
+
+def frames_of(obs_frame: np.ndarray) -> set:
+    """The frames the observations lie on, as a set of ints — ``set(obs_frame)`` without walking the
+    observations one by one in Python (228 M of them on pccr 2026-08-24: two such sets were the 39 s
+    between the file and the step's last line, the card held and idle)."""
+    f = np.asarray(obs_frame, np.int64).ravel()
+    if not len(f):
+        return set()
+    if int(f.min()) < 0:                                  # (never a frame of a video: the plain way)
+        return set(np.unique(f).tolist())
+    return set(np.flatnonzero(np.bincount(f)).tolist())
 
 
 def track_split_of(seed: int, query_frames: np.ndarray, query_uv: np.ndarray,
@@ -750,10 +765,11 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None, fx_p
     meta = {"version": TRACKS_VERSION, "provenance": PROVENANCE, **epochs,
             "tracker_grid": gmap.to_dict(), "native_wh": [nw, nh],
             "tracker_weights": weights,
-            "params": {k: getattr(tcfg, k) for k in tcfg.__dataclass_fields__}}
+            # (how the file is WRITTEN is no parameter of the tracks: the product is the same whichever writer
+            #  wrote it — the thread count goes to the timing file, beside the time the write took)
+            "params": {k: getattr(tcfg, k) for k in tcfg.__dataclass_fields__ if k not in EXECUTION_ONLY}}
     tmp = pdir / (TRACKS_NAME + ".tmp.npz")
-    np.savez_compressed(
-        tmp,
+    members = dict(
         obs_track=np.asarray(obs["track"], np.int64), obs_frame=np.asarray(obs["frame"], np.int64),
         obs_uv=uv, obs_vis=np.asarray(obs["vis"], np.float32),
         obs_score=np.asarray(obs["vis"], np.float32),
@@ -765,8 +781,17 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None, fx_p
         track_split=split, window_id=np.asarray(obs["window"], np.int32),
         is_loop_pair=np.asarray(obs["loop"], bool), frame_kind=np.asarray(obs["kind"], np.int8),
         meta=np.asarray(json.dumps(meta)))
+    t_write = time.time()
+    if int(tcfg.npz_threads) > 0:
+        # the members deflated at the same time, laid out in this order: the same arrays (precision/npz_threads.py)
+        from precision.npz_threads import save as save_npz
+        save_npz(tmp, members, threads=int(tcfg.npz_threads))
+    else:
+        np.savez_compressed(tmp, **members)          # the record
     tmp.replace(pdir / TRACKS_NAME)
+    write_s = round(time.time() - t_write, 1)
     sig = np.asarray(obs["sigma"])
+    frames_seen = frames_of(obs["frame"])
     # what the tracks depend on beyond their inputs (point 37): the card, driver, torch / CUDA /
     # cuDNN, the numerics the tracker ran with, BLAS core, CPU, libraries and code — no clock
     from repro import environment_record
@@ -778,15 +803,16 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None, fx_p
            "n_heldout_tracks": int(split.sum()),
            "n_queries_dropped_edge": n_dropped_edge,
            "depth_edge_filter": omap is not None,
-           "keyframes_covered": len(set(obs["frame"]) & set(kf)), "n_keyframes": len(kf),
-           "witnesses_covered": len(set(obs["frame"]) & wit_set), "n_witnesses": len(wit_set),
+           "keyframes_covered": len(frames_seen & set(kf)), "n_keyframes": len(kf),
+           "witnesses_covered": len(frames_seen & wit_set), "n_witnesses": len(wit_set),
            "sigma_native_px": {"median": float(np.median(sig)),
                                "p90": float(np.percentile(sig, 90))},
            "instance_loops": il_rep, "revisits": rv_rep,
            "split": "sha256 of (seed, query frame, query pixel float32 bits) per track"}
     (pdir / REPORT_NAME).write_text(json.dumps(rep, indent=1))
     # the wall clock lives apart from the compared report (point 36)
-    (pdir / TIMING_NAME).write_text(json.dumps({"elapsed_s": round(time.time() - t0, 1)}, indent=1))
+    (pdir / TIMING_NAME).write_text(json.dumps({"elapsed_s": round(time.time() - t0, 1), "write_s": write_s,
+                                                "npz_threads": int(tcfg.npz_threads)}, indent=1))
     log(f"{LOG_TAG} {rep['n_obs']:,} obs, {rep['n_tracks']:,} tracks ({rep['n_heldout_tracks']:,} "
         f"held out), keyframes {rep['keyframes_covered']}/{len(kf)}, witnesses "
         f"{rep['witnesses_covered']}/{len(wit_set)}, σ median {rep['sigma_native_px']['median']:.2f} "
@@ -794,12 +820,21 @@ def run_tracks(session_dir: Path, tcfg, track_fn: Optional[TrackFn] = None, fx_p
     return rep
 
 
-def load_tracks_v2(session_dir: Path, members: Optional[Sequence[str]] = None) -> Dict[str, np.ndarray]:
+def load_tracks_v2(session_dir: Path, members: Optional[Sequence[str]] = None,
+                   threads: int = 0) -> Dict[str, np.ndarray]:
     """The tracks' arrays; ``members``: only these (F6 reads five of the sixteen — the others are 8 of its 24 s of
-    zlib on pccr's 300 MB file, 2026-11-01); None = all."""
+    zlib on pccr's 300 MB file, 2026-11-01); None = all. ``threads``: 0 = numpy's own reader, one member after
+    another (THE RECORD); N > 0 = the members inflated N at a time (precision/npz_threads.py) — the same arrays,
+    whichever writer wrote the file."""
     p = Path(session_dir) / "output" / "precision" / TRACKS_NAME
     if not p.exists():
         raise TracksError(f"{p} is missing — run python -m precision.tracks first")
+    if int(threads) > 0:
+        from precision.npz_threads import load as load_npz
+        try:
+            return load_npz(p, members=members, threads=int(threads))
+        except KeyError as e:
+            raise TracksError(str(e.args[0]) if e.args else str(e)) from e
     with np.load(p) as z:
         keys = z.files if members is None else [k for k in members]
         missing = [k for k in keys if k not in z.files]

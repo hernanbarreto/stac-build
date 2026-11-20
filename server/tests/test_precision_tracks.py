@@ -269,6 +269,42 @@ def test_the_split_is_a_function_of_the_tracks_own_key(sess):
     assert np.array_equal(tr["track_split"], want)
 
 
+def test_the_tracks_file_on_threads_is_the_records_product(sess):
+    """`tracks.npz_threads` (USER 2026-11-20: "todo lo que no cambie el resultado debe programarse mas rapido"): the
+    file written on threads holds the record's arrays — `meta` among them: the thread count is no parameter of the
+    tracks —, the report is the same bytes, the file is the same at every run, both readers give the same arrays
+    from either file, and the timing file says how it was written and how long the write took."""
+    from dataclasses import replace
+    pdir = sess.session_dir / "output" / "precision"
+    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)
+    rec, rec_report = T.load_tracks_v2(sess.session_dir), (pdir / T.REPORT_NAME).read_bytes()
+    rec_threads = T.load_tracks_v2(sess.session_dir, threads=4)             # numpy's file, the threaded reader
+    assert json.loads((pdir / T.TIMING_NAME).read_text())["npz_threads"] == 0
+    assert "npz_threads" not in json.loads(str(rec["meta"]))["params"]
+    fast = replace(TCFG, npz_threads=3)
+    _run_tracks(sess.session_dir, fast, track_fn=_truth_fn(sess), log=lambda *a: None)
+    first = (pdir / T.TRACKS_NAME).read_bytes()
+    got, got_threads = T.load_tracks_v2(sess.session_dir), T.load_tracks_v2(sess.session_dir, threads=4)
+    for other in (rec_threads, got, got_threads):
+        assert list(other) == list(rec)
+        for k in rec:
+            assert other[k].dtype == rec[k].dtype and other[k].shape == rec[k].shape, k
+            assert other[k].tobytes() == rec[k].tobytes(), k
+    assert (pdir / T.REPORT_NAME).read_bytes() == rec_report
+    timing = json.loads((pdir / T.TIMING_NAME).read_text())
+    assert timing["npz_threads"] == 3 and timing["write_s"] >= 0 and timing["elapsed_s"] >= timing["write_s"]
+    _run_tracks(sess.session_dir, replace(TCFG, npz_threads=8), track_fn=_truth_fn(sess), log=lambda *a: None)
+    assert (pdir / T.TRACKS_NAME).read_bytes() == first, "no clock in it, and never a function of the threads"
+    few = ("track_query_id", "track_split", "obs_track", "obs_frame", "obs_uv_native")
+    part = T.load_tracks_v2(sess.session_dir, members=few, threads=2)
+    assert list(part) == list(few) and all(part[k].tobytes() == rec[k].tobytes() for k in few)
+    with pytest.raises(T.TracksError, match="lacks"):
+        T.load_tracks_v2(sess.session_dir, members=("nope",), threads=2)
+    with pytest.raises(T.TracksError, match="lacks"):
+        T.load_tracks_v2(sess.session_dir, members=("nope",))
+    _run_tracks(sess.session_dir, TCFG, track_fn=_truth_fn(sess), log=lambda *a: None)     # the module's session as it was
+
+
 def test_the_report_holds_no_clock_and_the_timing_file_does(sess):
     """Plan points 36 / 37: tracks.json is the same bytes twice (environment and numerics
     recorded, no elapsed time); the elapsed time lives in tracks.timing.json."""
