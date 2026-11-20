@@ -229,7 +229,7 @@ steps between consecutive cameras; σ_rel = the scatter F2 measured of its DA3 w
 | The continuation solve after every rung (the solver's own error, for the judge) | a measurement | 55 % of F5's solve time | — | necessary to the judge as defined; moves no geometry |
 | The held-out judge between rungs (cluster bootstrap by keyframe) | his rule | as coded | — | sound |
 | Witness frames localised against the fixed landmarks | PnP on fixed structure | — | they vote in F6 | not judged here |
-| `refine_residuals.npz` | — | written | read by nothing | UNNECESSARY |
+| `refine_residuals.npz` | — | written; F6's input loader (`depth_sweep.load_inputs`) opens it — and stops the run if it is empty — to compute a pixel tolerance that only the sweep step used, and the sweep is not in this chain | F6's own modules never read that tolerance | UNNECESSARY (the loader must stop asking for it first) |
 
 **Does F5 decide the geometry, or its start?** bufferStop answers: two different starts (the old F2's cameras, the
 one-scale cameras) → the same solution to 0.1 mm. There the tracks determine everything and the prior is irrelevant.
@@ -285,7 +285,7 @@ per keyframe becomes legitimate again only once F5 is corrected, and then with a
 | A monocular detail network on tiles of each keyframe, fitted to the bent depth tile by tile (affine); its high-frequency part replaces Omega's near depth discontinuities, within τ | it cannot move a surface by more than τ (1.9 % on pccr): by construction it neither creates nor mends a displaced copy. Its value is at the edges | as coded | the relaunch of the copy: detail on 15.6 % of the valid pixels; 55 min of the card | not judged by these rulers — his eye |
 | The pixels between two surfaces at an edge ("mixed"): sent to the front or the back surface, or removed when neither is supported | a depth map interpolates across an edge: those pixels lie on no surface, and removing them removes floating points | as coded | 24.4 M mixed pixels → 4.6 M to the front, 5.7 M to the back, 14.2 M removed | sound: it is what keeps the edges clean |
 | A tile is rejected when its fit's residual is over the 95th percentile of the session's own tiles | a fixed RATE, not a measurement: 5 % of the tiles are rejected whether they are good or bad | as coded (the code calls the bar "self-referential") | 275 of 5,544 tiles (4.96 %), the bar at 13.4 %; 46 more by too little support | harmless (a rejected tile keeps Omega's depth); not a judgement of quality |
-| `layer_mono_detail.glb`, `layer_mixed_unresolved.glb` | the two viewer layers removed from the interface on 2026-11-19 | still written at every run | read by nothing | UNNECESSARY |
+| `layer_mono_detail.glb`, `layer_mixed_unresolved.glb` | the two viewer layers whose menu entries were removed from the interface on 2026-11-19 | still written at every run; the server keeps the route that serves them (`/api/precision/layer`) | nothing in the interface asks for them | UNNECESSARY (the writing and the route's two entries) |
 
 ### F6 — the cleaner (`reconstruction/gpu_cloud_clean.py`)
 
@@ -407,7 +407,8 @@ stage that is off) · the 566 bridges over 6 m (42 min).
 **Duplicates** — `cleaned_cloud_raw.ply` (the cloud a second time, byte for byte) · `obs_score` of `tracks.npz` (the
 visibility a second time).
 
-**Written and used by nothing** — `layer_mono_detail.glb`, `layer_mixed_unresolved.glb` · `refine_residuals.npz` ·
+**Written and used by nothing** — `layer_mono_detail.glb`, `layer_mixed_unresolved.glb` (a server route remains, no
+menu asks for them) · `refine_residuals.npz` (opened by F6's loader for a value F6 never uses) ·
 `witness_poses.txt` (loaded by F6, used by none of its calculations) · `obs_uv_sigma` of `tracks.npz` · the
 uncertainty maps · `metric_lock.json`, `chunk_graph.json` but its poses, `depth_graph.json`,
 `camera_poses.ply` · `coverage_fill.json`, `turn_frames.json`, `frame_quality.json`, `da3_frames.json`, `tol_rel`,

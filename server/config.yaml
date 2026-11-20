@@ -2058,8 +2058,18 @@ reconstruction:
     zoom_scale_fix: true                # zoom chunk → correct the scale, keep the chunk
     exact_seam_align: true              # rigid seams from exact pixel correspondences
     frame_ownership: true               # one frame → one writer in overlaps
-    depth_graph: true                   # cross-frame depth agreement stage (in-run, per-frame
-                                        # affine along rays, model ladder + authority bound)
+    depth_graph: false                  # cross-frame depth agreement stage (in-run, per-frame
+                                        # affine along rays, model ladder + authority bound).
+                                        # OFF 2026-11-20 (USER: "Todo lo redundante que detectaste ir
+                                        # quitándolo, no debe quedar nada que no agregue valor en la
+                                        # cadena"): its verdict was SKIP on the six sessions — it has
+                                        # never changed a depth — and it is a depth correction per
+                                        # keyframe that the cameras do not follow (docs/
+                                        # pipeline_audit_2026-11-20.md, Part IV). Tested on six real
+                                        # cubes of pccr 2026-08-24, both closing modes: the 276
+                                        # products (points, origins, records, poses, intrinsics,
+                                        # uncertainty) byte-identical with it off; only
+                                        # depth_graph.json and authority.json are no longer written.
     blend_copies: false                 # OFF 2026-09-28: the per-pixel MEAN of a shared frame's two
                                         # copies presumes they coincide (its own doc: "runs AFTER
                                         # the elastic consensus") — with elastic_seam off they
