@@ -354,9 +354,9 @@ def release(output_dir, *, dry: bool = False, log: Callable[[str], object] = pri
         if not dry:
             _remove_tree(d)
         freed[rel] = n
-        log(f"[release] {'would free' if dry else 'freed'} {n / 10 ** 9:.2f} GB — {what} ({rel})")
+        log(f"[release] {'would free' if dry else 'freed'} {n / 1e9:.2f} GB — {what} ({rel})")
     total = sum(freed.values())
-    log(f"[release] {out}: {total / 10 ** 9:.2f} GB {'would be' if dry else ''} freed; the session keeps its identity"
+    log(f"[release] {out}: {total / 1e9:.2f} GB {'would be' if dry else ''} freed; the session keeps its identity"
         + (f" {rid[:12]}…" if rid else "") + ", its cloud and everything a later stage reads; its reconstruction "
         "can no longer be resumed or restarted (a new one is a Replace)")
     return {"freed": freed, "bytes": total, "reconstruction_id": rid}
