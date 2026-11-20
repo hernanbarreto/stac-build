@@ -8,7 +8,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 from precision import judge_torch as JT  # noqa: E402
-from precision import depth_on_f5 as D6  # noqa: E402
 
 DEV = os.environ.get("STAC_TEST_DEVICE", "cpu")
 
@@ -45,12 +44,3 @@ def test_decide_change_t_across_blocks(monkeypatch):
         assert got == want
 
 
-def test_cluster_bootstrap_se_t_equals_the_reference():
-    rng = np.random.default_rng(2)
-    groups = [rng.normal(0.03, 0.01, int(rng.integers(0, 60))) for _ in range(41)]
-    groups[3] = np.round(groups[3], 2)
-    for nb in (2, 50, 2000):
-        want = D6.cluster_bootstrap_se(groups, nb, 5)
-        got = JT.cluster_bootstrap_se_t(groups, nb, 5, DEV)
-        assert got == want
-    assert JT.cluster_bootstrap_se_t(groups[:1], 100, 0, DEV) == D6.cluster_bootstrap_se(groups[:1], 100, 0) == 0.0

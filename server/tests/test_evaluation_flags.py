@@ -23,14 +23,6 @@ def test_defaults_are_the_production_chain_and_a_missing_key_is_named():
             load_precision_config(broken)
 
 
-def test_disabled_bend_is_the_identity_for_every_keyframe():
-    from precision.depth_on_f5 import IDENTITY, disabled_bend
-    wb, rule, coefs, prov = disabled_bend(5)
-    assert wb is None and rule["disabled"] and len(coefs) == 5 and len(prov) == 5
-    assert all(np.array_equal(c, IDENTITY) for c in coefs.values())
-    assert all(p["status"] == "disabled" and p["fit"] is None for p in prov.values())
-
-
 def test_refine_core_without_solving_keeps_the_initial_state():
     from dataclasses import replace
     from precision import refine as R

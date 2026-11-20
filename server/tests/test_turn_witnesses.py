@@ -77,7 +77,7 @@ def _write_view(d, chunk, frame, anchor, stamp, depth, rel, am, conf=None, prefi
 
 
 def test_f6_carries_the_anchors_scale_bend_floor_and_pose_onto_each_witness(tmp_path):
-    from precision.depth_on_f5 import design, load_turn_witnesses
+    from precision.depth_on_f5 import load_turn_witnesses
     out = tmp_path / "output"
     d = out / "maplong_run" / CONTEXT_DIR
     d.mkdir(parents=True)
@@ -90,22 +90,20 @@ def test_f6_carries_the_anchors_scale_bend_floor_and_pose_onto_each_witness(tmp_
     _write_view(d, 1, 25, 20, "OLD", np.full((H, W), 2.0, np.float32), rel, 2.0)  # another run
     _write_view(d, 1, 35, 31, "S", np.full((H, W), 2.0, np.float32), rel, 2.0)    # anchor not a keyframe
     chunk = {10: 1, 20: 1, 30: 2, 40: 2}
-    uu, vv = np.meshgrid(np.arange(W), np.arange(H))
-    Dm = design(uu.ravel(), vv.ravel(), W, H)
-    coefs = {i: np.array([1.1, 0.0, 0.0]) for i in range(4)}
+    factor = 1.1                                           # the session's depth factor
     c2w = {f: _pose(float(f)) for f in frames}
     dep, valid, passed, cw, extra, rep = load_turn_witnesses(
-        out, frames, chunk, {1: 5.0, 2: 5.0}, {10: 3.0, 20: 3.0, 30: 3.0, 40: 3.0}, coefs, c2w,
-        None, False, (H, W), Dm, H, W, [-1, 1], log=lambda m: None)
+        out, frames, chunk, {1: 5.0, 2: 5.0}, {10: 3.0, 20: 3.0, 30: 3.0, 40: 3.0}, factor, c2w,
+        None, False, (H, W), H, W, [-1, 1], log=lambda m: None)
     assert list(dep) == [15] and rep["used"] == 1
     assert rep["ignored"] == {"another fork run's": 1, "anchor not a keyframe of this run": 1}
-    # depth: 2.0 raw × (zmed 3.0 / anchor median 2.0) × bend 1.1
+    # depth: 2.0 raw × (zmed 3.0 / anchor median 2.0) × the session's factor 1.1
     assert np.allclose(dep[15], 2.0 * 1.5 * 1.1) and passed[15].all()
     T = rel.copy(); T[:3, 3] *= 1.5 * 1.1
     assert np.allclose(cw[15], c2w[10] @ T)
     assert extra == {10: [15], 20: [15]}                  # anchor 10 is keyframe 0: window [-1, 1]
-    none = load_turn_witnesses(tmp_path / "nothing", frames, chunk, {1: 5.0}, {}, coefs, c2w, None,
-                               False, (H, W), Dm, H, W, [-1, 1], log=lambda m: None)
+    none = load_turn_witnesses(tmp_path / "nothing", frames, chunk, {1: 5.0}, {}, factor, c2w, None,
+                               False, (H, W), H, W, [-1, 1], log=lambda m: None)
     assert none[0] == {} and "no context views" in none[5]["why_none"]
 
 
@@ -124,7 +122,7 @@ def test_the_interval_witnesses_of_their_own_pass_are_read_like_the_turn_frames(
     from a pass of their own after the chunk (w<chunk>_<frame>.npz) — F6 reads them with the same
     carry as the turn frames (c<chunk>_<frame>.npz) and they vote on the keyframes near their
     anchor."""
-    from precision.depth_on_f5 import design, load_turn_witnesses
+    from precision.depth_on_f5 import load_turn_witnesses
     out = tmp_path / "output"
     d = out / "maplong_run" / CONTEXT_DIR
     d.mkdir(parents=True)
@@ -135,13 +133,11 @@ def test_the_interval_witnesses_of_their_own_pass_are_read_like_the_turn_frames(
     _write_view(d, 1, 15, 10, "S", np.full((H, W), 2.0, np.float32), rel, 2.0)              # turn
     _write_view(d, 1, 25, 20, "S", np.full((H, W), 2.0, np.float32), rel, 2.0, prefix="w")  # interval
     chunk = {10: 1, 20: 1, 30: 2, 40: 2}
-    uu, vv = np.meshgrid(np.arange(W), np.arange(H))
-    Dm = design(uu.ravel(), vv.ravel(), W, H)
-    coefs = {i: np.array([1.1, 0.0, 0.0]) for i in range(4)}
+    factor = 1.1                                           # the session's depth factor
     c2w = {f: _pose(float(f)) for f in frames}
     dep, valid, passed, cw, extra, rep = load_turn_witnesses(
-        out, frames, chunk, {1: 5.0, 2: 5.0}, {10: 3.0, 20: 3.0, 30: 3.0, 40: 3.0}, coefs, c2w,
-        None, False, (H, W), Dm, H, W, [-1, 1], log=lambda m: None)
+        out, frames, chunk, {1: 5.0, 2: 5.0}, {10: 3.0, 20: 3.0, 30: 3.0, 40: 3.0}, factor, c2w,
+        None, False, (H, W), H, W, [-1, 1], log=lambda m: None)
     assert sorted(dep) == [15, 25] and rep["used"] == 2
     assert np.allclose(dep[25], 2.0 * 1.5 * 1.1)
     assert extra == {10: [15, 25], 20: [15, 25], 30: [25]}

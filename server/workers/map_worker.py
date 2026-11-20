@@ -457,8 +457,8 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     # ── THE PRECISION CORE, INSIDE THE RECONSTRUCTION (USER 2026-09-28: "f0 a f7 es
     # etapa de reconstrucción, antes de cloudcompy"): F0 → F5 refine camera and poses
-    # against the images, the depth stage (F6 bend: Omega's depth bent to F5 per
-    # keyframe + multi-view vote, USER 2026-10-01) publishes THE cloud with its
+    # against the images, the depth stage (F6: Omega's depth at the session's one
+    # factor + multi-view vote, USER 2026-10-01) publishes THE cloud with its
     # octree, the chunk check reports on it.
     _run_precision_core(pipe, session_path, output_dir, config)
 

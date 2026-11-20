@@ -98,6 +98,14 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   that reference.
 
 ## 2 · HOW TO WORK WITH HIM (hard-earned — each line cost him time or money)
+- ⭐⭐⭐ HIS MESSAGE IS AN INTERRUPT (USER 2026-11-20, evening: "No hay tarea más importante que contestarme a mi" /
+  "entenderlo como una interrupción que se debe atender inmediatamente. Yo te hablo y vos contestas inmediatamente" /
+  "Contéstame lo que te pregunte"). WHAT HAPPENED: his "Que tareas están terminadas?" waited while the assistant
+  chained steps with long deliberations between them; he had to order a full stop to be heard. THE RULES, on top of
+  PRIORITY ONE below: a long DELIBERATION between two steps is a wall exactly as a long tool call is — short steps,
+  short thinking, whatever takes over a minute in the background; when he writes, the reply comes AT ONCE and holds
+  ONLY what he asked ("Tenemos la lista actualizada?" → "Sí": the state of the next task was not asked); while he is
+  talking nothing is done — a statement of his is not an order; the work resumes on his word.
 - ⭐⭐⭐ PRIORITY ONE — HIS ORDER, FOR THIS SESSION AND EVERY ONE AFTER IT (USER 2026-11-20, 03:10 CDMX): "Prioridad
   uno y grábatelo porque no lo quiero repetir y vos ni las sesiones que sigan. Si yo hablo la prioridad es
   contestarme a mí." WHAT IT COST HIM THAT NIGHT: he wrote that he was going to sleep at 07:34 UTC (01:34 his
@@ -937,6 +945,33 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
+- ⭐⭐⭐⭐⭐ THE REFACTORING BY THE CHECKLIST — RESUME HERE FIRST (USER 2026-11-20, evening). `docs/pipeline_checklist.md`
+  is THE list: the audit's 36 conclusions, one per line, never merged, the pending ones in their order of execution
+  (his: "la lista no debe ser una ensalada de pendientes, debe ser exactamente la hoja de ruta de lo que se va a
+  hacer"). HIS RULES FOR IT:
+  · DONE = the reconstruction pipeline EXECUTES it; a removal = DELETED from the code and the code refactored — never
+    a switch turned off, never something written on the side or only in a test ("solo se considera hecho si en el
+    pipeline al ejecutar la reconstrucion se ejecuta ese codigo … no un flag apagado en el config").
+  · One line at a time. When a line is closed the list is updated and ONE commit is made; then the next line is NAMED
+    to him and HIS OK AWAITED ("antes de empezar la siguiente me mencionas cual va a empezar y aguardas mi OK").
+  · NO INTERMEDIATE RUN: "pccr nuevo se debe hacer desde cero y va a ser la verificacion de toda esta
+    refactorizacion completa … no me interesa ver la nube ahora" — nothing is launched on the card until the lines
+    are closed and he orders it.
+  · Nothing he did not ask for goes into the code (a load-time guard naming his decision, added by the assistant, was
+    removed on his word: "yo no dije que pongas nada, asi que no debe estar ahi").
+  · What a touched stage still does on the CPU moves to the card ("todo en placa nada en cpu").
+  STATE: line 1 (PointDiT removed from the chain, the repo, the pod and the kit) DONE, 9a13f32 · line 2 (ONE depth
+  factor in F6 — `precision.depth_on_f5.session_factor`; the factor per keyframe, its window choice, its
+  "verification", their device twin and their configuration keys, `bend.scope` among them, DELETED) DONE, the commit
+  after it · line 3 (conclusion 31: the decision by zone at the end of every stage) PENDING — his word to start it
+  given the same evening ("si estamos esperando test, entonces avanzamos con la tarea 3"); in the working tree, not
+  committed: `precision/coherence.py` + `tests/test_coherence.py` (the measure and the rule by zone, 7 tests) — NOT
+  yet executed by the pipeline. THE PLAN FOR IT: the decision runs INSIDE the stage, before it applies its result
+  (F5 first: its candidate cameras against the session's, zone by zone; some zone worse → F5 solved again with those
+  zones' cameras held; still worse → nothing applied), the record in `output/precision/decisions.json`.
+  WHAT THIS SUPERSEDES BELOW: the F6 test with `bend.scope: session` on the copy of pccr 2026-08-24 was stopped on
+  his order (that copy still shows the morning's cloud, a factor per keyframe; its chain can no longer resume: the
+  steps' stamps changed) and "config.yaml keeps `scope: keyframe` until his eye" — the key no longer exists.
 - ⭐⭐⭐⭐⭐ WHAT UN-DOES THE GRAPH TODAY IS F6'S DEPTH FACTOR DECIDED PER KEYFRAME — FOUND WITH THE FLOOR TILES AS A
   RULER; F6 WITH ONE FACTOR IS RUNNING ON THE COPY (2026-11-20 17:08 UTC; RESUME HERE FIRST — the F2 block below is
   its background: the old F2 was harmful and is gone, the copy was relaunched with one scale and STILL had displaced

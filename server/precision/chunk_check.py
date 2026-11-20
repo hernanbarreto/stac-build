@@ -249,6 +249,13 @@ def load_inputs(session_dir: Path, log: Callable = print):
         if not rep.exists():
             continue
         doc = json.loads(rep.read_text())
+        one = (doc.get("bend") or {}).get("factor")
+        if one is not None:
+            # the depth on F5 (f6_bend) publishes Omega's depth × ONE factor for the session (USER 2026-11-20)
+            s_k = {f: float(one) for f in frames}
+            s_k_source = f"{rel} bend.factor (one for the session)"
+            cloud_epoch = doc.get("epoch_to")
+            break
         pf = doc.get("per_frame") or {}
         if all(str(f) in pf and "s_k" in pf[str(f)] for f in frames):
             s_k = {f: float(pf[str(f)]["s_k"]) for f in frames}

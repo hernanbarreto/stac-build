@@ -125,7 +125,7 @@ def test_timing_sidecars_live_next_to_their_reports(tmp_path):
 
 # ── the config keys the points added fail the load when missing ──────────
 
-@pytest.mark.parametrize("section,key", [("bend", "heldout_confidence"), ("bend", "bootstrap"), ("bend", "seed")])
+@pytest.mark.parametrize("section,key", [("bend", "seed"), ("bend", "irls_iterations"), ("bend", "min_depth_m")])
 def test_a_missing_judge_key_fails_the_load_naming_it(section, key):
     import copy
     from config import cfg as raw_cfg
@@ -135,4 +135,4 @@ def test_a_missing_judge_key_fails_the_load_naming_it(section, key):
     with pytest.raises(PrecisionConfigError, match=f"{section}.{key}"):
         load_precision_config(bad)
     good = load_precision_config()
-    assert good.bend.heldout_confidence == 0.95 and good.bend.bootstrap >= 1 and good.bend.seed == 0
+    assert good.bend.seed == 0 and good.bend.irls_iterations >= 1 and good.bend.min_depth_m >= 0

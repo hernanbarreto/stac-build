@@ -73,6 +73,18 @@ def test_without_a_transform_epoch_the_cloud_epoch_is_what_is_measured(tmp_path,
     assert [c["verdict"] for c in rep["chunks"]] == ["ok", "ok", "ok"]
 
 
+def test_the_check_reads_f6s_one_depth_factor_for_every_keyframe(tmp_path, pcfg):
+    """F6 publishes Omega's depth × ONE factor for the session (USER 2026-11-20): the check applies it to every
+    keyframe."""
+    frames, chain = build_session(tmp_path, "clean")
+    out = tmp_path / "output"
+    (out / "corrected_cloud.json").write_text(json.dumps(
+        {"epoch_to": 2, "bend": {"scope": "session", "factor": 0.95}}))
+    rep = CC.run_check(tmp_path, pcfg, log=lambda m: None, chainage=chain)
+    assert "bend.factor (one for the session)" in rep["params"]["s_k_source"]
+    assert all(r["s_k"] == 0.95 for r in rep["keyframes"])
+
+
 def test_two_epochs_compose_in_lineage_order_with_the_affine_offset(tmp_path):
     """z' = k·z + b per epoch: K ← k·K, B ← k·B + b; the cloud's k(u, v) scales by K."""
     frames, _ = build_session(tmp_path, "clean")

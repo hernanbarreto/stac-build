@@ -140,7 +140,7 @@ STEPS: List[Step] = [
                  "output/precision/witness_frames.txt", "output/precision/refine_residuals.npz",
                  "output/camera.json") + _POSE_FILES,
          config=("refine", "camera")),
-    Step("f6_bend", "F6 depth on F5: Omega bent to F5's landmarks + multi-view vote (the product)", "da3",
+    Step("f6_bend", "F6 depth on F5: Omega's depth at the session's factor + multi-view vote (the product)", "da3",
          "precision.depth_on_f5", gpu=True,              # its maps and its vote run on the card (f6_torch.require_cuda)
          # intake/cubes.json: what each keyframe sees of every other — the co-visible keyframes of other moments
          # vote too (depth_on_f5.covisible_witnesses, USER 2026-11-07)
@@ -149,11 +149,7 @@ STEPS: List[Step] = [
                                "output/precision/witness_poses.txt", "output/precision/witness_frames.txt",
                                "intake/cubes.json"),
          writes=("output/cleaned_cloud.ply", "output/intrinsic.txt", "output/precision/depth_on_f5.json"),
-         # raw:reconstruction.precision.bend AFTER "bend": the section as the job's configuration holds it takes the
-         # typed section's place in the stamp — it is the same keys plus ``scope`` (depth_on_f5.bend_scope: one
-         # depth factor per keyframe or one for the session), which F6 reads from the raw section so that
-         # declaring it does not enter F2's and F5's code stamps (precision/config.py is in every step's)
-         config=("bend", "raw:reconstruction.precision.bend", "depth", "cloud", "gauge", "refine",
+         config=("bend", "depth", "cloud", "gauge", "refine",
                  "camera", "raw:reconstruction.simple", "raw:postprocessing")),
     Step("f6_sweep", "F6 native depth sweep", "da3", "precision.depth_sweep", gpu=True,
          reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json"),

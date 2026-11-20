@@ -1,4 +1,4 @@
-"""The depth on F5 (USER 2026-10-01, pccr epoch 7): Omega's depth bent to F5's landmarks, then a vote.
+"""The depth on F5 (USER 2026-10-01, pccr epoch 7): Omega's depth at the session's one factor, then a vote.
 Synthetic, no GPU: a plane seen by three cameras."""
 import json
 import sys
@@ -9,8 +9,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from precision.depth_on_f5 import (bend_coefficients, camera_travels, design, edge_keeping_vote,  # noqa: E402
-                                   heldout_metres, rel_errors)
+from precision.depth_on_f5 import (DepthOnF5Error, camera_travels, edge_keeping_vote,  # noqa: E402
+                                   heldout_error, heldout_rows, session_factor)
 
 H, W = 60, 80
 K = np.array([[70.0, 0, W / 2], [0, 70.0, H / 2], [0, 0, 1]])
@@ -30,21 +30,6 @@ def _cams():
     for f, x in zip((0, 1, 2), (-0.2, 0.0, 0.2)):
         c = np.eye(4); c[0, 3] = x; out[f] = c
     return out
-
-
-def test_bend_recovers_a_scale_error_and_keeps_omega_without_landmarks():
-    """Epoch 7's fit: a keyframe with too few rows keeps Omega's depth (k = 1)."""
-    rng = np.random.default_rng(0)
-    rows = {}
-    for i, true in enumerate((0.9, 0.9, 1.1)):
-        u = rng.uniform(0, W, 200); v = rng.uniform(0, H, 200)
-        rows[i] = (design(u, v, W, H), np.full(200, true) + rng.normal(0, 1e-3, 200))
-    rows[3] = (design(np.zeros(0), np.zeros(0), W, H), np.zeros(0))      # no landmark at all
-    c, info = bend_coefficients(rows, 4, 0, 20, 1.345, 10, FAC)
-    assert abs(c[0][0] - 0.9) < 1e-2 and abs(c[2][0] - 1.1) < 1e-2
-    assert np.allclose(c[3], [1.0, 0.0, 0.0]) and info[3]["fallback"] == "identity"
-    # a flat ratio field: the tilt terms c1, c2 are not significant and are dropped exactly (point 48)
-    assert c[0][1] == 0.0 and c[0][2] == 0.0 and info[0]["kept"] == {"c1": False, "c2": False}
 
 
 def test_the_edge_keeping_vote_removes_a_flyer_and_keeps_the_surface():
@@ -329,8 +314,38 @@ def test_chunk_check_applies_the_published_bend():
     k = scale_map(c[0], (c[1], c[2]), H, W)
     rng = np.random.default_rng(1)
     u = rng.integers(0, W, 50); v = rng.integers(0, H, 50)
-    assert np.allclose(k[v, u], design(u.astype(float), v.astype(float), W, H) @ c)
+    assert np.allclose(k[v, u], c[0] + c[1] * (u - W / 2.0) / W + c[2] * (v - H / 2.0) / H)
     assert scale_map(1.03, (0.0, 0.0), H, W) == 1.03
+
+
+# ── the depth's factor: ONE for the session (USER 2026-11-20) ────────────────
+
+def test_the_depth_factor_is_one_for_the_session_and_the_odd_keyframes_do_not_move_it():
+    rng = np.random.default_rng(0)
+    ratios = [0.95 + rng.normal(0, 0.004, 300) for _ in range(40)]      # z_landmark / z_Omega, keyframe by keyframe
+    ratios[10] = 0.86 + rng.normal(0, 0.004, 300)       # a stretch whose own landmarks ask for another factor
+    ratios[0] = np.full(300, 0.10)                      # a keyframe whose landmarks are nonsense
+    ratios.append(np.zeros(0))                          # a keyframe without landmarks takes the same factor
+    f, info = session_factor(ratios, 1.345, 10)
+    assert abs(f - 0.95) < 0.003, f
+    assert info["factor"] == f and info["rows"] == 40 * 300 and info["keyframes_with_rows"] == 40
+    assert info["sigma"] > 0 and abs(info["median_of_the_rows"] - 0.95) < 0.003
+    with pytest.raises(DepthOnF5Error, match="no landmark row"):
+        session_factor([np.zeros(0), np.zeros(0)], 1.345, 10)
+
+
+def test_the_held_out_landmarks_report_what_the_factor_leaves_in_per_cent_and_in_metres():
+    zmap = np.full((H, W), 2.0)
+    obs = np.array([[10.0, 10.0, 1.9], [20.0, 20.0, 1.9], [30.5, 12.25, 2.1]])       # u, v, z of the landmark
+    z_lm, z_om = heldout_rows(obs, zmap, 0.05)
+    assert z_lm.tolist() == [1.9, 1.9, 2.1] and np.allclose(z_om, 2.0)
+    rep = heldout_error([(z_lm, z_om), (np.zeros(0), np.zeros(0))], 1.0)             # |2.0 - z| = 0.1 on the three
+    assert rep["rows"] == 3 and abs(rep["median_m"] - 0.1) < 1e-12 and rep["range_m"] == 1.9
+    assert abs(rep["median_rel"] - 0.1 / 1.9) < 1e-12
+    assert abs(heldout_error([(z_lm, z_om)], 0.95)["median_m"]) < 1e-12              # 2.0 x 0.95 = 1.9: two of three
+    assert heldout_error([], 1.0) == {"median_rel": None, "median_m": None, "range_m": None, "rows": 0}
+    assert heldout_rows(np.zeros((0, 3)), zmap, 0.05)[0].size == 0
+    assert heldout_rows(obs, np.full((H, W), 0.01), 0.05)[0].size == 0               # Omega's depth under the minimum
 
 
 # ── the cloud's provenance column and the card ───────────────────────────────
@@ -348,29 +363,3 @@ def test_every_published_point_is_omegas_own_pixel_and_f6_takes_the_card():
     assert steps["f6_bend"] is True and "f6_sweep" not in steps
 
 
-def test_the_half_b_held_out_is_also_measured_in_metres():
-    """USER 2026-10-16: the certification's σ floor reads F6's held-out as a DISTANCE along the
-    ray (the relative score is the bend's judge, not a repeatability). Same rows as the relative
-    score, pooled over the keyframes, with their landmark range and count; a keyframe without a
-    half-B row contributes nothing, a session without any reports None."""
-    rng = np.random.default_rng(1)
-    rows_B, coefs = {}, {}
-    for i, (k, z0) in enumerate(((0.9, 2.0), (1.1, 4.0))):
-        n = 300
-        u, v = rng.uniform(0, W, n), rng.uniform(0, H, n)
-        z_lm = np.full(n, z0) + rng.normal(0, 0.02, n)      # the landmarks, 2 cm of scatter
-        z_om = z_lm / k                                       # Omega's depth, off by the scale k
-        rows_B[i] = (u, v, z_lm, z_om)
-        coefs[i] = np.array([k, 0.0, 0.0])                    # the bend recovers exactly k
-    rows_B[2] = (np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0))
-    coefs[2] = np.array([1.0, 0.0, 0.0])
-    got = heldout_metres(rows_B, coefs, 3, W, H)
-    assert got["rows"] == 600 and got["median_m"] == pytest.approx(0.0, abs=1e-9)
-    assert got["range_m"] == pytest.approx(3.0, abs=0.1)
-    # an unbent keyframe: its error in metres is the relative error times its own depth
-    coefs[0] = np.array([1.0, 0.0, 0.0])
-    got = heldout_metres({0: rows_B[0]}, {0: coefs[0]}, 1, W, H)
-    rel = rel_errors(*rows_B[0], coefs[0], W, H)
-    assert got["median_m"] == pytest.approx(float(np.median(rel * rows_B[0][2])), rel=1e-9)
-    assert got["median_m"] == pytest.approx(2.0 / 0.9 - 2.0, abs=0.01)   # |z/0.9 - z| at z = 2 m
-    assert heldout_metres({0: rows_B[2]}, {0: coefs[2]}, 1, W, H) == {"median_m": None, "range_m": None, "rows": 0}

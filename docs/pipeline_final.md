@@ -65,8 +65,10 @@ When the chain must start again from F0 and no finished step has moved the geome
 0 from the lineage the publish kept in `output/_restart_epochs/` (`correction/restart.py`, `runner.needs_epoch0`).
 
 ### 1.4 F6 — the cloud (`precision/depth_on_f5.py`, `precision/f6_torch.py`, `cloud.source: omega_bent`)
-1. **Bend**: each keyframe's VGGT-Ω depth × k(u,v) = c0 + c1·ũ + c2·ṽ fitted to F5's landmarks (Huber IRLS; c0
-   verified on held-out rows; landmark rows within the range).
+1. **The depth's factor — ONE for the session** (USER 2026-11-20): every keyframe's VGGT-Ω depth × one number, the
+   robust fit (Huber IRLS) of z_landmark / z_Ω over every landmark row of the session (rows within the range). Until
+   that date it was fitted keyframe by keyframe (k(u,v) = c0 + c1·ũ + c2·ṽ, c0 "verified" on F5's own held-out rows):
+   it followed F5's local errors — 0.10 … 2.18 on pccr 2026-08-24, a cabinet published half a metre from itself.
 2. **The vote — COLMAP's fusion rule** (`cloud.fusion_rule: colmap`). Witnesses: the walk neighbours (±3/6/12), the
    turn and interval frames, and every keyframe that sees any part of the view. A witness confirms when the
    forward-backward reprojection is within 0.301° (`fusion_max_reproj_deg`), the depths within the session's measured

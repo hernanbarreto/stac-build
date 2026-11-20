@@ -153,37 +153,3 @@ def decide_change_t(before, after, *, error, error_factor, confidence, min_judge
                 "reason": ("IMPROVES — " if not failed else
                            "does NOT pass (" + ", ".join(failed) + ") — ") + reason})
     return out
-
-
-def cluster_bootstrap_se_t(groups, n_boot: int, seed: int, device: str) -> float:
-    """``precision.depth_on_f5.cluster_bootstrap_se`` with the pooled medians on ``device``: the standard error
-    of the POOLED MEDIAN of ``groups`` under a bootstrap that resamples whole groups — the same
-    ``default_rng(seed).integers(0, k, size=k)`` call per resample (the reference's), the median of the
-    concatenation with multiplicities taken as the fork's _pooled_median does (sorted values, cumulative
-    weights, the middle element(s)), the sample standard deviation on the CPU."""
-    import torch
-    groups = [np.asarray(g, np.float64) for g in groups if len(g)]
-    if len(groups) < 2:
-        return 0.0
-    rng = np.random.default_rng(int(seed))
-    k = len(groups)
-    vals = np.concatenate(groups)
-    gid = np.repeat(np.arange(k), [len(g) for g in groups])
-    order = np.argsort(vals, kind="stable")
-    v_sorted = torch.as_tensor(vals[order], device=device)
-    g_sorted = torch.as_tensor(gid[order], device=device)
-    picks = np.stack([rng.integers(0, k, size=k) for _ in range(int(n_boot))])          # the reference's calls
-    meds = np.empty(int(n_boot), np.float64)
-    T = int(v_sorted.shape[0])
-    step = max(1, (1 << 26) // max(T, 1))
-    for s in range(0, int(n_boot), step):
-        p = torch.as_tensor(picks[s:s + step], device=device)
-        counts = torch.zeros((int(p.shape[0]), k), dtype=torch.int64, device=device)
-        counts.scatter_add_(1, p, torch.ones_like(p))
-        cw = torch.cumsum(counts[:, g_sorted], dim=1)
-        m = cw[:, -1]
-        i_lo = torch.searchsorted(cw, ((m - 1) // 2)[:, None], right=True)[:, 0]
-        i_hi = torch.searchsorted(cw, (m // 2)[:, None], right=True)[:, 0]
-        v_lo, v_hi = v_sorted[i_lo], v_sorted[i_hi]
-        meds[s:s + int(p.shape[0])] = torch.where(i_lo == i_hi, v_lo, (v_lo + v_hi) / 2.0).cpu().numpy()
-    return float(np.std(meds, ddof=1))

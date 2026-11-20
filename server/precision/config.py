@@ -449,24 +449,14 @@ class CloudConfig:
 
 @dataclass(frozen=True)
 class BendConfig:
-    enabled: bool               # false = NO per-keyframe bend: Omega's depth stands (k = 1) on F5's
-                                # poses; the vote and the cleaner still run — the evaluation battery's
-                                # variant "sin refinamiento de profundidad F6" (rule 4: default = the
-                                # validated recipe bit for bit)
-    windows: Tuple[int, ...]    # BOUND (search): smoothing windows (± keyframes) the held-out chooses among
+    enabled: bool               # false = Omega's depth stands as it is on F5's poses (the evaluation battery's
+                                # variant "sin refinamiento de profundidad F6"); the vote and the cleaner still run
     neighbors: Tuple[int, ...]  # keyframe offsets that vote on a pixel
     tau_quantile: float         # agreement tolerance = this percentile of the session's OWN neighbour
                                 # disagreement (measured every run, never a fixed number)
-    irls_iterations: int        # Huber IRLS steps (pccr epoch 7's fit, USER 2026-10-01)
-    min_rows: int               # fewer landmark rows in the window → k = 1 (epoch 7)
-    min_depth_m: float          # landmark rows on Omega depth under this are not used (epoch 7)
-    heldout_confidence: float   # declared confidence of the per-keyframe c0 verification and of the
-                                # window choice's error bar (docs/plan_determinismo.md points 48 / 49)
-    bootstrap: int              # BOUND (cost): resamples of those bootstraps
-    seed: int                   # their fixed seed
-    device: str                 # 2026-11-01: numpy (the path of record) | cpu | cuda — where the bend's IRLS fits
-                                #   (every keyframe of a window at once, precision/bend_torch.py) and its bootstrap
-                                #   medians (precision/judge_torch.py: the fork's rule, the same draws) run
+    irls_iterations: int        # Huber IRLS steps of the session's depth factor
+    min_depth_m: float          # landmark rows on Omega depth under this are not used
+    seed: int                   # the fixed seed of F6's process (nothing in it is drawn at random)
 
 
 # ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
@@ -920,23 +910,14 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         seed=_num(cc, "seed", "chunk_check", lo=0, integer=True),
     )
     bd = _sub(sec, "bend", "")
-    windows = tuple(int(x) for x in _require(bd, "windows", "bend"))
     neighbors = tuple(int(x) for x in _require(bd, "neighbors", "bend"))
-    if not windows or min(windows) < 0:
-        raise PrecisionConfigError(f"'{SECTION}.bend.windows' must be non-negative keyframe counts, got {windows}")
-    if not neighbors or 0 in neighbors:
+    if not neighbors or any(n == 0 for n in neighbors):
         raise PrecisionConfigError(f"'{SECTION}.bend.neighbors' must be non-zero keyframe offsets, got {neighbors}")
-    bend = BendConfig(enabled=_bool(bd, "enabled", "bend"), windows=windows, neighbors=neighbors,
+    bend = BendConfig(enabled=_bool(bd, "enabled", "bend"), neighbors=neighbors,
                       tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True),
                       irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
-                      min_rows=_num(bd, "min_rows", "bend", lo=3, integer=True),
                       min_depth_m=_num(bd, "min_depth_m", "bend", lo=0.0),
-                      heldout_confidence=_num(bd, "heldout_confidence", "bend", lo=0.0, hi=1.0, lo_excl=True),
-                      bootstrap=_num(bd, "bootstrap", "bend", lo=1, integer=True),
-                      seed=_num(bd, "seed", "bend", lo=0, integer=True),
-                      device=_enum(bd, "device", "bend", ("numpy", "cpu", "cuda")))
-    if bend.heldout_confidence >= 1.0:
-        raise PrecisionConfigError(f"'{SECTION}.bend.heldout_confidence' must be below 1")
+                      seed=_num(bd, "seed", "bend", lo=0, integer=True))
     fl = _sub(sec, "flyers", "")
     flyers = FlyersConfig(knn_k=_num(fl, "knn_k", "flyers", lo=1, integer=True),
                           isolated_quantile=_num(fl, "isolated_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
