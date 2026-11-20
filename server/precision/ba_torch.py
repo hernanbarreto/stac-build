@@ -1063,8 +1063,16 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     if log is None and os.environ.get("STAC_BA_TORCH_TRACE"):
         log = lambda m: print(f"[ba_torch {name}] {m}", flush=True)       # noqa: E731
     lap(f"{tag}.problem")
+    on_card = str(dev).startswith("cuda")
+    if on_card:
+        torch.cuda.reset_peak_memory_stats()
     summary = solve(prob, int(cfg.max_iterations), log=log)
     lap(f"{tag}.solve")
+    if on_card:                                          # what the solve needed of the card (refine.timing.json)
+        from precision.refine import _CARD
+        _CARD[tag] = {"allocated_peak": round(torch.cuda.max_memory_allocated() / 2 ** 30, 2),
+                      "reserved": round(torch.cuda.memory_reserved() / 2 ** 30, 2),
+                      "card_total": round(torch.cuda.get_device_properties(0).total_memory / 2 ** 30, 2)}
     if log:
         log(f"{summary['termination_type']}: cost {summary['initial_cost']:.6e} → {summary['final_cost']:.6e}, "
             f"{summary['num_successful_steps']} accepted / {summary['num_unsuccessful_steps']} rejected step(s), "

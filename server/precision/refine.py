@@ -99,6 +99,13 @@ _LAP = [time.perf_counter()]
 LAP_TAG = [""]                 # "" while a rung's own solve runs, "+" during its continuation solve
 
 
+# the card's memory during each solve, as torch saw it (GB) — refine.timing.json "card_memory_gb". On pccr
+# 2026-08-24's copy nvidia-smi showed F5 at 79.3 of the card's 80 GB: whether refine.torch_ba.keep_pair_plans_gb /
+# keep_jacobians_gb can hold anything there is decided on THIS measurement, never on a guess (USER 2026-11-20:
+# "no hagas las cosas a medias")
+_CARD: Dict[str, Dict[str, float]] = {}
+
+
 def lap(name: str) -> None:
     now = time.perf_counter()
     _PHASES[name] = _PHASES.get(name, 0.0) + (now - _LAP[0])
@@ -1346,7 +1353,8 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     # the solver's wall clock, outside the compared artifact (point 36)
     lap("report")
     (pdir / TIMING_NAME).write_text(json.dumps({"stage": "refine", "ceres_seconds": core["timing"],
-                                                "phases": laps()}, indent=1, default=float))
+                                                "phases": laps(), "card_memory_gb": dict(_CARD)},
+                                               indent=1, default=float))
     np.savez_compressed(pdir / RESIDUALS_NAME,
                         heldout_track=np.array(list(core["held"][best.name].keys()), np.int64),
                         heldout_rms_px=np.array(list(core["held"][best.name].values()), np.float32),
