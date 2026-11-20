@@ -223,7 +223,13 @@ def test_the_single_pass_writes_what_the_steps_write_reading_each_cube_once(tmp_
     pp, rp, vlp, doc, out = _single(tmp_path)
     assert {"chunk_sim3.json", "uncertainty.json", "depth_graph.json", "camera_poses.txt", "intrinsic.txt",
             os.path.join("pcd", "0_pcd.ply"), os.path.join("pcd", "3_origins.npz")} <= set(ps)
-    assert any(k.startswith("uncert" + os.sep) for k in ps), "the two-copy uncertainty was measured"
+    # the two-copy uncertainty is measured (its report holds the shared frames) and its per-pixel maps are NOT written:
+    # on cubes nothing read them and the server deleted the folder (USER 2026-11-20: "no debe quedar nada que no
+    # agregue valor en la cadena")
+    assert not any(k.startswith("uncert" + os.sep) for k in ps) and not any(k.startswith("uncert" + os.sep) for k in pp)
+    unc = json.loads((Path(vls.output_dir) / "uncertainty.json").read_text())
+    assert unc["n_shared_frames"] > 0 and len(unc["frames"]) == unc["n_shared_frames"]
+    assert all(v["n_px"] > 0 and v["median_m"] is not None for v in unc["frames"].values())
     _same(ps, pp)
     assert len(rs) == N
     _same(rs, rp)

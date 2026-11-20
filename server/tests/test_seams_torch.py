@@ -111,13 +111,13 @@ def _seams(tmp_path, sets, device):
     out = io.StringIO()
     with redirect_stdout(out):
         edges = r.seams()
-    return edges, out.getvalue(), r.scale_bound
+    return edges, out.getvalue()
 
 
 def test_the_seams_on_a_device_are_the_records(tmp_path):
     sets = _cubes(tmp_path, np.random.default_rng(9))
-    rec, said_rec, sb_rec = _seams(tmp_path, sets, "numpy")
-    got, said_got, sb_got = _seams(tmp_path, sets, DEV)
+    rec, said_rec = _seams(tmp_path, sets, "numpy")
+    got, said_got = _seams(tmp_path, sets, DEV)
     assert len(rec) == len(got) == 3 and "3 cube read(s)" in said_got and "3 cube read(s)" in said_rec
     left = lambda t: sorted(ln for ln in t.splitlines() if "left out" in ln or "not an edge" in ln)  # noqa: E731
     assert left(said_rec) == left(said_got) and left(said_rec), "the pixels left out by the range are counted alike"
@@ -129,7 +129,6 @@ def test_the_seams_on_a_device_are_the_records(tmp_path):
             assert abs(float(a[k]) - float(b[k])) < 1e-9, k
         for k in ("R", "t", "centroid"):
             assert np.abs(np.asarray(a[k], float) - np.asarray(b[k], float)).max() < 1e-9, k
-    assert abs(sb_rec["median"] - sb_got["median"]) < 1e-9 and abs(sb_rec["bound"] - sb_got["bound"]) < 1e-9
 
 
 def test_the_mask_and_the_sample_are_the_records_element_by_element(tmp_path):
