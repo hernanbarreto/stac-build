@@ -1513,8 +1513,15 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · F5 (precision/refine.py, ba_torch.py): solves 7102 s of the 149 min — R0 816 s (43 iterations) + its
     continuation 1171 s (59), R1 505 (15) + 2137 (59), R2 1410 (31) + 331 (8), R3 457 (19) + 275 (14). THE
     CONTINUATIONS (a second solve from the rung's end, to MEASURE the solver's own error — the judge's bar) ARE
-    55 % of it (65 min). R3 (12 min) is "measured and reported only" by policy (plan point 62): never applied.
-    Applied rung R1; R2 tried, not taken. Per LM trial (19–45 s): the chunked problem makes each chunk's
+    55 % of it (65 min). Applied rung R1; R2 tried, not taken. ⚠ R3 (12 min in that record) IS NO LONGER COMPUTED:
+    that run's F5 is of 2026-11-10 17:52, and at 22:28 the same day (a26f08f) the report-only computations were
+    REMOVED on his order — "lo que no se usa para corregir geometría no se pierde un solo segundo de máquina" /
+    "sí, sacalos": F5's R3 (a focal per temporal block; plan point 62 of 2026-10-08 had it "measured and
+    reported, never applied, while the chain uses one camera") with its temporal test, the rolling-shutter
+    diagnostic, the prior-depth cross-check, and F3. THE ASSISTANT LISTED "F5 without R3" AS A LEVER FROM THAT OLD
+    RECORD WITHOUT READING THE CURRENT CODE (LADDER = R0, R1, R2) — corrected to him 2026-11-20 ("R3 aunque
+    resuelva no se aplica?, eso no se entiende de donde salio ni de que regla salio, yo nunca dije eso"); the
+    chain today is F0 F2 F4 F5 F6 (+ f6_check), no F3. Per LM trial (19–45 s): the chunked problem makes each chunk's
     Jacobians THREE times (linearize, Schur, back-substitution) and REBUILDS each chunk's pair plan at every
     step ("the plan is per chunk, not kept": pair_indices + a stable argsort of the pair keys + a Python loop
     over the groups) though it is the same at every iteration — it could be kept (host memory, ~21 GB of int32
@@ -1532,8 +1539,8 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     one (zlib), each frame's JPEG decoded twice (PointDiT, publish). Publish: chunks written (16 GB), the
     cleaner, read back, the octree.
   THE LEVERS AS GIVEN TO HIM (estimates until measured on the card): 1 F6 vote reorganised (60–85 min, same
-  result) · 2 F5 pair plan kept + Jacobians not repeated (20–40 min, same result) · 3 F5 without R3 (12 min; its
-  report line goes) · 4 F4 TF32 (1.5–3 h; last decimals, his eye) · 5 F5 "hessian" damping (30–60 min; within
+  result) · 2 F5 pair plan kept + Jacobians not repeated (20–40 min, same result) · 3 (WITHDRAWN: R3 was removed
+  on 2026-11-10, above) · 4 F4 TF32 (1.5–3 h; last decimals, his eye) · 5 F5 "hessian" damping (30–60 min; within
   tolerance) · 6 PointDiT in larger batches (15–25 min; last decimals) · 7 more cards for F4 / F6 / the cubes
   (time divided by the cards at the same total cost; a multi-card pod and deterministic sharding).
   PASSIVE RECORDS LEFT RUNNING ON THE COPY (scratchpad, read only): stage_sampler.py → stage_usage.csv (every
