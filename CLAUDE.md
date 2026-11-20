@@ -1405,10 +1405,26 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     viewer's toolbar wrapper and bottom line stop above it (`--ov-bottom-frac`). The assistant's choice, told
     to him: a screen WIDER than tall (a tablet or a phone on its side) keeps the panel at the right — there it
     is height that is short. Its hide button is still the right-panel icon; no drag to resize the sheet.
-  · STILL TO DO: stage 4 (the viewer by touch: the brush's marks — a right click today —, the section box's
-    handles, cancelling one measurement, the names of the toolbar's icons; the phone's rendering defaults —
-    pixel ratio, point budget — are HIS decision), and HIS EYE on a real tablet and phone through the fixed
-    address (each device opens the secret link once).
+  · ⭐ STAGE 4, THE VIEWER BY FINGER — APPLIED TO HIS PAGE 2026-11-20 07:11 UTC (50de409; the viewer restarts
+    on the hot update), WAITING FOR HIS EYE ON A DEVICE. The long press now sends THE WHOLE RIGHT CLICK where
+    the finger is (mousedown 2, mouseup 2, then `contextmenu`, dispatched on the pointer's target) instead of
+    calling one handler: the object's menu, a BIM element's menu, a measurement in course cancelled (the
+    canvas' own contextmenu listener) and THE BRUSH — a finger held on the model marks a zone, held ON a mark
+    removes that one (the brush's Shift + right click, tried first; known to have removed by wrapping
+    `onEraseMarksChangedRef` for the synchronous dispatch). Simulated finger: "1 zonas marcadas" → "Marca
+    quitada: quedan 0 zonas" → a short tap changes nothing; the object's menu opens at ~600 ms and stays; the
+    mouse's right click as before at PC / tablet / phone sizes. THE SECTION BOX: touch pointers are passed to
+    the three mouse handlers — NOT VERIFIED (its handles are 4-cm spheres: not found blind by 20 drags, and
+    too small for a finger).
+  · THE RIG AFTER A POD RESTART: `bash ui/scripts/responsive-rig.sh start` (the private copy if absent — it
+    never overwrites one —, the test browser and its two libraries if missing, the mock and the copy's dev
+    server) | status | diff (the copy against the live tree) | stop. In the private copy only: probe-table,
+    scripts/debug-longpress.mjs, debug-resize.mjs, debug-touch-tools.mjs.
+  · STILL OPEN, HIS: (1) HIS EYE on a real tablet and phone through the fixed address (each device opens the
+    secret link once) — everything above was seen on the mock's data in a headless browser, never on a
+    device; (2) the section box's handles finger-sized (screen-sized on a touch screen)? (3) a lighter
+    default on a phone (pixel ratio capped at 2, a smaller point budget per device)? (4) the names of the
+    toolbar's icons on touch (they live in hover tooltips).
     ⚠ THE SCREENSHOT RUNS COST THE RUNNING STAGE A FEW PER CENT (PointDiT 1.17 s a keyframe idle, 1.2–1.3 s
     during a 60-picture run on 8 cores): long sets on 4 cores (`taskset -c 0-3`), and never to time a stage.
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
