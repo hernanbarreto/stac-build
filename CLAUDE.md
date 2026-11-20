@@ -882,7 +882,70 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
-- ⭐⭐⭐ THE STUDY OF PCCR 2026-08-24 AND ITS PARALLEL COPY — RUNNING (started 2026-11-19; RESUME HERE FIRST).
+- ⭐⭐⭐⭐ THE COPY'S CLOUD IS PUBLISHED, AND THE STAGE THAT RE-OPENS WHAT THE GRAPH CLOSED IS FOUND: F2, THE GAUGE
+  (2026-11-20 08:08 UTC; RESUME HERE FIRST — the study below is its background). TOLD TO HIM 08:20 UTC WITH THE
+  QUESTION "¿la lanzo?" (the test below): HIS ANSWER AND HIS EYE ON THE COPY'S CLOUD ARE PENDING. Nothing of the
+  pipeline was changed.
+  · THE RUN: session `pccr2408_prueba`, stage 2 from 20:50 UTC to 08:14 — no failure, no relaunch: F2 35 min,
+    F4 343.5 min, F5 75.3 min (R1 applied, held-out 0.62927 px over 3,073,956 tracks; the original 0.6301),
+    F6 175.2 min, the floor check 5.1 min; core 639.2 min; epoch 3; "13673 MB of pose-only epochs and Omega
+    chunks discarded". KEPT ON DISK: output/_restart_epochs/_epoch_0 … _epoch_2 (the poses of every stage),
+    omega_run/results_output (2772 records, 6.7 GB), precision/tracks.npz, da3_windows/windows.json (the
+    window depths are gone: F2 regenerates them), gauge.json.
+  · THE NUMBERS, original | copy: published points 114,451,841 | 117,482,315 (raw 587.8 M | 597.7 M); vote
+    coverage 55.07 % | 55.9 % (kept 48.07 | 48.9, in place 9.23 | 9.2, contradicted 16.73 | 17.0, under the
+    support 21.78 | 22.0); the bend's held-out 3.325 % | 3.30 %; the pipeline's own floor undulation 20.0 cm |
+    17.2 cm.
+  · TWO MEASUREMENTS OF THE ASSISTANT'S, THE SAME WAY ON BOTH PUBLISHED CLOUDS (scratchpad dl/
+    published_checks.py; on the original they give back what the study had: 1.552 m and the 36 cm hole):
+    – THE FLOOR ALONG THE WALK (per stretch of 150 video frames: the densest horizontal layer 0.8–2.2 m under
+      the cameras among the points BORN there; the overall tilt taken out — the copy is not levelled: a
+      cloud-only run, 0.83 deg against the original's 0.44): THE STEP AT THE DARK TURN IS GONE — video 6300 /
+      6450: −41.2 / −39.7 cm in the original, −7.2 / −5.4 cm in the copy (the floor keeps one level through
+      6300–6900). Over the whole walk: rms 9.5 cm | 7.8 cm, 90 % within −11.5 … +12.9 | −10.4 … +10.2 cm. The
+      other departures are THE SAME IN BOTH (the start −26 | −24; video 4050 +13 | +13; 10950–11100 −15 |
+      −20; 11250–11550 +15 … +23 | +11 … +30; 11850 −11 | −11): not what the copy changed, not explained.
+    – THE RACK (the same pixels of the same images, the published points within 2 px of them): FRONT TO REAR
+      1.552 m | 1.647 m, 3.3 | 3.2 deg from parallel — NOT MENDED, 10 cm worse, while on the copy's cubes as
+      the corrected graph placed them it measured 0.809 m (0.859 with the run's own graph).
+  · ⭐ WHERE IT RE-OPENED — STAGE BY STAGE, FROM THE POSES EACH STAGE LEFT: the cameras of the rack's two visits
+    (rear face: video 4038–4105; front face: 10000–10094) are 6.548 m apart after the cubes + the metre,
+    6.983 m after F2 (+43.5 cm), 7.014 m after F5 (+3 cm). (The original: 6.655 m after the cubes + the metre,
+    6.924 m published.) F2 — precision/gauge.py, "the continuous metric gauge along the walk" — fits a scale
+    s(c) piecewise linear in the chainage with a knot every 2 m from DA3's windows, and
+    `continuous_transforms` applies it as: "every step of the walk rescaled by the mean factor of its two
+    ends, the first camera fixed" — AN OPEN CHAIN re-integrated from the first camera, written for a walk
+    without revisits; the cube graph has closed revisits since 2026-11-08 and F2 knows nothing of them.
+    WHAT IT APPLIED (gauge.json of every session): the copy x0.812 … x1.247, a camera moved up to 2.31 m ·
+    pccr 2026-08-24 x0.829 … x1.221, 2.06 m · pccr 2026-08-31 x0.879 … x1.159, 0.62 m · observatorio
+    x0.885 … x1.114, 0.21 m · bufferStop x0.946 … x1.037, 0.09 m · zaragoza x0.969 … x0.972, 0.21 m.
+    ON THE COPY (scratchpad dl/gauge_vs_closures.py; the gauge rebuilt from gauge.json on the pre-gauge
+    cameras gives back its recorded scale range and its 2.306 m exactly):
+    – the cameras are moved 0.06 m in the first tenth of the walk, then 0.63, 0.88, 1.22, 1.39, 1.62, 1.66,
+      1.57, 1.78 and 2.03 m in the last; F5 after it moves them 0.06–0.23 m;
+    – THE 774 REVISITS THE GRAPH HONOURS (within 3 sigma of their bridge): the vector between a closure's two
+      cameras is moved by the gauge a median of 23.9 cm (90 % under 66.6, max 93.8); F5 after it moves it
+      13.0 cm; from before the gauge to the published poses 16.6 cm at the median, 54.7 at 90 %, 101.7 at
+      most. By how far apart along the walk the two visits are: under 200 keyframes 11.1 cm by the gauge /
+      12.0 left after F5; 200–600: 33.6 / 16.7; 600–1200: 52.0 / 49.5 — F5 does not bring the far ones back;
+    – THE RACK: the gauge moved the front visit's cameras 1.57 m and the rear visit's 0.93 m — the rear
+      visit AWAY from the front one by 0.663 m along the rack's depth; its scale x1.010 at the front visit
+      and x0.897 at the rear one moves the faces 0.04 and 0.10 m more: 0.73 m of the 0.84 m the rack opened
+      by (0.809 → 1.647 m);
+    – by the study's ruler (the walk's local length against the first pass, stretches of 16 keyframes) the
+      gauge does not make the walk agree better: 90 % of the stretches within x0.754–x1.332 before it,
+      x0.746–x1.248 after it, x0.744–x1.281 published.
+    NOT MEASURED: the same on the original or on another session (their epochs are gone); the rack's REAL
+    depth (asked of him on 2026-11-19, not answered — 0.81 m is a plausible rack, 1.6 m is not, but it is
+    his to say).
+  · THE TEST PROPOSED TO HIM (his decision — a design choice, NOT STARTED): on the copy, F2 applying ONE scale
+    for the whole session (the metre), the shape the graph closed kept; back to epoch 0 from
+    _restart_epochs, F2, then F5 and F6 on the SAME tracks (F4's stamp reads the frames and camera.json, not
+    the poses: its file is reusable — but run_chain runs EVERY step from the first changed one, so the steps
+    are to be launched one by one, on his order): about 4–5 h of the card; the copy's cloud of today is
+    replaced. §6 holds what was tried before on the graph's side: "DA3 per-cube priors and Cauchy on the
+    seams (broke seams by 16–33 cm)" — the same instrument, DA3's local metre.
+- ⭐⭐⭐ THE STUDY OF PCCR 2026-08-24 AND ITS PARALLEL COPY — ITS RUN ENDED 2026-11-20 08:14 UTC (the block above is where to resume).
   USER, on two parts of one rack that do not join (wall#598: its side and rear, cabinet#2534: its front): "quiero
   que veas algo y pensemos juntos como resolverlo" / "en algun punto se estiro el recorrido y derivo, o bien, la
   profundidad no es la correcta" / "habria que buscar donde hay huecos similares que rompen las costuras" / "el
