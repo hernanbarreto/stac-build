@@ -1584,6 +1584,19 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     Jacobians, both, and a bound that fits fewer than half of them; a whole solve; a whole rung through
     run_rung_torch; the 60 existing tests of F5 pass. NOT MEASURED: the time on the card and F5's memory peak
     (the copy's F5 will show it in stage_usage.csv) — the two bounds are set after it.
+  · A SMALL ONE DONE IN THE CLONE (server patch 0004): depth_on_f5.load_records — the keyframes' records
+    inflated on 8 threads and taken in the keyframes' order (they were read one after another): on 200 real
+    records of the copy, 43 ms each in sequence = 2.0 min for 2772, 0.3 min on threads, the same arrays; 1 test.
+  · LEFT FOR THE CARD'S MEASUREMENTS, told to him: (a) F4 — the coarse feature maps once per window instead
+    of once per query frame (a permutation of the same frames): a few per cent at most, and whether a frame's
+    features are the same bits at another position of the batch can only be checked ON THE CARD; (b) F6 — the
+    medians over the witnesses (three sorts of [V, H, W] a keyframe) restricted to the pixels that read them:
+    worth it or not is read on the fast vote's profile on the card; (c) the publish (935 s): its split comes
+    from the copy's stamped log.
+  THE SERVER PATCHES NOW: 0001 the cube closing's server side · 0002 F6's fast vote · 0003 F5's kept plans and
+  Jacobians · 0004 F6's records on threads (/workspace/tmp/dev/patches/server/, second copy in
+  /workspace/dev_patches_20261119.tar.gz; the clone /root/dev/stac-build on the LOCAL disk). EVERY KEY THEY ADD
+  IS AT THE RECORD'S VALUE: merging changes nothing; each is switched after its measurement on the card.
   PASSIVE RECORDS LEFT RUNNING ON THE COPY (scratchpad, read only): stage_sampler.py → stage_usage.csv (every
   5 s: stage, card utilisation / memory / power, the stage process's CPU and its busiest threads) and
   stage_log_stamped.txt (every stage line of the log with its UTC time) — they give the real split of F5's
