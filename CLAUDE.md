@@ -1235,6 +1235,33 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   scans on the assistant's own description of them, without reading who reads them (the block above). THE RULE IT
   LEAVES: nothing is deleted from a session before `grep` has listed every reader of it in server/ and each one
   has been read; "intermediate" is a claim to prove, not a name.
+- ⭐⭐ THE PAGE ON EVERY SCREEN — HIS ORDER OF 2026-11-20; THE ANALYSIS DONE, THE PLAN WAITING FOR HIS WORD.
+  USER: "hace la pagina responsiva para PC tablet y telefonos, con cortes por resolucion de pantalla, fijate que
+  los iconos laterales, la barra de herramientas, el asistente, etc nada de la pagina esta hecha de forma
+  responsiva, muchas cosas no tienen scroll, y quedan ocultas segun la resolucion, quiero que hagas un analisis
+  completo de toda la paginas y sus modales, funciones, etc, y debe funcionar perfectamente adaptada a cada
+  pantalla de forma responsiva". `docs/responsive_audit.md` holds the whole audit and the plan (the frame read
+  by the assistant; three parallel read-only reviews for the panels, the windows and the viewer; NOTHING WAS
+  RENDERED — every size is computed from the style rules). NOTHING OF ui/src WAS EDITED.
+  · THE CAUSE: one fixed frame (48 | 280 | 1fr | 320 px, 100vh, `html, body, #root {overflow: hidden}`) and ONE
+    screen-size rule in the whole source — what does not fit its box is cut, silently. Viewer width = page − 648
+    with the default panels: 0 px up to 648, 120 at 768, 718 at 1366.
+  · ON HIS PC (1366×768): the toolbar (541–676 px, ≈ 770 with the deviation chip) cannot scroll (its
+    `overflow-x: auto` never acts: cut on BOTH sides when the viewer is narrower) and runs 86 px into the view
+    cube; the rail's 10 icons need 464 px (cut under 528 px of page height); the assistant's input row loses
+    Send at the panel's default width (computed); sessions / instances rows; the brush's options and the
+    physics panel with the dock open; menus with no clamp. BY TOUCH: the brush's marks, New ticket, the BIM
+    element menu and the section box have NO way (right click / mouse only); names and actions live in hover.
+  · PROPOSED TO HIM (his decisions): the cuts — Wide ≥ 1280 (as today, with limits) / Medium 768–1279 (the
+    panels open OVER the viewer, the header compacts) / Narrow < 768 (the rail at the bottom, panels and
+    windows whole-screen, the toolbar one scrolling row) / Short < 520 px of height; a touch layer (40-px
+    targets, visible row actions, long press = right click, touch resizers, 16-px inputs, `100dvh`); four
+    stages, each ending with ONE thing for him to look at: 1 his PC (nothing hidden), 2 tablet + touch basics,
+    3 phone, 4 the viewer by touch (+ a lighter default on a phone: his decision).
+  · ASKED OF HIM, unanswered: the OK to the cuts and to stage 1; whether the assistant may RENDER THE PAGE ON
+    THE POD to see each size before he does (refused on 2026-11-19; Playwright 1.63 is already a dev dependency
+    of the interface, its browser is not downloaded — an install on the local disk; a test login would be
+    needed; software rendering only, never the card).
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
   background). He tried the night's work in the browser and it failed nearly everywhere; each point was then
   worked with him, one change at a time, on his screenshots. HIS VERDICTS (2026-11-19: "1. confirmado, 2.
