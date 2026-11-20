@@ -1570,6 +1570,20 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     chosen ON THE CARD) and the reduction under the strict mode on CUDA (the probe decides at run time).
     ⚠ The assistant's estimate "60–85 min" for this lever leans on the low side: the medians over the witnesses
     (three sorts of [V, H, W] a keyframe) and the elementwise passes' memory traffic stay.
+  · LEVER 2 DONE IN THE CLONE (server patch 0003): precision/ba_torch.py `_ChunkedProblem` — the pair plan of
+    each chunk (its landmark-sharing observation pairs sorted by camera pair: it depends on the tracks alone)
+    is KEPT between LM trials instead of made again at every one ("the plan is per chunk, not kept"), and the
+    loss-scaled Jacobians the linearisation makes are KEPT for the step's two passes (the Schur sums, the
+    back-substitution) and for every rejected trial, instead of made twice more each time — both within a
+    memory bound: `refine.torch_ba.keep_pair_plans_gb` / `keep_jacobians_gb` (0 = THE RECORD, the value in
+    config.yaml; what does not fit its bound is made again, chunk by chunk). MEASURED on the original pccr
+    2026-08-24's tracks: 25.8 M fit tracks with ≥ 2 keyframe observations, 139.6 M observations (track length
+    median 5, mean 5.4, max 24), 1.09e9 pairs = 7.8 an observation — THE WHOLE PLAN IS ~8 GB as two int32
+    arrays (it fits the card; the Jacobians of every chunk: 15–28 GB by the rung). HELD TO THE RECORD: 6 tests —
+    every trial (repeated dampings, an accepted step, the next linearisation) bit for bit with the plans, the
+    Jacobians, both, and a bound that fits fewer than half of them; a whole solve; a whole rung through
+    run_rung_torch; the 60 existing tests of F5 pass. NOT MEASURED: the time on the card and F5's memory peak
+    (the copy's F5 will show it in stage_usage.csv) — the two bounds are set after it.
   PASSIVE RECORDS LEFT RUNNING ON THE COPY (scratchpad, read only): stage_sampler.py → stage_usage.csv (every
   5 s: stage, card utilisation / memory / power, the stage process's CPU and its busiest threads) and
   stage_log_stamped.txt (every stage line of the log with its UTC time) — they give the real split of F5's
