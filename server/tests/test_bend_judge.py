@@ -176,13 +176,11 @@ def test_heldout_rows_split_into_the_selection_and_the_report_halves():
 
 # ── point 52: THE ONE confidence floor, pinned ─────────────────────────────
 
-def test_the_confidence_floor_is_min_plus_norm_times_the_span_and_the_weight_its_ramp():
+def test_the_confidence_floor_is_min_plus_norm_times_the_span():
     v = np.array([0.2, 0.5, 1.0, 4.0])
     thr, cmax = D.confidence_floor(v, 0.10)
     assert thr == 0.2 + 0.10 * (4.0 - 0.2) and cmax == 4.0
     assert D.confidence_floor(np.array([3.0]), 0.5) == (3.0, 3.0)
-    w = D.confidence_weight(v, thr, cmax, np.array([True, True, True, True]))
-    assert np.allclose(w, np.clip((v - thr) / (cmax - thr), 0, 1)) and w[0] == 0.0 and w[-1] == 1.0
     with pytest.raises(D.DepthOnF5Error):
         D.confidence_floor(np.zeros(0), 0.1)
     # the key it reads is the pipeline's ONE floor, shared with the viewer's slider arithmetic
@@ -253,10 +251,11 @@ def test_the_vote_reports_tau_and_every_frames_margins_to_it():
 
 
 def test_margin_quantiles_report_the_share_beyond_the_bar():
-    from precision.mono_detail import margin_quantiles
-    q = margin_quantiles(np.array([1.0, 0.5, -0.5, np.nan]))
+    import torch
+    from precision.f6_torch import margin_quantiles
+    q = margin_quantiles(torch.tensor([1.0, 0.5, -0.5, float("nan")], dtype=torch.float64))
     assert q["n"] == 3 and abs(q["share_beyond"] - 1 / 3) < 1e-12 and q["p50"] == 0.5
-    assert margin_quantiles(np.array([])) is None
+    assert margin_quantiles(torch.zeros(0, dtype=torch.float64)) is None
 
 
 # ── point 45 / 56: the camera file is exact ───────────────────────────────

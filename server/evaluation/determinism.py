@@ -125,16 +125,6 @@ def checkpoints(config: Dict[str, Any]) -> Dict[str, Any]:
         out["vlm"] = {k: {"revision": v.get("revision"), "sha256": v.get("sha256")} for k, v in PINNED_WEIGHTS.items()}
     except Exception as e:  # noqa: BLE001
         out["vlm"] = {"error": f"{type(e).__name__}: {e}"}
-    wd = flat.get("reconstruction.precision.mono_detail.weights_dir")
-    pd: Dict[str, Any] = {"weights_dir": wd, "files": {}}
-    if wd:
-        d = Path(wd)
-        d = d if d.is_absolute() else repo_root() / d
-        for p in sorted(d.glob("*.pth")) if d.exists() else []:
-            side = p.with_suffix(p.suffix + ".sha256")
-            pd["files"][p.name] = {"sha256": side.read_text().split()[0] if side.exists() else None,
-                                   "name_prefix": p.stem.split("-")[-1], "bytes": p.stat().st_size}
-    out["pointdit"] = pd
     out["vggsfm_tracker"] = {"url": flat.get("reconstruction.precision.tracks.tracker_weights_url"),
                              "sha256": flat.get("reconstruction.precision.tracks.tracker_weights_sha256")}
     out["sam3"] = {"version": flat.get("models.segmentation.version"),

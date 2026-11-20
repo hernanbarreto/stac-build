@@ -141,7 +141,7 @@ STEPS: List[Step] = [
                  "output/camera.json") + _POSE_FILES,
          config=("refine", "camera")),
     Step("f6_bend", "F6 depth on F5: Omega bent to F5's landmarks + multi-view vote (the product)", "da3",
-         "precision.depth_on_f5",
+         "precision.depth_on_f5", gpu=True,              # its maps and its vote run on the card (f6_torch.require_cuda)
          # intake/cubes.json: what each keyframe sees of every other — the co-visible keyframes of other moments
          # vote too (depth_on_f5.covisible_witnesses, USER 2026-11-07)
          reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json",
@@ -153,7 +153,7 @@ STEPS: List[Step] = [
          # typed section's place in the stamp — it is the same keys plus ``scope`` (depth_on_f5.bend_scope: one
          # depth factor per keyframe or one for the session), which F6 reads from the raw section so that
          # declaring it does not enter F2's and F5's code stamps (precision/config.py is in every step's)
-         config=("bend", "raw:reconstruction.precision.bend", "depth", "cloud", "mono_detail", "gauge", "refine",
+         config=("bend", "raw:reconstruction.precision.bend", "depth", "cloud", "gauge", "refine",
                  "camera", "raw:reconstruction.simple", "raw:postprocessing")),
     Step("f6_sweep", "F6 native depth sweep", "da3", "precision.depth_sweep", gpu=True,
          reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json"),
@@ -531,11 +531,7 @@ def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
     drop = set()
     if pcfg.cloud.source == "omega_bent":
         # USER 2026-10-01 (pccr epoch 7): the depth on F5 IS the product — no plane sweep, no F7.
-        # With mono_detail on, PointDiT runs inside it: the step takes the card (vLLM stands down).
-        from dataclasses import replace as _replace
-        mono = bool(getattr(getattr(pcfg, "mono_detail", None), "enabled", False))
-        return [(_replace(s, gpu=True) if (mono and s.key == "f6_bend") else s)
-                for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
+        return [s for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
     drop.add("f6_bend")
     if fusion:
         drop.add("f7_cloud")

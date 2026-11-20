@@ -191,7 +191,6 @@
     "logout": "Salir",
     "shadows": "Sombras",
     "flyers": "Voladores (diagnóstico)",
-    "monoDetail": "Capa de detalle PointDiT",
     "mixedUnresolved": "Píxeles mezclados sin resolver",
     "cubes": "Puntos como cubos",
     "sceneLook": "Fondo y cuadrícula…"
@@ -1393,8 +1392,6 @@
     "isolate": "Aislar",
     "showAll": "Mostrar todo",
     "layer_flyers": "Capa de voladores cargada (rojo borde · naranja vistas · azul textura · gris otro)",
-    "layer_mono_detail": "Capa PointDiT cargada (gris detalle · verde frente · azul fondo)",
-    "layer_mixed_unresolved": "Píxeles mezclados sin resolver cargados (rojo): excluidos de la nube",
     "layerMissing": "La capa '{name}' no está en esta sesión todavía",
     "cube": "Cubo {id}"
   },

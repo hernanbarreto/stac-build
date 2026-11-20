@@ -109,13 +109,12 @@ def test_f6_carries_the_anchors_scale_bend_floor_and_pose_onto_each_witness(tmp_
     assert none[0] == {} and "no context views" in none[5]["why_none"]
 
 
-def test_the_witnesses_enter_the_vote_after_the_mono_detail_and_never_its_keyframes():
+def test_the_witnesses_enter_the_vote_and_never_its_keyframes():
     src = (ROOT / "server" / "precision" / "depth_on_f5.py").read_text()
     body = src[src.index("def compute("):src.index("def publish_cloud(")]
-    i_md = body.index("apply_mono_detail(")
     i_w = body.index("load_turn_witnesses(")
     i_v = body.index("edge_keeping_vote(frames, dep, valid, passed, K, c2w_vote,")
-    assert i_md < i_w < i_v
+    assert i_w < i_v
     assert "extra=t_extra" in body and "turn_witnesses=t_rep" in body
     assert "frames=frames" in body                       # the cloud is built over the keyframes
 

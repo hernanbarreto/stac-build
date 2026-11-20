@@ -22,7 +22,6 @@ VENDOR_CLONES=(
 # the remote does not (depth-anything-3's last commit was never pushed to the fork)
 VENDOR_SUBMODULES=(
   "vendor/VGGT-Long|-"
-  "vendor/pointdit|-"
   "vendor/depth-anything-3|stac-main"
 )
 
@@ -58,8 +57,6 @@ step_submodules() {
         [ "$got" = "$want" ] || { echo "$path is at $got, the repo pins $want"; return 1; }
         echo "$path @ $got"
     done
-    # PointDiT loads DINOv3's hub code from its own third_party/ (untracked there)
-    clone_at "$VENDOR/pointdit/third_party/dinov3" https://github.com/facebookresearch/dinov3.git 6876159a11b4df116f30f667f8c9888617df0751
     # MapAnything's DINOv2 is loaded from a LOCAL checkout of the hub code (the hot patch of uniception:
     # scripts/rebuild/overlays/mapanything): facebookresearch/dinov2 @ 9c7e324, hubconf.py + dinov2/
     local tmp="$CACHE/src/dinov2"

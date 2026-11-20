@@ -86,17 +86,13 @@ Not clonable. Provision as noted; none is fetched by `git`.
 - `vendor/DepthLM_Official`, `vendor/perception_models` — **dead `.gitmodules`
   entries** (declared but never tracked and absent on disk). Removed from
   `.gitmodules`. Re-add as real submodules if these deps come back.
-- `vendor/pointdit` — SUBMODULE since 2026-10-04 (moved from third_party/ the same day: the repo's vendor convention) (`google-research/pointdit`, pinned
-  `11f53a30aeb4d34d49d2beda655ee6f19b2ad7f8`, Apache-2.0): the monocular point-map DiT whose
-  depth DETAIL refines the bent Omega maps inside f6_bend (claude_stac.txt 2026-10-04, flag
-  `mono_detail.enabled`). Runs in env `da3` (torch 2.9.1 untouched; `torchmetrics` +
-  `lightning-utilities` added with `--no-deps` for its torch.hub load of DINOv3). Untracked inside
-  it: `third_party/dinov3` (clone of `facebookresearch/dinov3` @ `6876159a`, the hub code),
-  `pretrained/pointdit{h,l}-512-mixdata-nodinov3-*.pth` (HF `haofeixu/pointdit`, sha256 prefixes
-  cb01dd3b / 240c1a4f verified) and `pretrained/dinov3/dinov3_vit{h16plus,l16}_pretrain_lvd1689m-*.pth`
-  (gated Meta weights, prefixes 7c1da9a5 / 8aa4cbdd verified, downloaded 2026-10-04 with the user's
-  links). NOTE: `vendor/dinov3` and `weights/dinov3` named above are NOT on this pod any more
-  (2026-10-04: neither directory exists); the DINOv3 weights live under PointDiT's `pretrained/dinov3`.
+- `vendor/pointdit` — REMOVED 2026-11-20 (USER: "el detalle de bordes pointdit nunca me cerro un modelo con licencia no
+  comercial que tarda un huevo sin un resultado ni necesidad aparente, hay que sacarlo, eliminalo de la cadena, del
+  repo, de todo, no tiene ningun sentido"): the submodule, its code in F6 (`precision/mono_detail.py`,
+  `precision/pointdit_runner.py`), its configuration section, its tests, its weights (PointDiT-H / -L and DINOv3
+  ViT-H+/16) and the two packages added to env `da3` for it (`torchmetrics`, `lightning-utilities`). Meta's DINOv3
+  ViT-L/16 checkpoint that GenRecon's conversion reads lived under PointDiT's `pretrained/dinov3`: it is now
+  `vendor/GenRecon/weights/src/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth` (sha256 prefix 8aa4cbdd, verified).
 
 - `vendor/meshflow` — REMOVED 2026-10-04 (USER: "saca del vendor los pesos, del config y del código"): the
   checkout with its 4.3 GB `ckpt/`, the `meshflow:` config block, `run_meshflow_batch.py` / `run_meshflow.sh`,

@@ -4782,8 +4782,6 @@ async def get_scene(session_id: str):
 
 PRECISION_LAYERS = {
     "flyers": "flyers.glb",                        # precision/flyers.py (claude_stac.txt Phase 0)
-    "mono_detail": "layer_mono_detail.glb",        # precision/depth_on_f5.py + mono_detail.py (Phase 7)
-    "mixed_unresolved": "layer_mixed_unresolved.glb",
 }
 
 
@@ -4791,9 +4789,7 @@ PRECISION_LAYERS = {
 async def precision_layer(session_id: str, name: str):
     """A diagnostic layer of the precision core as a coloured GLB point cloud (View menu):
     `flyers` — the live cloud's flyers by class (a red mixed edge, b orange view-inconsistent, c blue
-    low texture / highlight, d grey other); `mono_detail` — the points PointDiT's detail or band
-    resolution wrote (grey detail, green front, blue back); `mixed_unresolved` — the mixed pixels that
-    left the measurement tier (red). 404 until the producing stage has run on this session."""
+    low texture / highlight, d grey other). 404 until the producing stage has run on this session."""
     from fastapi.responses import FileResponse
     if name not in PRECISION_LAYERS:
         raise HTTPException(status_code=404, detail=f"unknown layer {name!r}; one of {sorted(PRECISION_LAYERS)}")

@@ -333,29 +333,19 @@ def test_chunk_check_applies_the_published_bend():
     assert scale_map(1.03, (0.0, 0.0), H, W) == 1.03
 
 
-# ── the mono-detail hook (claude_stac.txt 2026-10-04) ────────────────────────
+# ── the cloud's provenance column and the card ───────────────────────────────
 
-def test_mono_detail_off_leaves_the_bend_untouched_and_the_source_is_omega():
-    from dataclasses import replace
+def test_every_published_point_is_omegas_own_pixel_and_f6_takes_the_card():
     from precision.config import load_precision_config
-    from precision.depth_on_f5 import apply_mono_detail, confidence_weight, source_column
-    pcfg = load_precision_config()
-    pcfg = replace(pcfg, mono_detail=replace(pcfg.mono_detail, enabled=False))   # the flag's value is the user's
-    dep = {0: np.ones((4, 4), np.float32)}; valid = {0: np.ones((4, 4), bool)}; passed = {0: np.ones((4, 4), bool)}
-    d2, v2, p2, src, rep = apply_mono_detail(pcfg, [0], dep, valid, passed, {}, None, K, {}, Path("."),
-                                             lambda m: None, lambda a, b: None)
-    assert d2 is dep and v2 is valid and p2 is passed and src is None and rep is None
-    data = {"frame_global": np.zeros(3, np.int64), "pixel_row": np.zeros(3, np.int64), "pixel_col": np.arange(3)}
-    assert source_column(data, None).tolist() == [1, 1, 1]
-    maps = {0: np.array([[0, 1, 3]], np.uint8)}
-    assert source_column(data, maps).tolist() == [1, 2, 4]
-    w = confidence_weight(np.array([0.0, 0.5, 1.0, 2.0]), 0.5, 1.5, np.array([False, True, True, True]))
-    assert np.allclose(w, [0.0, 0.0, 0.5, 1.0])
-    # the chain gives f6_bend the card only when the stage is on
+    from precision.depth_on_f5 import SRC_OMEGA_BENT, source_column
+    data = np.zeros(5, dtype=[("frame_global", "<i4"), ("pixel_row", "<i2"), ("pixel_col", "<i2")])   # the cleaned
+    col = source_column(data)                                                                    # cloud's rows
+    assert col.dtype == np.uint8 and col.tolist() == [SRC_OMEGA_BENT] * 5 == [1, 1, 1, 1, 1]
+    assert source_column(data[:0]).tobytes() == b""
+    # F6 runs its maps and its vote on the card: the chain hands it the card whatever the configuration
     from precision.runner import chain_steps
-    off = {s.key: s.gpu for s in chain_steps(pcfg)}
-    on = {s.key: s.gpu for s in chain_steps(replace(pcfg, mono_detail=replace(pcfg.mono_detail, enabled=True)))}
-    assert off["f6_bend"] is False and on["f6_bend"] is True and "f6_sweep" not in on
+    steps = {s.key: s.gpu for s in chain_steps(load_precision_config())}
+    assert steps["f6_bend"] is True and "f6_sweep" not in steps
 
 
 def test_the_half_b_held_out_is_also_measured_in_metres():
@@ -384,29 +374,3 @@ def test_the_half_b_held_out_is_also_measured_in_metres():
     assert got["median_m"] == pytest.approx(float(np.median(rel * rows_B[0][2])), rel=1e-9)
     assert got["median_m"] == pytest.approx(2.0 / 0.9 - 2.0, abs=0.01)   # |z/0.9 - z| at z = 2 m
     assert heldout_metres({0: rows_B[2]}, {0: coefs[2]}, 1, W, H) == {"median_m": None, "range_m": None, "rows": 0}
-
-
-def test_the_published_points_provenance_in_one_pass_is_the_loops():
-    """`source_column` (2026-11-20: one pass over the points instead of one per keyframe — 6.4 silent minutes of
-    pccr 2026-08-24's copy): the same bytes as the loop it replaced, frames in any order, a frame with no map, no
-    point at all, and the same refusal — naming nothing but the rule — when an unresolved pixel is met."""
-    from precision import depth_on_f5 as D
-    from precision.mono_detail import SRC_UNRESOLVED
-    rng = np.random.default_rng(41)
-    H, W, frames = 24, 40, [3, 7, 8, 20, 21, 500, 13000]
-    maps = {f: rng.integers(0, 4, (H, W)).astype(np.int8) for f in frames if f != 20}        # frame 20 has no map
-    n = 60_000
-    data = np.zeros(n, dtype=[("frame_global", "<i4"), ("pixel_row", "<i2"), ("pixel_col", "<i2")])
-    data["frame_global"] = rng.choice(frames, n)
-    data["pixel_row"] = rng.integers(0, H, n)
-    data["pixel_col"] = rng.integers(0, W, n)
-    got, ref = D.source_column(data, maps), D._source_column_reference(data, maps)
-    assert got.dtype == ref.dtype == np.uint8 and got.tobytes() == ref.tobytes()
-    assert set(np.unique(got)) <= {1, 2, 3, 4} and (got[data["frame_global"] == 20] == 1).all()
-    assert D.source_column(data[:0], maps).tobytes() == D._source_column_reference(data[:0], maps).tobytes() == b""
-    assert (D.source_column(data, None) == 1).all() and (D._source_column_reference(data, None) == 1).all()
-    one = data[data["frame_global"] == 8][:1]
-    maps[8][int(one["pixel_row"][0]), int(one["pixel_col"][0])] = SRC_UNRESOLVED
-    for fn in (D.source_column, D._source_column_reference):
-        with pytest.raises(D.DepthOnF5Error, match="mixed_unresolved"):
-            fn(data, maps)

@@ -258,7 +258,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   `memory.usage_in_bytes` counts the page cache — read `memory.stat total_rss`.
 - /workspace is RunPod's MooseFS FUSE volume (`mfs#ca-mtl-3.runpod.net`), quota 400 GB invisible to `df`: a full
   quota fails every write with Errno 122 and the worker dies without a traceback. The local disk (/root/.cache: torch
-  hub, the VGGSfM tracker, PointDiT's DINOv3 3.1 GB copy) is wiped by a pod restart and refilled once.
+  hub, the VGGSfM tracker) is wiped by a pod restart and refilled once.
 - ⚠ THE VOLUME'S QUOTA IS CHARGED ON ALLOCATED SIZE, NOT ON THE FILES' LENGTHS (measured 2026-11-19, after the
   volume filled under a guard that read "368 GB"): `du -b` / `--apparent-size` — what every earlier figure of
   this file was measured with — misses about 100 KB per small file (ui/node_modules 725 MB long = 2.5 GB
@@ -384,7 +384,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   session peaks at ~70–95 GB). Safe to free: the pip cache, `conda clean --tarballs --packages` (no env softlinks
   into pkgs), `vendor/GenRecon/work` (every GenRecon run rmtree's and recreates its own dirs) — USER 2026-11-08
   "ok, sin romper nada" / "los genrecon que se usaron a modo de pruebas eliminalos" (37 GB freed).
-- Envs (`/workspace/miniforge3/envs`): da3 (backend + core + PointDiT), mapanything (Omega, F4, F5), semantic (vLLM),
+- Envs (`/workspace/miniforge3/envs`): da3 (backend + core), mapanything (Omega, F4, F5), semantic (vLLM),
   voice (Whisper large-v3-turbo MIT + Kokoro-82M Apache-2.0 + Silero VAD MIT, 2026-11-14), amb3r (AMB3R-SLAM), genrecon, CloudComPy310, gs, nodejs, colmap (USER 2026-11-18: "De hecho colmap se usa" — none of the ten is optional). One HF cache: `HF_HOME=
   /workspace/hf_cache`. No paid external APIs; everything local.
 - texrecon (`vendor/mvs-texturing`, kept *"por las dudas"*) was relinked against libtiff 6 (its own link.txt,
@@ -898,6 +898,17 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   points. Viewer: segmentation lamps / windows as lights, point opacity, shadows for meshes.
 
 ## 6 · TRIED AND DISCARDED — do not bring back without his word (details in `git show 2f13136:CLAUDE.md`)
+- ⭐ POINTDIT (the monocular detail at the edges, inside F6 since 2026-10-04): REMOVED 2026-11-20 — USER: "el detalle de
+  bordes pointdit nunca me cerro un modelo con licencia no comercial que tarda un huevo sin un resultado ni necesidad
+  aparente, hay que sacarlo, eliminalo de la cadena, del repo, de todo, no tiene ningun sentido". Deleted: its code
+  in F6 (`precision/mono_detail.py`, `pointdit_runner.py`, `mono_ab.py`, twelve device functions of `f6_torch.py`,
+  its hook between the depth and the vote, its report, its two viewer layers and their texts), its section of the
+  typed configuration and of config.yaml, its
+  tests, its evaluation variant, the submodule `vendor/pointdit` with 15 GB of weights, the two packages added to
+  env `da3` for it, its rows of the rebuild kit. F6 takes the card always (its vote runs on it) and its seed is the
+  bend's. What every stage after it did with a "mixed" pixel at an edge is now the vote's alone. GenRecon's DINOv3
+  ViT-L source file moved to `vendor/GenRecon/weights/src/`. Every mention of PointDiT elsewhere in this file is the
+  record of how the pipeline was BEFORE that date.
 - AS THE RECONSTRUCTION: VGGT-SLAM 2.0, VidMap, AMB3R's own cloud (2026-11-04: none beat the pipeline); LoGeR +
   PointDiT + DA3 (2026-10-06); the DA3-streaming cloud (*"no es mejor ni cerca"*); DA3 depth in the cloud (*"capas
   duplicadas y puntos voladores"*); the plane sweep / witness fusion (`cloud.source: fusion`, selectable).

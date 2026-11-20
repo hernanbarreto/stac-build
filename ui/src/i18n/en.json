@@ -191,7 +191,6 @@
     "logout": "Sign out",
     "shadows": "Shadows",
     "flyers": "Flyers (diagnosis)",
-    "monoDetail": "PointDiT detail layer",
     "mixedUnresolved": "Mixed unresolved pixels",
     "cubes": "Points as cubes",
     "sceneLook": "Background and grid…"
@@ -1393,8 +1392,6 @@
     "isolate": "Isolate",
     "showAll": "Show all",
     "layer_flyers": "Flyer layer loaded (red edge · orange views · blue texture · grey other)",
-    "layer_mono_detail": "PointDiT layer loaded (grey detail · green front · blue back)",
-    "layer_mixed_unresolved": "Mixed unresolved pixels loaded (red): excluded from the cloud",
     "layerMissing": "Layer '{name}' is not on this session yet",
     "cube": "Cube {id}"
   },

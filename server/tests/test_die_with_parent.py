@@ -1,5 +1,5 @@
 """USER 2026-10-06: when the server dies, the WHOLE stage tree dies with it — the worker,
-its children and grandchildren (Omega, DA3, SAM3, the precision steps, PointDiT)."""
+its children and grandchildren (Omega, DA3, SAM3, the precision steps)."""
 
 import os
 import signal

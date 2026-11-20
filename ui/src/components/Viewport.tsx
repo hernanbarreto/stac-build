@@ -153,7 +153,7 @@ export interface SegmentInstance {
     excluded?: boolean
 }
 
-export type PrecisionLayer = 'flyers' | 'mono_detail' | 'mixed_unresolved'
+export type PrecisionLayer = 'flyers'
 
 export interface ViewportHandle {
     /** gravity sandbox (USER 2026-10-01): drop a sphere 1.5 m above the point the view orbits;
@@ -171,8 +171,7 @@ export interface ViewportHandle {
      *  the meshes show through; at 0 they are discarded */
     setPointOpacity: (opacity: number) => void
     /** a diagnostic layer of the precision core (/api/precision/layer): 'flyers' (a red mixed edge ·
-     *  b orange view-inconsistent · c blue low texture · d grey other), 'mono_detail' (grey detail ·
-     *  green front · blue back), 'mixed_unresolved' (red) */
+     *  b orange view-inconsistent · c blue low texture · d grey other) */
     setPrecisionLayer: (name: PrecisionLayer, on: boolean, sessionId: string | null) => Promise<void>
     /** fly to a listed object: a placed one (id), a generated one (instance id), a mesh (folder) */
     flyToObject: (kind: 'placed' | 'shape' | 'tsdf', key: string | number) => boolean

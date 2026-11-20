@@ -145,8 +145,8 @@ def git(repo: Path, *args: str) -> str:
 
 
 def known_repo_dirs():
-    """The work trees the rebuild itself clones: the repo, its submodules, steps_vendors.sh's clones,
-    PointDiT's hub code — each with its own submodules. A git clone that some BUILD made (mvs-texturing's
+    """The work trees the rebuild itself clones: the repo, its submodules, steps_vendors.sh's clones
+    — each with its own submodules. A git clone that some BUILD made (mvs-texturing's
     elibs) is not one of them: its files are archived as they are."""
     dirs = [REPO]
     for line in git(REPO, "config", "--file", ".gitmodules", "--get-regexp", "path").splitlines():
@@ -154,7 +154,6 @@ def known_repo_dirs():
     import re
     for name in re.findall(r'^\s*"([A-Za-z0-9._-]+)\|https://', (HERE / "steps_vendors.sh").read_text(), re.M):
         dirs.append(REPO / "vendor" / name)
-    dirs.append(REPO / "vendor" / "pointdit" / "third_party" / "dinov3")
     out = []
     for d in dirs:
         if not (d / ".git").exists():

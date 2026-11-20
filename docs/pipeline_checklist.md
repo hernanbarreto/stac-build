@@ -26,13 +26,13 @@ apagado en el config, es eliminar del codigo, refactorizar el codigo"*.
 - Removed: DONE only when it is DELETED from the code and the code refactored. A switch turned off is not a removal.
 - A line is DONE or PENDING. Nothing is "started".
 
-State on 2026-11-20: 36 conclusions — 8 not to be touched, 1 done, 27 pending.
+State on 2026-11-20: 36 conclusions — 8 not to be touched, 2 done, 26 pending.
 
 ## The list
 
 | Order | C | Conclusion | What has to be done | State |
 |---|---|---|---|---|
-| 1 | 34 | PointDiT (the detail at the edges): a model under a non-commercial licence, an hour of the card, no result or need shown — *"hay que sacarlo, eliminalo de la cadena, del repo, de todo"* | REMOVE — from F6's code, the configuration, the tests, the pod's environment and weights, the rebuild kit, the documents | PENDING |
+| 1 | 34 | PointDiT (the detail at the edges): a model under a non-commercial licence, an hour of the card, no result or need shown — *"hay que sacarlo, eliminalo de la cadena, del repo, de todo"* | REMOVE — from F6's code, the configuration, the tests, the pod's environment and weights, the rebuild kit, the documents | **DONE** (2026-11-20: deleted from F6 — its hook between the depth and the vote, its modules, its device functions —, from the typed configuration and config.yaml, the tests, the evaluation variant, the interface's two layer entries, the pod — the vendor tree with 15 GB of weights, two packages of env `da3` — and the rebuild kit; F6 runs without it and always takes the card) |
 | 2 | 16 | F6's depth factor per keyframe, and its "verification" on F5's own landmarks | DO IT RIGHT — one factor for the session; the run on the copy of pccr 2026-08-24 for his eye | PENDING |
 | 3 | 31 | Every step is judged against itself; none against an independent reference | BUILD — the decision by zone at the end of every stage, the best state kept (the flow below), with one measure computed on the card | PENDING |
 | 4 | 9 | F5 does not carry the cube graph: where the tracks say nothing it moves the cameras freely | DO IT RIGHT — relative constraints between neighbouring cameras and the closures inside F5's cost; the independent position priors deleted | PENDING |
@@ -54,7 +54,7 @@ State on 2026-11-20: 36 conclusions — 8 not to be touched, 1 done, 27 pending.
 | 20 | 19 | The coverage fill | REMOVE | PENDING |
 | 21 | 25 | The cube check | REMOVE | PENDING |
 | 22 | 28 | The second copy of the cloud | REMOVE | PENDING |
-| 23 | 29 | The two viewer layers | REMOVE — with the route that serves them | PENDING |
+| 23 | 29 | The two viewer layers | REMOVE — with the route that serves them (F6 no longer writes the two files since line 1: they were PointDiT's; the route and the layer mechanism are what is left) | PENDING |
 | 24 | 30 | The files nothing reads (the per-frame uncertainty maps are already deleted, fork bc93d56) | REMOVE | PENDING |
 | 25 | 33 | The second pass of every cube and the turn frames | MEASURE, THEN DECIDE | PENDING |
 | 26 | 35 | The vote's limit of 30°, and "in place" re-admitting what the majority or the veto rejected | MEASURE, THEN DECIDE | PENDING |
@@ -90,7 +90,8 @@ sistema"* / *"Se entiende perfecto y es la manera correcta de abordarlo"*.
 
 ## Besides the 36 (not conclusions of the audit; kept apart)
 
-- The rebuild kit of the pod captured again after the fork's commit bc93d56 — PENDING.
+- The rebuild kit of the pod captured again after the fork's commit bc93d56 — DONE (2026-11-20, captured with line 1's
+  removal of PointDiT from the pod; its own check: the volume and the backup set are the ones the kit describes).
 - A run cannot be lost at its last step: F6 keeps what it computed until its cloud is published; the cleaner takes a
   scratch on the volume when the local disk is short — PENDING.
 - `correction/release.py`: its two log divisors as integers again, once no chain waits on its old bytes — PENDING.

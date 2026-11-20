@@ -375,7 +375,7 @@ def write_chunks(inp, f6: dict, raw_cfg: dict, tmp: Path, log: Callable, ccfg=No
 
 def _release_card(log: Callable) -> None:
     """Hand this process's CACHED card memory back to the driver before a subprocess needs the card. The
-    tensors F6 freed (PointDiT, the vote) stay RESERVED by torch's caching allocator, and another process sees
+    tensors F6 freed (the vote) stay RESERVED by torch's caching allocator, and another process sees
     the card full: bufferStop 2026-11-08 — the F6 process held 78.6 GB while the cleaner of 130.7 M points
     asked for 0.5 GB and died. Nothing alive is touched; the numbers are logged, never decided on."""
     if "torch" not in sys.modules:
@@ -924,7 +924,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     from precision import f6_torch as FT
     pcfg = load_precision_config(session_dir=Path(args.session))   # the job's frozen config (point 69)
     # USER 2026-10-08: the splats / medians of the repair run on the card, strict deterministic torch
-    rec = FT.require_cuda(int(pcfg.mono_detail.seed))
+    rec = FT.require_cuda(int(pcfg.bend.seed))        # nothing is drawn at random: it only fixes torch's generator
     print(f"{LOG_TAG} maps on {rec['device']} ({rec['card']}), torch {rec['torch']}, deterministic strict")
     run_corrected_cloud(Path(args.session), pcfg)
     return 0

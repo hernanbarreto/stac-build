@@ -216,7 +216,6 @@ cubes — live outside the session, in `vendor/GenRecon/work/`, and are what a r
 | Place recognition for the chunk layouts' loop candidates (not run on cubes: the revisits are AMB3R's map's, §10.1) | **DINOv2 ViT-B/14 + SALAD** (8448-D descriptor) | fork `LoopModels/` |
 | Sky segmentation | `skyseg.onnx` (sha256-pinned), onnxruntime CPU | fork `loop_utils/sky_mask.py` |
 | Native-pixel point tracks | **VGGSfM v2** tracker (sha256-pinned) | fork `dependency/vggsfm_tracker` |
-| Monocular detail at depth discontinuities | **PointDiT-H/16** with DINOv3 ViT-H+/16 | `vendor/pointdit` |
 | Scene understanding (vocabulary, descriptions) | **Qwen3-VL** served by vLLM | `server/semantic/` |
 | Promptable segmentation and video tracking | **SAM 3.1** Object Multiplex | `vendor/sam31`, driven by `server/segmentation/` |
 | Scene mesh | **GenRecon** (Trellis.2-class sparse-structure + shape/texture SLat flows, fine-tuned, conditioned on DINOv3 ViT-L/16 features of posed images; half-precision shape and texture decoders) | `vendor/GenRecon` @ eaf1468 + `server/tools/genrecon/genrecon_stac.patch` |
@@ -1076,24 +1075,6 @@ metres too, and that is the σ floor downstream.
 **Validity.** A pixel is valid when $z>0$ and its confidence exceeds $10^{-5}$ (the sky sentinel). It *passes the floor*
 when its confidence is at least $\min+0.10(\max-\min)$ of its VGGT-Ω cube.
 
-**PointDiT at the edges only** (`precision/mono_detail.py`). PointDiT-H/16 (16 Euler steps from zeros, 512-px tiles with
-¼ overlap) gives an affine-invariant depth. Each tile is aligned to the bent depth:
-
-- the fit $z_b\approx s\,z_{\text{mono}}+b$ uses Huber IRLS;
-- the tile's residual is $\hat\sigma\big((z_b-z_{\text{al}})/z_b\big)$;
-- a tile is rejected beyond the 95th percentile of those residuals, or below 5 % support.
-
-The detail is transplanted as
-
-```math
-z'=\mathrm{LP}_\sigma(z_b)+\big(z_{\text{al}}-\mathrm{LP}_\sigma(z_{\text{al}})\big)
-```
-
-(a masked, normalised Gaussian low-pass). It is accepted **only within $f_x\tan(1.807°)$ of a depth discontinuity**
-(`detail_zone_deg`, read with F5's focal; 12 px at the calibration focal) and where $|z'-z_b|/z_b\le\tau_0$. Surfaces stay
-VGGT-Ω's. Mixed pixels at a discontinuity (a side reach of $f_x\tan(0.452°)$, `side_reach_deg`) are assigned to the front
-or back side when $z_{\text{al}}$ agrees with it, and are otherwise left out of the measurement tier.
-
 **The witnesses.** Every candidate pixel of keyframe $f$ (valid, and passing the confidence floor or lying on a depth
 edge) is lifted to $X=C_f+z\,\mathbf r(u,v)$ and put to:
 
@@ -1202,7 +1183,7 @@ coloured from the undistorted frame. Each point records:
 - its pixel (`pixel_row`, `pixel_col`);
 - its support (`confidence`): the witnesses that confirm its depth (at least 5), or, for a pixel published in place,
   the witnesses whose surfaces agree with it (§14.6);
-- its source: VGGT-Ω bent, PointDiT detail, band front or band back.
+- its source: VGGT-Ω bent.
 
 **Cleaner** (`reconstruction/stream_clean.py`, the in-memory `gpu_cloud_clean.py` its path of record), on the GPU:
 
@@ -2137,7 +2118,7 @@ stac-build/
 │   │                          #   on the map), cubes + chunk_covis (the cut), cube_boxes (the viewer's cubes), chunk_plan
 │   │                          #   (Ω resolution), scale_align, orient, sky precompute, stream_clean + gpu_cloud_clean
 │   │                          #   (the cleaner), surface_fit (the evidence device)
-│   ├─ precision/              # F0 camera, F2 gauge, F4 tracks, F5 refine + ba_torch, F6 depth_on_f5 + mono_detail +
+│   ├─ precision/              # F0 camera, F2 gauge, F4 tracks, F5 refine + ba_torch, F6 depth_on_f5 +
 │   │                          #   f6_torch, corrected cloud, chunk check, epochs
 │   ├─ correction/             # epochs (apply/select, ledger, replay), restart (the way back to epoch 0), floor,
 │   │                          #   warp_torch (the epoch warp on the device)
@@ -2178,7 +2159,7 @@ stac-build/
 │   │                          #   and closures, ownership), context/witness views, the Sim(3) graph, the decision rule
 │   ├─ AMB3R-SLAM/             # upstream 5418465 + tools/amb3r/amb3r_stac.patch: the whole-video pass and its light map
 │   ├─ GenRecon/               # upstream eaf1468 + tools/genrecon/genrecon_stac.patch; work/ holds each run's products
-│   ├─ depth-anything-3/  pointdit/  sam31/  PotreeConverter/  …
+│   ├─ depth-anything-3/  sam31/  PotreeConverter/  …
 ├─ ui/                         # React + TypeScript + Vite; the viewer (viewport/: HUD, palette, sceneLook), panels,
 │                              #   GenRecon, Autosegment and Background-and-grid windows; design tokens and i18n
 ├─ scripts/                    # start.sh, restart_backend.sh, serve_semantic.sh, serve_voice.sh; rebuild/ — the kit that

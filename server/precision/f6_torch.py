@@ -2,10 +2,9 @@
 
 USER 2026-10-08: *"todos los pasos que son CPU y pueden ser GPU estricto deben ser gpu estricto …
 la premisa es que cada paso sea lo más veloz posible, manteniendo la calidad y el determinismo"*.
-MEASURED on zaragoza 2026-06-03 (183 keyframes at 1520x848, 15 tiles each): F6's numpy/scipy phases
-took 741 s, PointDiT 3371 s tile by tile (log server_20261007_210725). Here every map operation of
-mono_detail (the per-tile affine fit, the blend, the lowpass, the band, the sides) and of the
-edge-keeping vote (splat, projection, medians, snapping) runs on torch tensors on ONE device chosen by
+MEASURED on zaragoza 2026-06-03 (183 keyframes at 1520x848): F6's numpy/scipy phases took 741 s (log
+server_20261007_210725). Here every map operation of the edge-keeping vote (splat, projection, medians,
+snapping) runs on torch tensors on ONE device chosen by
 the stage: the card (:func:`require_cuda`, the pipeline) or the CPU (the synthetic tests,
 :func:`use_device`) — the same code path on both, never a silent fallback: a stage on CUDA that finds
 torch's deterministic mode off FAILS (:func:`_strict`).
@@ -17,9 +16,6 @@ What keeps it deterministic on the card, under ``torch.use_deterministic_algorit
   ``torch.where``, never written at indices;
 - medians and percentiles are sort-based (:func:`quantile`, :func:`nanmedian0`), never
   ``torch.median`` (its CUDA kernel is in torch's non-deterministic list);
-- the Gaussian lowpass is two matrix products with explicit boundary matrices (:func:`gauss_matrix`;
-  cuBLAS with the pinned workspace, TF32 off) — scipy's ``gaussian_filter(mode='nearest')`` exactly in
-  exact arithmetic;
 - dilations, erosions and min/max filters are ``max_pool2d`` on padded maps; gathers only.
 The bits are NOT those of the numpy recipe (other summation orders): the same input gives the same
 bytes on the same card, driver and torch — the identity the stage records next to its result
@@ -36,14 +32,7 @@ import torch
 import torch.nn.functional as F
 
 MAD_TO_SIGMA = 1.0 / 0.6744897501960817   # σ of a normal from its MAD (1.4826)
-GAUSS_TRUNCATE = 4                         # scipy.ndimage.gaussian_filter's default: kernel radius int(4σ + 0.5)
 
-# per-pixel provenance of the refined depth (mono_detail re-exports them)
-SRC_OMEGA = 0            # Omega bent (no tile covered it, or a band pixel on a surface)
-SRC_DETAIL = 1           # lowpass(Omega) + PointDiT detail
-SRC_BAND_FRONT = 2       # a mixed pixel resolved to the FRONT surface
-SRC_BAND_BACK = 3        # … to the BACK surface
-SRC_UNRESOLVED = 4       # mixed, PointDiT intermediate too → excluded from the measurement tier
 
 _DEVICE = "cpu"
 
@@ -198,11 +187,6 @@ def erode3(mask: torch.Tensor) -> torch.Tensor:
     return _pool_max(inv, 3, 1.0) < 0.5
 
 
-def max_filter(x: torch.Tensor, size: int) -> torch.Tensor:
-    """scipy maximum_filter(size, mode='nearest')."""
-    return _pool_max(x, size, 0.0, mode="replicate")
-
-
 def min_filter(x: torch.Tensor, size: int) -> torch.Tensor:
     """scipy minimum_filter(size, mode='nearest')."""
     return -_pool_max(-x.to(torch.float64), size, 0.0, mode="replicate")
@@ -214,237 +198,6 @@ def shift(a: torch.Tensor, dy: int, dx: int, fill) -> torch.Tensor:
     pad = F.pad(a.to(torch.float64)[None, None], (1, 1, 1, 1), mode="constant", value=float(fill))[0, 0]
     out = pad[1 + dy:1 + dy + H, 1 + dx:1 + dx + W]
     return out.to(a.dtype) if a.dtype != torch.bool else out > 0.5
-
-
-# ── the Gaussian lowpass as matrix products ─────────────────────────────────
-
-@functools.lru_cache(maxsize=32)
-def _gauss_matrix_np(n: int, sigma: float) -> np.ndarray:
-    """G [n, n]: scipy.ndimage.gaussian_filter1d(sigma, mode='nearest', truncate 4.0) as a matrix —
-    out = G @ x. The boundary taps that fall outside are folded onto the edge sample (mode 'nearest')."""
-    radius = int(GAUSS_TRUNCATE * float(sigma) + 0.5)
-    x = np.arange(-radius, radius + 1, dtype=np.float64)
-    k = np.exp(-0.5 * (x / float(sigma)) ** 2)
-    k /= k.sum()
-    G = np.zeros((n, n), np.float64)
-    ii = np.repeat(np.arange(n), len(x))
-    jj = np.clip(np.tile(np.arange(-radius, radius + 1), n) + ii, 0, n - 1)
-    np.add.at(G, (ii, jj), np.tile(k, n))        # sequential on the CPU: deterministic
-    return G
-
-
-@functools.lru_cache(maxsize=32)
-def _gauss_matrix(n: int, sigma: float, dev: str) -> torch.Tensor:
-    return torch.as_tensor(_gauss_matrix_np(int(n), float(sigma)), device=dev)
-
-
-def gauss_matrix(n: int, sigma: float) -> torch.Tensor:
-    return _gauss_matrix(int(n), float(sigma), _DEVICE)
-
-
-def gaussian_filter(z: torch.Tensor, sigma: float) -> torch.Tensor:
-    """scipy gaussian_filter(z, sigma, mode='nearest') on a 2-D map: Gh @ z @ Gw^T."""
-    H, W = z.shape
-    Gh, Gw = gauss_matrix(H, sigma), gauss_matrix(W, sigma)
-    return Gh @ z.to(torch.float64) @ Gw.T
-
-
-def masked_lowpass(z: torch.Tensor, mask: torch.Tensor, sigma_px: float) -> Tuple[torch.Tensor, torch.Tensor]:
-    """(lowpass, ok): Gaussian lowpass of ``z`` over the ``mask`` pixels only (normalised by the mask's
-    own blur), and where it is defined (at least half the kernel's weight on measured pixels)."""
-    m = mask.to(torch.float64)
-    num = gaussian_filter(torch.where(mask, z.to(torch.float64), torch.zeros_like(m)), sigma_px)
-    den = gaussian_filter(m, sigma_px)
-    ok = den > 0.5
-    lp = torch.where(ok, num / torch.where(ok, den, torch.ones_like(den)), torch.zeros_like(den))
-    return lp, ok
-
-
-# ── resize ──────────────────────────────────────────────────────────────────
-
-def resize(img: torch.Tensor, h: int, w: int, nearest: bool = False) -> torch.Tensor:
-    """A 2-D map or an H x W x C image to (h, w): bilinear with half-pixel centres (cv2 INTER_LINEAR's
-    convention) or nearest."""
-    if img.shape[0] == h and img.shape[1] == w:
-        return img
-    x = img.to(torch.float64)
-    x4 = x[None, None] if x.ndim == 2 else x.permute(2, 0, 1)[None]
-    if nearest:
-        y = F.interpolate(x4, size=(int(h), int(w)), mode="nearest")
-    else:
-        y = F.interpolate(x4, size=(int(h), int(w)), mode="bilinear", align_corners=False)
-    y = y[0, 0] if x.ndim == 2 else y[0].permute(1, 2, 0)
-    return y > 0.5 if img.dtype == torch.bool else y.to(img.dtype)
-
-
-# ── the per-tile affine fit (Phase 3) ───────────────────────────────────────
-
-def irls_affine(x: torch.Tensor, y: torch.Tensor, w: torch.Tensor, huber_k: float, iterations: int) -> Tuple[float, float]:
-    """y ≈ s·x + b by Huber IRLS from the weighted least-squares start (weights ``w`` ≥ 0 = the
-    session's calibrated confidence), the construction of epoch 7's bend fit. Two unknowns: the
-    weighted normal equations in closed form about the weighted mean (no lstsq kernel), every sum a
-    plain reduction."""
-    x = x.to(torch.float64); y = y.to(torch.float64)
-    sw = torch.sqrt(torch.clamp(w.to(torch.float64), min=0.0))
-    ww = sw.clone()
-    s = torch.zeros((), dtype=torch.float64, device=x.device)
-    b = torch.zeros((), dtype=torch.float64, device=x.device)
-    has = sw > 0
-    for _ in range(int(iterations)):
-        w2 = ww * ww
-        S = w2.sum()
-        if float(S) <= 0:
-            break
-        mx = (w2 * x).sum() / S
-        my = (w2 * y).sum() / S
-        dx = x - mx
-        sxx = (w2 * dx * dx).sum()
-        sxy = (w2 * dx * (y - my)).sum()
-        s = torch.where(sxx > 0, sxy / torch.where(sxx > 0, sxx, torch.ones_like(sxx)), torch.zeros_like(sxx))
-        b = my - s * mx
-        e = y - (s * x + b)
-        sig = MAD_TO_SIGMA * median(torch.abs(e)[has]) + 1e-12
-        ww = sw * torch.sqrt(torch.clamp(float(huber_k) * sig / torch.clamp(torch.abs(e), min=1e-12), max=1.0))
-    return float(s), float(b)
-
-
-def align_tile(z_cal: torch.Tensor, z_mono: torch.Tensor, support: torch.Tensor, weight: torch.Tensor,
-               fit_space: str, huber_k: float, iterations: int) -> Tuple[torch.Tensor, float, float, float]:
-    """(z_al, s, b, residual): PointDiT's tile mapped onto the calibrated depth. ``fit_space`` 'depth':
-    z_cal ≈ s·z_mono + b; 'inverse': 1/z_cal ≈ s·z_mono + b. z_al (float32) is 0 where the map is not
-    positive; residual = MAD (as σ) of the relative residual on the support."""
-    x = z_mono.to(torch.float64)[support]
-    yz = z_cal.to(torch.float64)[support]
-    w = weight.to(torch.float64)[support]
-    zm = z_mono.to(torch.float64)
-    if fit_space == "inverse":
-        s, b = irls_affine(x, 1.0 / yz, w, huber_k, iterations)
-        den = s * zm + b
-        z_al = torch.where(den > 1e-9, 1.0 / torch.where(den > 1e-9, den, torch.ones_like(den)), torch.zeros_like(den))
-    elif fit_space == "depth":
-        s, b = irls_affine(x, yz, w, huber_k, iterations)
-        z_al = s * zm + b
-    else:
-        raise F6TorchError(f"fit_space must be 'depth' or 'inverse', got {fit_space!r}")
-    z_al = torch.where(z_al > 0, z_al, torch.zeros_like(z_al)).to(torch.float32)
-    r = (yz - z_al.to(torch.float64)[support]) / yz
-    residual = float(MAD_TO_SIGMA * median(torch.abs(r - median(r)))) if r.numel() else float("nan")
-    return z_al, s, b, residual
-
-
-# ── discontinuities, band, sides (Phases 4 and 6) ───────────────────────────
-
-def relative_jump(z: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
-    """Per pixel the largest 1-pixel relative depth jump |Δz| / min(z) to a valid 4-neighbour."""
-    H, W = z.shape
-    zz = z.to(torch.float64)
-    out = torch.zeros((H, W), dtype=torch.float64, device=z.device)
-    for dy, dx in ((0, 1), (1, 0)):
-        a = zz[:H - dy, :W - dx]; b = zz[dy:, dx:]
-        va = valid[:H - dy, :W - dx] & valid[dy:, dx:]
-        j = torch.where(va, torch.abs(a - b) / torch.clamp(torch.minimum(a, b), min=1e-9), torch.zeros_like(a))
-        pad = torch.zeros((H, W), dtype=torch.float64, device=z.device)
-        pad[:H - dy, :W - dx] = j
-        out = torch.maximum(out, pad)
-        pad2 = torch.zeros((H, W), dtype=torch.float64, device=z.device)
-        pad2[dy:, dx:] = j
-        out = torch.maximum(out, pad2)
-    return out
-
-
-def discontinuity_band(z: torch.Tensor, valid: torch.Tensor, tau: float, band_px: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """(discontinuity, band): the pixels where a 1-pixel jump of ``z`` exceeds ``tau`` (relative), and
-    that set dilated by ``band_px`` (≥ 1) restricted to the valid pixels."""
-    disc = valid & (relative_jump(z, valid) > float(tau))
-    band = dilate(disc, max(1, int(band_px))) & valid
-    return disc, band
-
-
-def side_depths(z_cal: torch.Tensor, usable: torch.Tensor, reach_px: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """(z_front, z_back): the nearest and the farthest calibrated depth among the ``usable`` (valid,
-    non-band) pixels within ``reach_px`` of each pixel (inf / −inf where there is none)."""
-    size = 2 * int(reach_px) + 1
-    z = z_cal.to(torch.float64)
-    big = torch.where(usable, z, torch.full_like(z, float("inf")))
-    small = torch.where(usable, z, torch.full_like(z, float("-inf")))
-    return min_filter(big, size), max_filter(small, size)
-
-
-def refine_frame(z_cal: torch.Tensor, valid_cal: torch.Tensor, z_al: torch.Tensor, al_valid: torch.Tensor,
-                 tau: float, band_px: int, sigma_px: float, reach_px: int, align_err: float = 0.0,
-                 detail_scope: str = "edges", detail_zone_px: int = 12) -> dict:
-    """One keyframe's refined depth from its calibrated (bent) map and PointDiT's aligned map — the
-    arithmetic of mono_detail.refine_frame (see its docstring for the rules and the user's 'edges'
-    scope) on tensors. Returns dict(depth float32, source uint8, band, detail float32, counts, margins)."""
-    H, W = z_cal.shape
-    zc = z_cal.to(torch.float64)
-    za = z_al.to(torch.float64)
-    zero = torch.zeros((H, W), dtype=torch.float64, device=zc.device)
-    both = valid_cal & al_valid & (za > 0) & (zc > 0)
-    disc, band = discontinuity_band(za, both, tau, band_px)
-    out = torch.where(valid_cal, zc, zero)
-    src = torch.zeros((H, W), dtype=torch.int64, device=zc.device)
-    detail = zero.clone()
-    # Phase 4: outside the band, Omega's coarse + PointDiT's fine
-    surf = both & ~band
-    lp_c, ok_c = masked_lowpass(zc, surf, sigma_px)
-    lp_a, ok_a = masked_lowpass(za, surf, sigma_px)
-    m = surf & ok_c & ok_a
-    d = za - lp_a
-    z_new = lp_c + d
-    m = m & (z_new > 0)
-    margins: Dict[str, object] = {}
-    if detail_scope == "edges":
-        r = max(1, int(detail_zone_px))
-        zone = dilate(disc, r)
-        zc64 = torch.clamp(zc, min=1e-9)
-        rel_change = torch.abs(z_new - zc) / zc64
-        within = rel_change <= float(tau)
-        judged = m & zone
-        margins["detail_within_tau"] = margin_quantiles(
-            (float(tau) - rel_change[judged]) / max(float(tau), 1e-12)) if bool(judged.any()) else None
-        m = m & zone & within
-    elif detail_scope != "surfaces":
-        raise F6TorchError(f"detail_scope must be 'edges' or 'surfaces', got {detail_scope!r}")
-    out = torch.where(m, z_new, out)
-    detail = torch.where(m, d, detail)
-    src = torch.where(m, torch.full_like(src, SRC_DETAIL), src)
-    # Phase 6: the band — mixed pixels of the calibrated depth go to a side, never in between
-    usable = valid_cal & (zc > 0) & ~band
-    zf, zb = side_depths(zc, usable, int(band_px) + int(reach_px))
-    distinct = band & torch.isfinite(zf) & torch.isfinite(zb) & (zb > zf * (1.0 + tau))
-    mixed = distinct & valid_cal & (zc > zf * (1.0 + tau)) & (zc < zb * (1.0 - tau))
-    margin = max(float(tau), float(align_err))
-    near_f = torch.abs(za - zf) <= margin * zf
-    near_b = torch.abs(za - zb) <= margin * zb
-    judged = mixed & al_valid & (za > 0)
-    to_front = judged & near_f & ~(near_b & (torch.abs(za - zb) < torch.abs(za - zf)))
-    to_back = judged & near_b & ~to_front
-    unresolved = judged & ~to_front & ~to_back
-    out = torch.where(to_front, zf, out)
-    out = torch.where(to_back, zb, out)
-    out = torch.where(unresolved, zero, out)
-    src = torch.where(to_front, torch.full_like(src, SRC_BAND_FRONT), src)
-    src = torch.where(to_back, torch.full_like(src, SRC_BAND_BACK), src)
-    src = torch.where(unresolved, torch.full_like(src, SRC_UNRESOLVED), src)
-    # point 53: the margins of the band tests, in units of their bar (positive = on the side taken)
-    dv = distinct & valid_cal
-    if bool(dv.any()):
-        one = torch.ones_like(zc)
-        inside = torch.minimum((zc - zf * (1.0 + tau)) / torch.where(dv, zf * tau, one),
-                               (zb * (1.0 - tau) - zc) / torch.where(dv, zb * tau, one))
-        margins["mixed_inside_gap"] = margin_quantiles(inside[dv])
-    if bool(judged.any()):
-        one = torch.ones_like(zc)
-        side = torch.minimum(torch.abs(za - zf) / torch.where(judged, margin * zf, one),
-                             torch.abs(za - zb) / torch.where(judged, margin * zb, one))
-        margins["band_side_within_margin"] = margin_quantiles(1.0 - side[judged])
-    counts = {"valid": int(valid_cal.sum()), "covered": int(both.sum()), "detail": int(m.sum()),
-              "band": int(band.sum()), "mixed": int(mixed.sum()), "band_front": int(to_front.sum()),
-              "band_back": int(to_back.sum()), "mixed_unresolved": int(unresolved.sum()),
-              "mixed_unjudged": int((mixed & ~judged).sum())}
-    return {"depth": out.to(torch.float32), "source": src.to(torch.uint8), "band": band,
-            "detail": detail.to(torch.float32), "counts": counts, "margins": margins}
 
 
 # ── projections, splats and the vote (corrected_cloud's pure pieces) ────────

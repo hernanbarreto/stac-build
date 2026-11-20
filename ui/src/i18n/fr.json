@@ -191,7 +191,6 @@
     "logout": "Déconnexion",
     "shadows": "Ombres",
     "flyers": "Points volants (diagnostic)",
-    "monoDetail": "Couche de détail PointDiT",
     "mixedUnresolved": "Pixels mixtes non résolus",
     "cubes": "Points en cubes",
     "sceneLook": "Fond et grille…"
@@ -1393,8 +1392,6 @@
     "isolate": "Isoler",
     "showAll": "Tout afficher",
     "layer_flyers": "Couche des points volants chargée (rouge bord · orange vues · bleu texture · gris autre)",
-    "layer_mono_detail": "Couche PointDiT chargée (gris détail · vert avant · bleu arrière)",
-    "layer_mixed_unresolved": "Pixels mixtes non résolus chargés (rouge) : exclus du nuage",
     "layerMissing": "La couche « {name} » n'est pas encore dans cette session",
     "cube": "Cube {id}"
   },

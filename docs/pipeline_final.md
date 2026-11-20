@@ -67,19 +67,17 @@ When the chain must start again from F0 and no finished step has moved the geome
 ### 1.4 F6 — the cloud (`precision/depth_on_f5.py`, `precision/f6_torch.py`, `cloud.source: omega_bent`)
 1. **Bend**: each keyframe's VGGT-Ω depth × k(u,v) = c0 + c1·ũ + c2·ṽ fitted to F5's landmarks (Huber IRLS; c0
    verified on held-out rows; landmark rows within the range).
-2. **PointDiT detail at the edges only** (`mono_detail`): within 1.807° of a discontinuity (12 px at the calibration
-   focal), within τ; surfaces stay VGGT-Ω's.
-3. **The vote — COLMAP's fusion rule** (`cloud.fusion_rule: colmap`). Witnesses: the walk neighbours (±3/6/12), the
+2. **The vote — COLMAP's fusion rule** (`cloud.fusion_rule: colmap`). Witnesses: the walk neighbours (±3/6/12), the
    turn and interval frames, and every keyframe that sees any part of the view. A witness confirms when the
    forward-backward reprojection is within 0.301° (`fusion_max_reproj_deg`), the depths within the session's measured
    τ, the triangulation angle in [1.5°, 30°] (`fusion_tri_min_deg` 1.5 since 2026-11-09) and the point within the range
    of it. **Kept**: born within the range, ≥ 5 confirmations (`min_support_views`), more confirm than see through it
    (`fusion_majority`), not hidden behind a better-supported surface (`fusion_occlusion_veto`).
-4. **In place** (`fusion_in_place`, 2026-11-09): a pixel not kept whose in-range witnesses' surfaces agree (≥ 5 within
+3. **In place** (`fusion_in_place`, 2026-11-09): a pixel not kept whose in-range witnesses' surfaces agree (≥ 5 within
    τ of their median) with its OWN depth within τ is published where it is — never moved. **No repair**
    (`fusion_repair: false`: moved pixels painted their birth colour elsewhere).
-5. The cloud's `confidence` column is the support (confirmations, or the agreeing witnesses for in place).
-6. **The cleaner** (`reconstruction/stream_clean.py`, by pieces, byte-identical to the in-memory path): voxel 5 mm
+4. The cloud's `confidence` column is the support (confirmations, or the agreeing witnesses for in place).
+5. **The cleaner** (`reconstruction/stream_clean.py`, by pieces, byte-identical to the in-memory path): voxel 5 mm
    (nearest real point to each cell centre) + SOR (8 neighbours, σ 3, no neighbour within 1.5 cm → out); published as
    an epoch with its Potree octree (deterministic for any thread count).
 

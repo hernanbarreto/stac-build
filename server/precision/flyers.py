@@ -1,4 +1,4 @@
-"""Flyer diagnosis of a published cloud — Phase 0 of the mono-detail work (claude_stac.txt, 2026-10-04).
+"""Flyer diagnosis of a published cloud (claude_stac.txt, 2026-10-04).
 
 A FLYER is a point of the final cloud that is either
   * ISOLATED — its mean distance to its ``knn_k`` nearest neighbours, in units of its own pixel
@@ -7,7 +7,6 @@ A FLYER is a point of the final cloud that is either
   * BETWEEN TWO CONFIRMED SURFACES — in the depth map of its OWN keyframe (the cloud's points
     re-projected to the pixels they came from) it sits inside a discontinuity band and at a depth
     strictly between the near and the far surface of that step.
-The definition does not involve PointDiT; Phase 8's A/B measures the same thing with the flag on.
 
 Every flyer is classified by its provenance, in this order of precedence:
   a  ``mixed_edge``          mixed pixel of its source frame: in the discontinuity band of the

@@ -1023,187 +1023,14 @@ def camera_travels(tmp: Path, params, n_kf: int, log: Callable = print) -> Path:
     return p
 
 
-# ── mono detail (claude_stac.txt 2026-10-04) ──────────────────────────────
+# ── the cloud's provenance column ────────────────────────────────────────
 
-# the cloud's `source` column: 1 = Omega bent (epoch 8's pixel), 2 = lowpass(Omega) + PointDiT detail,
-# 3 / 4 = a mixed pixel resolved to the front / back surface. mixed_unresolved never becomes a point.
-SRC_CLOUD_NAMES = {1: "omega_bent", 2: "mono_detail", 3: "band_front", 4: "band_back"}
-MONO_LAYERS = ("mono_detail", "mixed_unresolved")
+SRC_OMEGA_BENT = 1          # precision.provenance (schema v2) `source`: Omega's depth at the session's scale, voted
 
 
-def confidence_weight(conf: np.ndarray, floor: float, cmax: float, passed: np.ndarray) -> np.ndarray:
-    """The session's calibrated confidence as a fit weight: 0 under the chunk's own floor, rising
-    linearly to 1 at the chunk's maximum (the same min-max arithmetic as the ONE confidence floor)."""
-    span = max(cmax - floor, 1e-9)
-    w = np.clip((conf.astype(np.float64) - floor) / span, 0.0, 1.0)
-    return np.where(passed, w, 0.0)
-
-
-_PRELOAD: Dict[str, object] = {}
-
-
-def preload_mono_detail(pcfg, log: Callable = print) -> None:
-    """Read PointDiT's weights in a background thread while the landmark rows and the bend run (2026-11-01:
-    11 GB of checkpoints, 62-72 s with the card idle on pccr). The loaded runner is the one apply_mono_detail
-    uses — the same weights, the same model; an error in the load is raised there."""
-    md = pcfg.mono_detail
-    if not md.enabled or "thread" in _PRELOAD:
-        return
-    import threading
-    from precision.pointdit_runner import PointDiTRunner
-
-    def _load():
-        try:
-            _PRELOAD["runner"] = PointDiTRunner(md, log=log).load()
-        except BaseException as e:  # noqa: BLE001 — re-raised where the runner is needed
-            _PRELOAD["error"] = e
-    th = threading.Thread(target=_load, name="pointdit-preload", daemon=True)
-    _PRELOAD["thread"] = th
-    th.start()
-
-
-def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out: Path, log, _p):
-    """The hook between the bend and the vote. With ``mono_detail.enabled`` false it returns its
-    inputs untouched (epoch 8 bit for bit); otherwise PointDiT's detail refines every bent map, the
-    unresolved mixed pixels leave the measurement tier (depth 0, not passed, not valid) and the
-    per-pixel provenance comes back for the cloud's `source` column."""
-    md = pcfg.mono_detail
-    if not md.enabled:
-        return dep, valid, passed, None, None
-    from precision import corrected_cloud as CC
-    from precision.mono_detail import run_stage
-    from precision.pointdit_runner import PointDiTRunner
-    _p(42, f"mono detail: PointDiT-{md.model} refines the bent depth (tiles, affine per tile, detail, band)")
-    runner = _PRELOAD.pop("runner", None)
-    th = _PRELOAD.pop("thread", None)
-    if th is not None:
-        th.join()                                   # the weights were read while the bend ran
-        err = _PRELOAD.pop("error", None)
-        if err is not None:
-            raise err
-    if runner is None:
-        runner = PointDiTRunner(md, log=log)
-    from precision.camera import depth_map_distance
-    # THE RANGE (reconstruction.view_range_m): τ only where a pixel can enter the cloud
-    inner = {f: interior(passed[f]) & (depth_map_distance(dep[f], K) <= float(pcfg.view_range_m)) for f in frames}
-    # the session's own agreement tolerance on the BENT maps (the vote measures its own again after)
-    tau0 = CC.measured_tau(dep, inner, K, c2w, frames, pcfg.bend.neighbors, pcfg.bend.tau_quantile)
-    del inner
-    grid = getattr(inp.cam, "omega_grid", None)
-    scale = float(getattr(grid, "scale_x", 1.0) or 1.0) if grid is not None else 1.0
-    image_of = lambda f: CC._rgb_undistorted(inp.frames_dir, f, inp.maps)   # noqa: E731
-    overlay_dir = (out / "precision" / "mono_overlays") if bool(md.overlays) else None
-    dep2, src, rep = run_stage(frames, dep, valid, weight, image_of, runner, md, tau0, scale,
-                               pcfg.gauge.huber_k, log=log, progress=lambda pct, m: _p(42 + pct * 8 / 100, m),
-                               overlay_dir=overlay_dir, fx_px=float(K[0, 0]))
-    for f in frames:
-        alive = dep2[f] > 0
-        valid[f] = valid[f] & alive
-        passed[f] = passed[f] & alive
-    rep.params["tau_bent"] = tau0
-    rep.params["footprint"] = runner.footprint()          # device, model, steps, seed, card, numerics (point 54)
-    rep.params["timing"] = runner.timing()                # peak VRAM: the timing sidecar's, not the report's
-    return dep2, valid, passed, src, rep
-
-
-def source_column(data, src_maps) -> np.ndarray:
-    """Per cleaned point its provenance byte from the refined maps (1 = Omega bent when the stage did
-    not run); looked up by (frame, pixel) because the cleaner carries only the origin columns."""
-    n = len(data)
-    if src_maps is None:
-        return np.ones(n, np.uint8)
-    from precision.mono_detail import SRC_UNRESOLVED
-    fg = np.asarray(data["frame_global"], np.int64)
-    r = np.asarray(data["pixel_row"], np.int64); c = np.asarray(data["pixel_col"], np.int64)
-    out = np.ones(n, np.uint8)
-    if not n:
-        return out
-    # ONE pass over the points (2026-11-20): the loop over the keyframes compared every point's frame with each of
-    # them — 2772 passes over 117 M points on pccr 2026-08-24's copy, the 6.4 silent minutes between the cleaner
-    # and the publication, the card idle. The points are ordered by frame once and each frame's own run is looked
-    # up in its map: the same bytes, the same frame (the lowest) named when an unresolved pixel is met
-    # (:func:`_source_column_reference` is that loop, kept for the test).
-    order = np.argsort(fg, kind="stable")
-    frames, starts = np.unique(fg[order], return_index=True)
-    ends = np.append(starts[1:], n)
-    for f, a, b in zip(frames.tolist(), starts.tolist(), ends.tolist()):
-        sm = src_maps.get(int(f))
-        if sm is None:
-            continue
-        idx = order[a:b]
-        v = sm[r[idx], c[idx]].astype(np.int64)
-        if (v == SRC_UNRESOLVED).any():
-            raise DepthOnF5Error("a mixed_unresolved pixel reached the cloud — the measurement tier must not hold it")
-        out[idx] = (v + 1).astype(np.uint8)
-    return out
-
-
-def _source_column_reference(data, src_maps) -> np.ndarray:
-    """The loop over the keyframes :func:`source_column` replaced (kept for its test)."""
-    n = len(data)
-    if src_maps is None:
-        return np.ones(n, np.uint8)
-    from precision.mono_detail import SRC_UNRESOLVED
-    fg = np.asarray(data["frame_global"], np.int64)
-    r = np.asarray(data["pixel_row"], np.int64); c = np.asarray(data["pixel_col"], np.int64)
-    out = np.ones(n, np.uint8)
-    for f in np.unique(fg):
-        m = fg == f
-        sm = src_maps.get(int(f))
-        if sm is None:
-            continue
-        v = sm[r[m], c[m]].astype(np.int64)
-        if (v == SRC_UNRESOLVED).any():
-            raise DepthOnF5Error("a mixed_unresolved pixel reached the cloud — the measurement tier must not hold it")
-        out[m] = (v + 1).astype(np.uint8)
-    return out
-
-
-def mono_report(rep, md) -> dict:
-    """The mono-detail section of depth_on_f5.json — no timing in it (that is `mono_timing`)."""
-    tiles = [dict(frame=int(f), **t) for f, per in rep.per_frame.items() for t in per["tiles"]]
-    frames = {str(f): {k: v for k, v in per.items() if k != "tiles"} for f, per in rep.per_frame.items()}
-    params = {k: v for k, v in rep.params.items() if k != "timing"}
-    return {"enabled": True, "model": md.model, "steps": int(md.steps), "params": params,
-            "tiles": {"total": rep.tiles, "accepted": rep.accepted, "rejected_support": rep.rejected_support,
-                      "rejected_residual": rep.rejected_residual, "residual_bar_rel": rep.residual_bar},
-            "pixels": rep.totals, "per_frame": frames, "per_tile": tiles}
-
-
-def mono_timing(rep) -> dict:
-    return {"seconds_pointdit": rep.seconds_pointdit, "seconds_total": rep.seconds_total,
-            **(rep.params.get("timing") or {})}
-
-
-def write_mono_layers(pdir: Path, data, source: np.ndarray, rep, K, c2w, log) -> None:
-    """Two viewer layers (GLB point clouds): the points PointDiT's detail or band resolution wrote
-    (`mono_detail`: grey detail, green front, blue back; a subsample bounded by LAYER_MAX_POINTS) and the
-    mixed_unresolved pixels at Omega's depth (`mixed_unresolved`, red) — what left the measurement tier."""
-    import trimesh
-    pdir.mkdir(parents=True, exist_ok=True)
-    xyz = np.stack([np.asarray(data["x"]), np.asarray(data["y"]), np.asarray(data["z"])], 1).astype(np.float32)
-    m = source >= 2
-    idx = np.nonzero(m)[0]
-    if len(idx) > LAYER_MAX_POINTS:
-        idx = np.random.default_rng(0).choice(idx, LAYER_MAX_POINTS, replace=False)
-    pal = {2: (150, 150, 150, 255), 3: (0, 200, 0, 255), 4: (0, 90, 255, 255)}
-    col = np.array([pal[int(v)] for v in source[idx]], np.uint8) if len(idx) else np.zeros((0, 4), np.uint8)
-    pts = xyz[idx] if len(idx) else np.zeros((1, 3), np.float32)
-    if not len(idx):
-        col = np.array([[0, 0, 0, 0]], np.uint8)
-    trimesh.PointCloud(pts, colors=col).export(str(pdir / "layer_mono_detail.glb"), file_type="glb")
-    P = []
-    for f, (rr, cc, zz) in rep.unresolved.items():
-        X = np.stack([(cc - K[0, 2]) / K[0, 0] * zz, (rr - K[1, 2]) / K[1, 1] * zz, zz], 1) @ c2w[f][:3, :3].T + c2w[f][:3, 3]
-        P.append(X.astype(np.float32))
-    U = np.concatenate(P) if P else np.zeros((1, 3), np.float32)
-    uc = np.tile(np.array([[255, 0, 0, 255]], np.uint8), (len(U), 1)) if P else np.array([[0, 0, 0, 0]], np.uint8)
-    trimesh.PointCloud(U, colors=uc).export(str(pdir / "layer_mixed_unresolved.glb"), file_type="glb")
-    log(f"{LOG_TAG} viewer layers: {len(idx):,} mono-detail point(s), {len(U) if P else 0:,} mixed_unresolved "
-        f"pixel(s) → {pdir}/layer_*.glb")
-
-
-LAYER_MAX_POINTS = 2_000_000
+def source_column(data) -> np.ndarray:
+    """Per cleaned point its provenance byte: every point of this product is Omega's own pixel."""
+    return np.full(len(data), SRC_OMEGA_BENT, np.uint8)
 
 
 # ── the step ─────────────────────────────────────────────────────────────
@@ -1308,8 +1135,8 @@ def load_records(records_dir: Path, frames: Sequence[int], rec_hw: Tuple[int, in
 
 def compute(session_dir: Path, pcfg, log: Callable = print,
             progress: Optional[Callable[[float, str], None]] = None, inp=None) -> types.SimpleNamespace:
-    """Steps 1-4 (landmarks, bend, mono detail, vote) — nothing written into the session. ``inp`` (a
-    depth_sweep.SweepInputs) may be injected: the A/B (precision/mono_ab.py) feeds F5's files directly.
+    """Steps 1-4 (landmarks, bend, vote) — nothing written into the session. ``inp`` (a
+    depth_sweep.SweepInputs) may be injected.
     Returns everything ``publish_cloud`` needs, plus the held-out landmark rows for the judges."""
     from precision.config import raw_of
     from precision import depth_sweep as DS
@@ -1342,7 +1169,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     # arithmetic, bit for bit. Otherwise (zaragoza 2026-10-05: records 1920x1088 for 1920x1080 frames
     # and F5's rung R2 with k1 -0.0035) the record, the landmark pixels and the SAM3 masks are CARRIED
     # onto that frame — the lens, then the record grid (corrected_cloud.record_on_native, nearest) —
-    # so PointDiT (on the undistorted frame), the vote (K), the colours and the cloud's pixel columns
+    # so the vote (K), the colours and the cloud's pixel columns
     # all live on one grid. The camera's lens is neither ignored nor refused.
     lens = bool(np.any(inp.cam.dist()))
     with np.load(inp.records_dir / f"frame_{frames[0]}.npz") as z:
@@ -1355,7 +1182,6 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     else:
         grid_note = f"Omega's record on the camera grid {W}x{H}, no lens — read as it is"
     _p(3, f"{N} keyframes, camera fx {K[0, 0]:.1f} fy {K[1, 1]:.1f} ({W}x{H}); {grid_note}; F5's landmarks")
-    preload_mono_detail(pcfg, log)                   # PointDiT's weights load while the rows and the bend run
     obs, dropped_tracks = _landmark_rows(session_dir, pcfg, frames, w2c, params, log=log)
     if lens:
         # the tracks were observed where the lens put them (the original frame) → the undistorted frame
@@ -1381,11 +1207,11 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     zo, conf, chunk = load_records(inp.records_dir, frames, rec_hw,
                                    (lambda a: CC.record_on_native(a, inp.cam, inp.maps)) if carry else None)
     floor_norm = float(raw_cfg["reconstruction"]["simple"]["conf_min_norm"])
-    thr, cmax = {}, {}
+    thr = {}
     for k in sorted(set(chunk.values())):
         v = np.concatenate([conf[f][np.isfinite(conf[f]) & (conf[f] > SKY_CONF)].ravel()
                             for f in frames if chunk[f] == k])
-        thr[k], cmax[k] = confidence_floor(v, floor_norm)           # THE ONE floor (point 52: kept, pinned)
+        thr[k], _cmax = confidence_floor(v, floor_norm)             # THE ONE floor (point 52: kept, pinned)
 
     # 2. the bend
     _p(25, "bending Omega's depth to F5's landmarks")
@@ -1468,9 +1294,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
            f"{np.abs(np.diff(c0)).max():.3f}")
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
     Dm = design(uu.ravel(), vv.ravel(), W, H)
-    dep, valid, passed, weight = {}, {}, {}, {}
+    dep, valid, passed = {}, {}, {}
     zmed: Dict[int, float] = {}
-    md = pcfg.mono_detail
     for i, f in enumerate(frames):
         valid[f] = np.isfinite(zo[f]) & (zo[f] > 0) & np.isfinite(conf[f]) & (conf[f] > SKY_CONF)
         if valid[f].any():
@@ -1479,15 +1304,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit
         bent = (zo[f] * (Dm @ final_coefs[i]).reshape(H, W)).astype(np.float32)
         dep[f] = np.where(valid[f], bent, 0).astype(np.float32)
-        if md.enabled:
-            # the session's calibrated confidence as a weight in 0..1 above its own floor (per chunk)
-            weight[f] = confidence_weight(conf[f], thr[chunk[f]], float(cmax[chunk[f]]), passed[f])
-    cmax = None
     del zo, conf
-
-    # 3b. mono detail (claude_stac.txt 2026-10-04): PointDiT refines the bent maps before the vote
-    dep, valid, passed, src_maps, md_rep = apply_mono_detail(
-        pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out, log, _p)
 
     # 4. the edge-keeping vote (pccr epoch 8), with the turn frames as witnesses (USER 2026-11-04)
     t_dep, t_valid, t_passed, t_c2w, t_extra, t_rep = load_turn_witnesses(
@@ -1543,7 +1360,7 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                                  provenance=provenance, status_counts=status_counts, c0=c0, obs=obs,
                                  dropped_tracks=dropped_tracks, error_factor=fac,
                                  floor={str(k): {"threshold": thr[k]} for k in sorted(thr)}, floor_norm=floor_norm,
-                                 src_maps=src_maps, md_rep=md_rep, md=md, uu=uu, vv=vv, t0=t0, _p=_p,
+                                 uu=uu, vv=vv, t0=t0, _p=_p,
                                  seconds_compute=round(time.time() - t0, 1),
                                  rec_hw=rec_hw, carry=carry, lens=lens, grid_note=grid_note)
 
@@ -1558,7 +1375,7 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
     session_dir, out, inp, frames, W, H, K, c2w = (C.session_dir, C.out, C.inp, C.frames, C.W, C.H, C.K, C.c2w)
     params, chunk, voted, tau, vst, cover, wb, score, coefs, c0 = (C.params, C.chunk, C.voted, C.tau, C.vst, C.cover,
                                                                    C.wb, C.score, C.coefs, C.c0)
-    src_maps, md_rep, md, uu, vv, t0, _p = C.src_maps, C.md_rep, C.md, C.uu, C.vv, C.t0, C._p
+    uu, vv, t0, _p = C.uu, C.vv, C.t0, C._p
     t_publish = time.time()
 
     # 5. the cloud
@@ -1593,7 +1410,7 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
         _, data = read_ply(cleaned)
         cols = {"pixel_u_und": np.asarray(data["pixel_col"]), "pixel_v_und": np.asarray(data["pixel_row"]),
                 "n_consistent": np.clip(np.asarray(data["confidence"]), 0, 255).astype(np.uint8),
-                "source": source_column(data, src_maps)}
+                "source": source_column(data)}
         report = {"version": 1, "stage": "depth_on_f5", "provenance": "tool_measured",
                   "source_of_depth": "Omega's depth bent to F5's landmarks + edge-keeping multi-view vote (pccr epoch 8)",
                   "camera": params, "grid": [W, H],
@@ -1633,11 +1450,6 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
                                   if k not in ("tau", "valid", "min_support", "min_parallax_deg") else v)
                               for k, v in vst.items() if k != "tau"}},
                   "raw_points": n_raw}
-        if md_rep is not None:
-            report["mono_detail"] = mono_report(md_rep, md)
-            report["source_counts"] = {SRC_CLOUD_NAMES[int(v)]: int(c) for v, c in
-                                       zip(*np.unique(cols["source"], return_counts=True))}
-            write_mono_layers(out / "precision", data, cols["source"], md_rep, K, c2w, log)
         from precision import f6_torch as FT
         report["maps_numerics"] = FT.record()          # the device and torch numerics of every map here (USER 2026-10-08)
         camera_travels(tmp, params, len(frames), log)
@@ -1656,8 +1468,6 @@ def publish_cloud(C: types.SimpleNamespace, pcfg, log: Callable = print) -> dict
     # the clocks and the session's history live next to the report, never in it (points 36 / 56 / 136)
     times = {"seconds_compute": C.seconds_compute, "seconds_publish": round(time.time() - t_publish, 1),
              "seconds": round(time.time() - t0, 1), "history": history}
-    if md_rep is not None:
-        times["mono_detail"] = mono_timing(md_rep)
     CC.write_timing(out / "precision" / REPORT, times)
     _p(100, f"depth on F5 published epoch {rep['epoch_to']} ({rep['n_points']:,} pts, {times['seconds']} s)")
     return rep
@@ -1678,9 +1488,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     from precision.config import load_precision_config
     from precision import f6_torch as FT
     pcfg = load_precision_config(session_dir=Path(args.session))   # the job's frozen config (point 69)
-    # USER 2026-10-08: the maps run on the card, strict deterministic torch for the whole process
-    # (PointDiT's own context re-applies the same flags); no card, no stage
-    rec = FT.require_cuda(int(pcfg.mono_detail.seed))
+    # USER 2026-10-08: the maps run on the card, strict deterministic torch for the whole process; no card, no
+    # stage. Nothing here is drawn at random: the seed (the bend's own) only fixes torch's generator.
+    rec = FT.require_cuda(int(pcfg.bend.seed))
     print(f"{LOG_TAG} maps on {rec['device']} ({rec['card']}), torch {rec['torch']}, deterministic strict")
     run_depth_on_f5(Path(args.session), pcfg)
     return 0
