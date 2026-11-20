@@ -224,3 +224,24 @@ def test_the_key_is_typed():
             load_precision_config(raw)
     raw["reconstruction"]["precision"]["cloud"]["vote_batch"] = 32
     assert load_precision_config(raw).cloud.vote_batch == 32
+
+
+def test_the_records_are_read_on_threads_in_the_keyframes_order_and_the_first_bad_one_fails(tmp_path):
+    rng = np.random.default_rng(4)
+    frames = [5, 3, 40, 12, 7, 99, 21, 2, 60, 61, 62]
+    want = {}
+    for k, f in enumerate(frames):
+        want[f] = (rng.random((6, 9)).astype(np.float32), rng.random((6, 9)).astype(np.float32), k % 3)
+        extra = {"chunk": np.int64(want[f][2])} if f != 12 else {}
+        np.savez_compressed(tmp_path / f"frame_{f}.npz", depth=want[f][0].astype(np.float64), conf=want[f][1], **extra)
+    zo, conf, chunk = D5.load_records(tmp_path, frames, (6, 9))
+    assert list(zo) == frames and list(conf) == frames and list(chunk) == frames
+    for f in frames:
+        assert zo[f].dtype == np.float32 and np.array_equal(zo[f], want[f][0]) and np.array_equal(conf[f], want[f][1])
+        assert chunk[f] == (want[f][2] if f != 12 else 0)
+    zc, cc, _ = D5.load_records(tmp_path, frames, (6, 9), carry=lambda a: a[::-1].copy())
+    assert all(np.array_equal(zc[f], want[f][0][::-1]) and np.array_equal(cc[f], want[f][1][::-1]) for f in frames)
+    np.savez_compressed(tmp_path / "frame_40.npz", depth=np.zeros((5, 9), np.float32), conf=np.zeros((5, 9), np.float32))
+    np.savez_compressed(tmp_path / "frame_60.npz", depth=np.zeros((4, 9), np.float32), conf=np.zeros((4, 9), np.float32))
+    with pytest.raises(D5.DepthOnF5Error, match="record of frame 40 is 9x5"):
+        D5.load_records(tmp_path, frames, (6, 9))

@@ -67,6 +67,9 @@ MAD_TO_SIGMA = 1.0 / 0.6744897501960817          # 1.4826: σ of a normal from i
 IDENTITY = np.array([1.0, 0.0, 0.0])             # k = 1: Omega's depth as it is (epoch 7's fallback)
 
 
+RECORD_THREADS = 8            # the records' inflation (I/O and zlib: no arithmetic of the product)
+
+
 class DepthOnF5Error(RuntimeError):
     pass
 
@@ -1181,6 +1184,35 @@ def _landmark_rows(session_dir: Path, pcfg, frames: List[int], w2c: np.ndarray, 
     return out, {"fit": dropped[0], "held_out": dropped[1]}
 
 
+def load_records(records_dir: Path, frames: Sequence[int], rec_hw: Tuple[int, int], carry: Optional[Callable] = None):
+    """({frame: Omega's depth}, {frame: its confidence}, {frame: its cube}) of every keyframe's record, float32 on
+    the record grid ``rec_hw`` — or carried onto the camera's grid by ``carry`` (NaN where the record does not
+    cover). Each record is its frame's alone: inflated on threads (zlib releases the GIL — pccr 2026-08-24: 2765
+    records read one after another with the card idle) and taken in the keyframes' order — the same arrays, and
+    the first bad record in that order is the one that fails."""
+    from concurrent.futures import ThreadPoolExecutor
+    records_dir = Path(records_dir)
+
+    def one(f):
+        with np.load(records_dir / f"frame_{f}.npz") as z:
+            d = np.asarray(z["depth"], np.float32)
+            cf = np.asarray(z["conf"], np.float32)
+            ch = int(z["chunk"]) if "chunk" in z.files else 0
+        if tuple(d.shape) != tuple(rec_hw) or tuple(cf.shape) != tuple(rec_hw):
+            raise DepthOnF5Error(f"Omega's record of frame {f} is {d.shape[1]}x{d.shape[0]} (conf "
+                                 f"{cf.shape[1]}x{cf.shape[0]}), the first record {rec_hw[1]}x{rec_hw[0]} "
+                                 f"— one record grid per session")
+        if carry is not None:
+            d = carry(d)
+            cf = carry(cf)
+        return d, cf, ch
+    zo, conf, chunk = {}, {}, {}
+    with ThreadPoolExecutor(max_workers=RECORD_THREADS) as ex:
+        for f, (d, cf, ch) in zip(frames, ex.map(one, [int(f) for f in frames])):
+            zo[f] = d; conf[f] = cf; chunk[f] = ch
+    return zo, conf, chunk
+
+
 def compute(session_dir: Path, pcfg, log: Callable = print,
             progress: Optional[Callable[[float, str], None]] = None, inp=None) -> types.SimpleNamespace:
     """Steps 1-4 (landmarks, bend, mono detail, vote) — nothing written into the session. ``inp`` (a
@@ -1253,19 +1285,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                 obs[sp][i] = o[near]
     log(f"{LOG_TAG} landmark rows: {n_far:,} beyond the {float(pcfg.view_range_m):g} m range left out of the bend")
 
-    zo, conf, chunk = {}, {}, {}
-    for f in frames:
-        with np.load(inp.records_dir / f"frame_{f}.npz") as z:
-            d = np.asarray(z["depth"], np.float32)
-            cf = np.asarray(z["conf"], np.float32)
-            if tuple(d.shape) != rec_hw or tuple(cf.shape) != rec_hw:
-                raise DepthOnF5Error(f"Omega's record of frame {f} is {d.shape[1]}x{d.shape[0]} (conf "
-                                     f"{cf.shape[1]}x{cf.shape[0]}), the first record {rec_hw[1]}x{rec_hw[0]} "
-                                     f"— one record grid per session")
-            if carry:
-                d = CC.record_on_native(d, inp.cam, inp.maps)       # NaN where the record does not cover
-                cf = CC.record_on_native(cf, inp.cam, inp.maps)
-            zo[f] = d; conf[f] = cf; chunk[f] = int(z["chunk"]) if "chunk" in z.files else 0
+    zo, conf, chunk = load_records(inp.records_dir, frames, rec_hw,
+                                   (lambda a: CC.record_on_native(a, inp.cam, inp.maps)) if carry else None)
     floor_norm = float(raw_cfg["reconstruction"]["simple"]["conf_min_norm"])
     thr, cmax = {}, {}
     for k in sorted(set(chunk.values())):
