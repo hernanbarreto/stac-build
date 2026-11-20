@@ -47,7 +47,10 @@ cloud only, replace). What it is, over §1's pipeline:
   under this pipeline it comes out STANDING (the 11-08 run's "on its side" below no longer holds).
 - STATION (USER 2026-11-11): *"había salido bien, bastante bien con como se grabó … lo que estaba reconstruido
   estaba muy muy bien, gran coherencia"* — DELETED by him: many parts missing from a poor recording, not a
-  session to show in December. Observatorio: not yet seen by him.
+  session to show in December.
+- ✓ OBSERVATORIO SEEN BY HIM (USER 2026-11-20): *"observatorio ya la vi, esta bien, tiene algunos errores en las
+  vias, que se yo, observatorio es una corrida corta, podria rehacerse, pero ya veremos"* — fine, some errors on
+  the rails; a re-run is possible (a short session) and NOT ordered.
 
 ## 1 · ⭐⭐⭐⭐ THE FINAL PIPELINE — USER 2026-11-08 (11:20 CDMX), pccr, main 8cef74f
 *"la cobertura es muy buena, sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como
@@ -1490,6 +1493,28 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   diciembre uno de los puntos a mejorar es justamente la velocidad"). Reference: pccr 2408 (2765 kf, 150 concepts)
   VLM 48.5 min + SAM3 ~10.5 h at ~4.1 min / concept even with the shared backbone (3ccb7c6); pccr 3108 (547 kf,
   87 concepts) SAM3 1 h 43 min. Robustness stays the bar: speed is never bought with a lost mask or a looser geometry.
+- ⭐ THE GLOBE (CESIUM) — AN IDEA OF HIS, NOT STARTED (USER 2026-11-20: "esperemos que termine esto y veamos si le
+  falta algo que querramos mostrar el 15/12, al menos una feature tipo place holder como los documentos o el gantt,
+  estaba pensando en incluir cesium para ubicar las obras en el lugar georreferenciado, y ver de convertir todas
+  las mediciones en mediciones geoespaciales, y tener otra manera de ver las obras que es en el globo, como lo
+  ves?"). THE PRESENTATION IS ON 2026-12-15. What the assistant answered (his decisions, nothing begun):
+  · FOR THE 15th: a Globe section — a pin per project at its real place, a touch opens the session — and ONE work
+    really standing on the globe (one session first, his eye). The conversion of every measurement to
+    geospatial (points, tickets, exports with a CRS, the IFC's map conversion) as a declared roadmap with one
+    visible hook (a picked point shows latitude / longitude / height): it touches the viewer, the exporter, the
+    tickets and the reports.
+  · MEASURED: none of the five source videos carries a GPS location (ffprobe: no location tag) — a work's place
+    is entered, by hand on the map (metres of error) or from 2–3 points of known coordinates (the common-points
+    similarity already built). THE TILED GENRECON MESHES ARE ALREADY OGC 3D TILES 1.1 (tiles/tileset.json +
+    tile_<id>.glb, tools/glb/tile_mesh.mjs, served by /api/segmentation/tsdf/tiles/…; the interface renders
+    them with 3d-tiles-renderer on three.js) — CesiumJS's native format: a mesh on the globe needs a placement,
+    no conversion. The CLOUD is Potree's octree: Cesium does not read it (a conversion, or the mesh on the
+    globe and the cloud in the detail viewer).
+  · HIS TO DECIDE: where a work's place comes from; the base map (CesiumJS itself is Apache-2.0 and self-hosted;
+    Cesium ion's terrain / imagery is an outside service with an account — against "no paid external APIs,
+    everything local": an open map online without an account, or the five zones' tiles served by us); ONE
+    georeference per project as the single source (origin, heading, how it was obtained, its accuracy —
+    indoors a satellite image verifies nothing: "approximate" unless points were measured).
 - ⭐⭐ THE PRECISION CORE'S TIME — F4, F5, F6 (USER 2026-11-20: "estas F4, F5 y F6 son las que se comen todo el
   tiempo, hay manera de hacerlas mas rapido?, deben ser lo mas rapido posible, por ahi paralelizanod algo,
   investiga a fondo como optimizar el tiempo en cada uno"). INVESTIGATED READ-ONLY (the copy's run holds the card;
