@@ -32,7 +32,7 @@ import { TriangleAlert, BadgeCheck, FileText, ChartNoAxesGantt, Flag, Waypoints,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
   ListTodo, PanelLeftClose, PanelLeftOpen, Wand2,
-  Circle, Sun, FlaskConical, Pin, Pentagon, Palette,
+  Circle, Sun, FlaskConical, Palette,
 } from 'lucide-react'
 import { useI18n, getT } from './i18n'
 import { useLayout } from './layout/LayoutContext'
@@ -43,7 +43,7 @@ import { Inspector } from './layout/Inspector'
 import { BottomDock } from './layout/BottomDock'
 import { StatusBar } from './layout/StatusBar'
 import { CommandPalette, type Command } from './layout/CommandPalette'
-import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type ExportCommandId, type FuseCommandId, type ManagerCommandId, type ReferenceCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
+import { registerCommands, registerOpeners, findByName, type Executors, type AdminCommandId, type BimCommandId, type ExportCommandId, type FuseCommandId, type ManagerCommandId, type CalibrationCommandId, type CallCommandId, type TeamCommandId, type EvaluationCommandId, type ReportCommandId, type FlythroughCommandId, type Outcome, type PanelCommandId, type ViewportCommandId } from './commands/registry'
 import type { UiCommandId } from './commands/catalog.generated'
 import { SettingsDialog } from './layout/SettingsDialog'
 import { SceneLookDialog } from './layout/SceneLookDialog'
@@ -71,7 +71,6 @@ import { ObjectLibraryDialog } from './features/ObjectLibraryDialog'
 import { AutosegmentDialog, type AutosegmentState, type AutosegmentStages } from './features/AutosegmentDialog'
 import { GenreconDialog } from './features/GenreconDialog'
 import { SessionDownloadDialog, type DownloadSection } from './features/SessionDownloadDialog'
-import { ReferenceDialog, type ReferenceMode } from './features/ReferenceDialog'
 import { CalibrationDialog, type CalibrationDraft, type CalMeasurement, type CalPlane, type CalSummary } from './features/CalibrationDialog'
 import { EvaluationPanel } from './features/EvaluationPanel'
 import { PhysicsPanel } from './features/PhysicsPanel'
@@ -147,7 +146,6 @@ function App() {
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
   const [activeTool, setActiveTool] = useState<Tool>('navigate')
   // reference distance / plane dialog of the evaluation battery (keyframe images); null = closed
-  const [referenceDialog, setReferenceDialog] = useState<ReferenceMode | null>(null)
   // CALIBRATION ON THE 3D MODEL (USER 2026-11-13: "para calibrar debe hacerse tomando mediciones sobre el modelo 3d
   // no sobre las imagenes … se debe poder seleccionar que una medicion es de calibracion y deben quedar almacenadas"):
   // the pin of a measured distance opens the window with that measurement as its draft
@@ -2483,7 +2481,7 @@ function App() {
   }, [])
   useEffect(() => {
     type AppCommandId = Exclude<UiCommandId, PanelCommandId | ViewportCommandId | FlythroughCommandId | CalibrationCommandId | BimCommandId
-      | EvaluationCommandId | ReportCommandId | TeamCommandId | CallCommandId | AdminCommandId | ReferenceCommandId
+      | EvaluationCommandId | ReportCommandId | TeamCommandId | CallCommandId | AdminCommandId
       | ManagerCommandId | FuseCommandId | ExportCommandId>
     const done: Outcome = { ok: true }
     const noSession: Outcome = { ok: false, reason: 'no_session' }
@@ -2807,7 +2805,6 @@ function App() {
         setCalibrating('plane'); setActiveTool('measure-plane'); setStatusMessage(tt('calibration.planeStatus')); return done
       },
       'calibration.open': () => { if (!open()) return noSession; setCalibrationDraft(null); setCalibrationOpen(true); return done },
-      'calibration.open_reference': ({ mode }) => { if (!open()) return noSession; setReferenceDialog(mode); return done },
       'objects.open_library': () => { if (!open()) return noSession; void cmd.current.openObjectLibrary(); return done },
       'physics.panel': ({ on }) => { if (!open()) return noSession; setPhysicsOpen(on); return { ok: true, state: on } },
       'segmentation.open_autosegment': () => { if (!open()) return noSession; void cmd.current.openAutosegment(); return done },
@@ -3230,7 +3227,6 @@ function App() {
       // (the Fuse window of the open session; the Segmentation manager is opened by its own
       // command, on a confirmation: it loads SAM3 on the card)
       scans: withSession(() => cmd.current.openFuse(open()!)),
-      references: withSession(() => setReferenceDialog(prev => prev ?? 'distance')),
       admin: () => { if (!cmd.current.isAdmin) return false; setAdminOpen(true) },
       reports: () => { if (!comparable().ok) return false; setActivePanel('analysis') },
       calibration: withSession(() => setCalibrationOpen(true)),
@@ -3270,8 +3266,6 @@ function App() {
       { id: 'distance', label: t('toolbar.measureDistance'), icon: <Ruler aria-hidden />, shortcut: 'M', checked: activeTool === 'measure-distance', onSelect: () => setActiveTool('measure-distance') },
       { id: 'angle', label: t('toolbar.measureAngle'), icon: <TriangleRight aria-hidden />, shortcut: 'A', checked: activeTool === 'measure-angle', onSelect: () => setActiveTool('measure-angle') },
       { id: 'clearm', label: t('toolbar.clearMeasurements'), icon: <Trash2 aria-hidden />, onSelect: () => viewportRef.current?.clearMeasurements() },
-      { id: 'refdistance', label: t('toolbar.referenceDistance'), icon: <Pin aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('distance') },
-      { id: 'refplane', label: t('toolbar.referencePlane'), icon: <Pentagon aria-hidden />, disabled: !activeSession, onSelect: () => setReferenceDialog('plane') },
       { id: 'commonpoints', label: t('commonPoints.menu'), icon: <Waypoints aria-hidden />, disabled: !activeSession || otherScans.length === 0, checked: commonOpen, onSelect: () => setCommonOpen(v => !v) },
       { type: 'separator', id: 's2' },
       { id: 'brush', label: t('toolbar.brush'), icon: <Brush aria-hidden />, checked: activeTool === 'erase', onSelect: () => setActiveTool(activeTool === 'erase' ? 'navigate' : 'erase') },
@@ -3893,10 +3887,6 @@ function App() {
       <GenreconDialog open={genreconOpen} sessionId={activeSession} scanLabel={activeScanTab} defaultConfidence={confidenceThreshold}
         onClose={() => setGenreconOpen(false)} onRun={async c => { await runGenrecon(c) }} />
 
-      {activeSession && (
-        <ReferenceDialog open={referenceDialog !== null} sessionId={activeSession} scanKey={activeScanTab} initialMode={referenceDialog ?? 'distance'}
-          onClose={() => setReferenceDialog(null)} />
-      )}
       {activeSession && (
         <CalibrationDialog open={calibrationOpen} sessionId={activeSession} scanKey={activeScanTab} draft={calibrationDraft}
           otherScans={projectScans.filter((sc: any) => sc.key !== activeScanTab && sc.kind !== 'fused').map((sc: any) => ({ key: sc.key, label: sc.label || sc.key }))}

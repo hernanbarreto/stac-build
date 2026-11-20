@@ -97,38 +97,6 @@ commands:
       - le nuage est-il étalonné
       - étalonnage sur le modèle 3D
       done: Fenêtre d'étalonnage ouverte.
-- id: calibration.open_reference
-  kind: action
-  runs_on: ui
-  model: Open the reference window on the keyframe IMAGES (a known distance or a plane marked on a photo).
-  args:
-    mode:
-      type: string
-      enum:
-      - distance
-      - plane
-      required: true
-  needs:
-  - session
-  text:
-    es:
-      title: Referencias sobre las imágenes
-      say:
-      - abrí la distancia de referencia
-      - plano de referencia en las fotos
-      done: Ventana de referencias abierta.
-    en:
-      title: References on the images
-      say:
-      - open the reference distance
-      - reference plane on the photos
-      done: Reference window open.
-    fr:
-      title: Références sur les images
-      say:
-      - ouvre la distance de référence
-      - plan de référence sur les photos
-      done: Fenêtre des références ouverte.
 - id: calibration.calibrate_readout
   kind: action
   runs_on: ui

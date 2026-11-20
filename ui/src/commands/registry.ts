@@ -62,10 +62,6 @@ export type AdminCommandId = 'admin.set_tab' | 'admin.create_user' | 'admin.set_
   | 'admin.remove_team_member' | 'admin.assign_session' | 'admin.unassign_session' | 'admin.create_team_session'
 
 /** … the reference window (the references marked on the keyframe images), while it is open */
-export type ReferenceCommandId = 'references.set_mode' | 'references.go_to_keyframe' | 'references.zoom' | 'references.place_point'
-  | 'references.close_polygon' | 'references.undo_vertex' | 'references.cancel_pending' | 'references.select_item'
-  | 'references.arm_add_observation' | 'references.edit_distance' | 'references.edit_plane' | 'references.remove_observation'
-  | 'references.remove_polygon' | 'references.delete_item' | 'references.save' | 'references.close'
 
 /** … the Segmentation manager, while it is open, and the Fuse window */
 export type ManagerCommandId = 'segmentation.close_manager' | 'segmentation.manager_set_mode' | 'segmentation.manager_go_to_frame'

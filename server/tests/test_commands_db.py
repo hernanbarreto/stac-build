@@ -52,7 +52,10 @@ def test_the_real_catalogue_is_complete_in_three_languages():
     assert c.sha256 == cat.load_catalog().sha256                       # no clock, no order at random
     assert len({x["id"] for x in c.commands}) == len(c.commands) >= 260      # every command of the interface is a row
     by_status = {s: sum(1 for x in c.commands if x["status"] == s) for s in cat.STATUS}
-    assert by_status["available"] >= 132 and by_status["available"] + by_status["manual"] >= 270
+    # (260 since 2026-11-20: the old Reference tool on the keyframes' images left the menu and the voice — its 16
+    #  commands and calibration.open_reference; USER: "si quitalas, confunden y son obsoletas, sacalas tanto del
+    #  menu como de los ocmandos por voz")
+    assert by_status["available"] >= 132 and by_status["available"] + by_status["manual"] >= 260
     # what launches GPU work or deletes data asks for confirmation: STAC runs it only with the text
     # that says what it is going to do, in every language (commands/confirm.py)
     for x in c.commands:
