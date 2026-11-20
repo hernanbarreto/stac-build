@@ -313,7 +313,7 @@ cache	stac-build/.ipynb_checkpoints/	0	-	jupyter
 cache	stac-build/.pytest_cache/	0	-	pytest
 asis	stac-build/archive/sam3_env_20260703.yml	5957	1f28058f8c12f6ef6dab41bdfa0e6d2e51b208847a6ef9795ed3c1c9a6e60c32	
 asis	stac-build/archive/shaper_env_20260703.yml	7470	e4eca92f3de656cb7783521529bb25568b5616ff49fc2eb53f855184c2bbc4df	
-data	stac-build/logs/	357048128	704 files	the backend's logs
+data	stac-build/logs/	357242011	704 files	the backend's logs
 data	stac-build/runs/	0	0 files	evaluation runs
 cache	stac-build/scripts/__pycache__/	0	-	python bytecode
 cache	stac-build/scripts/rebuild/__pycache__/	0	-	python bytecode
@@ -338,9 +338,9 @@ cache	stac-build/server/__pycache__/	0	-	python bytecode
 cache	stac-build/server/auth/__pycache__/	0	-	python bytecode
 cache	stac-build/server/bim/__pycache__/	0	-	python bytecode
 cache	stac-build/server/commands/__pycache__/	0	-	python bytecode
-cache	stac-build/server/commands/commands.db	696320	-	the commands database: derived from catalog/*.yaml at start
+cache	stac-build/server/commands/commands.db	663552	-	the commands database: derived from catalog/*.yaml at start
 cache	stac-build/server/correction/__pycache__/	0	-	python bytecode
-private	stac-build/server/data/	120099	5 files	the users' database, personnel, teams
+private	stac-build/server/data/	120184	5 files	the users' database, personnel, teams
 cache	stac-build/server/db/__pycache__/	0	-	python bytecode
 cache	stac-build/server/evaluation/__pycache__/	0	-	python bytecode
 cache	stac-build/server/exporter/__pycache__/	0	-	python bytecode
@@ -349,7 +349,7 @@ cache	stac-build/server/fusion/__pycache__/	0	-	python bytecode
 cache	stac-build/server/gaussians/__pycache__/	0	-	python bytecode
 cache	stac-build/server/ingestors/__pycache__/	0	-	python bytecode
 cache	stac-build/server/intake/__pycache__/	0	-	python bytecode
-data	stac-build/server/logs/	26935494	2 files	logs
+data	stac-build/server/logs/	27026239	2 files	logs
 cache	stac-build/server/patches/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase2_classify/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase2_classify/tests/__pycache__/	0	-	python bytecode
@@ -366,7 +366,7 @@ cache	stac-build/server/phase7_validation/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase_r/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase_r/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/precision/__pycache__/	0	-	python bytecode
-data	stac-build/server/projects/	124027630090	62099 files	THE SESSIONS (videos, clouds, segmentations, meshes)
+data	stac-build/server/projects/	128545504273	62115 files	THE SESSIONS (videos, clouds, segmentations, meshes)
 data	stac-build/server/quick_cloud.log	72	-	logs
 cache	stac-build/server/reconstruction/__pycache__/	0	-	python bytecode
 cache	stac-build/server/reconstruction/certify/__pycache__/	0	-	python bytecode
@@ -5656,7 +5656,7 @@ private	tailscale/certs/	5068	2 files	the Tailscale node's TLS certificate
 private	tailscale/state/	24355	5 files	the Tailscale node's identity
 download	tailscale/tailscale	21268215	349b69aa2e8db0ce430c9ef600e16b1e4b2820286d354a0ca6bb5fdb66b8fa55	Tailscale 1.86.2
 download	tailscale/tailscaled	40048426	dd5ff38a1539554498e8b9d6bb0ed3dc565c70c42eeecb6ecca7695f8e0be870	Tailscale 1.86.2
-data	tailscale/tailscaled.log	14844	-	log
+data	tailscale/tailscaled.log	27777	-	log
 data	tailscale/tailscaled.sock	0	-	a socket
 data	tmp/	725105	48 files	scratch of past work (worktrees are recreated from locks/git-refs.tsv)
 cache	torch_cache/.ipynb_checkpoints/	0	-	jupyter
