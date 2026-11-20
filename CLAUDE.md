@@ -1363,10 +1363,27 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     – measured: a tablet upright 768 × 1024 — viewer 346 → 720 px.
     – KNOWN: on a 1024-px page with BOTH panels open the strip in sight is 376 px — the physics panel meets
       the cube there.
-  · STILL TO DO: stage 2's touch basics (40-px targets on a coarse pointer, row actions visible without hover,
-    16-px inputs, the resizers by finger, the long press as the right click — Viewport.tsx handleContextMenu
-    + `rightDownPos`), stage 3 (phone: the rail at the bottom, panels and windows whole-screen — the Medium
-    rules already give a phone a viewer of 342 px and no cut control), stage 4 (the viewer by touch).
+  · ⭐ STAGE 2, A FINGER INSTEAD OF A MOUSE — APPLIED TO HIS PAGE 2026-11-20 06:05 UTC (b39b300; one page
+    reload, announced), WAITING FOR HIS EYE ON A TABLET. A mouse changes nothing (media `pointer: coarse` /
+    `hover: none`; the PC pictures are the same).
+    – tokens.css under `pointer: coarse`: controls and rows 40 px (small 36), header 44, toolbar 48, tabs 40,
+      status bar 36, box 20, slider thumb 22, resize strip 14, `--fs-3` 16 px; `styles/touch.css` (loaded
+      LAST): typed fields at 16 px (an iPhone zooms under it), tree arrows / status button / icon-only menu
+      buttons as targets; without hover a row's actions are ALWAYS shown and go to their own line when the row
+      has no width (the name keeps ≥ 96 px of the first).
+    – `LayoutContext.startDrag` on pointer events (+ `touch-action: none` on the strip): the left panel
+      280 → 370 px by mouse and by finger alike (scripts/debug-resize.mjs, private copy).
+    – A LONG PRESS IS THE RIGHT CLICK (Viewport.tsx, beside handleContextMenu): a finger still for 550 ms
+      (8-px slop) runs the right click's own handler — the selected object's menu (New ticket), a BIM
+      element's; the tap's echo of mouse events after the lift is stopped on the model for 500 ms so the menu
+      stays. Measured with a simulated finger (CDP touch events; scripts/debug-longpress.mjs): the menu opens
+      at ~600 ms and is still there after the lift. NOT on a real device. The BRUSH's right-click marks and
+      the section box's handles are NOT covered (stage 4).
+    – a tablet: controls under 40 px 62 → 41 in the frame, none under 32 px.
+  · STILL TO DO: stage 3 (phone: the rail at the bottom in portrait, panels and windows whole-screen, a
+    non-blocking window as a bottom sheet, the on-screen keyboard — the Medium rules already give a phone a
+    viewer of 342 px and no cut control), stage 4 (the viewer by touch: the brush, the section box, measuring
+    without hover; the phone's rendering defaults are HIS decision).
     ⚠ THE SCREENSHOT RUNS COST THE RUNNING STAGE A FEW PER CENT (PointDiT 1.17 s a keyframe idle, 1.2–1.3 s
     during a 60-picture run on 8 cores): long sets on 4 cores (`taskset -c 0-3`), and never to time a stage.
 - ⭐⭐⭐ THE LIST OF 2026-11-19 — HIS POINTS, WITH HIS NUMBERS (RESUME HERE; the 2026-11-18 block below is its
