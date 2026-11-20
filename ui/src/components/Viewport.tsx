@@ -4547,6 +4547,19 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         renderer.domElement.addEventListener('contextmenu', onContextMenu)
         renderer.domElement.addEventListener('mousedown', onSectionDown)
         renderer.domElement.addEventListener('mousemove', onSectionMove)
+        // THE SECTION BOX BY FINGER (USER 2026-11-20: "hace la pagina responsiva para PC tablet y telefonos … debe
+        // funcionar perfectamente adaptada a cada pantalla"): its faces are dragged through MOUSE events, and a
+        // finger's drag sends none — on a tablet a finger on a handle orbited the camera instead. A pointer that
+        // is not a mouse gives its down / move / up to the same three handlers (a PointerEvent is a MouseEvent);
+        // a handle that is hit cancels the event, so no mouse echo follows and the camera's controls — which the
+        // handler switches off for the drag — stay still.
+        const onSectionPointerDown = (e: PointerEvent) => { if (e.pointerType !== 'mouse' && e.isPrimary) onSectionDown(e) }
+        const onSectionPointerMove = (e: PointerEvent) => { if (e.pointerType !== 'mouse' && e.isPrimary) onSectionMove(e) }
+        const onSectionPointerUp = (e: PointerEvent) => { if (e.pointerType !== 'mouse') onSectionUp() }
+        renderer.domElement.addEventListener('pointerdown', onSectionPointerDown)
+        renderer.domElement.addEventListener('pointermove', onSectionPointerMove)
+        renderer.domElement.addEventListener('pointerup', onSectionPointerUp)
+        renderer.domElement.addEventListener('pointercancel', onSectionPointerUp)
         renderer.domElement.addEventListener('mousemove', handleMeasureHover)
         renderer.domElement.addEventListener('mousemove', handleKitHover)
         renderer.domElement.addEventListener('mouseup', onSectionUp)
@@ -4576,6 +4589,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('contextmenu', onContextMenu)
             renderer.domElement.removeEventListener('mousedown', onSectionDown)
             renderer.domElement.removeEventListener('mousemove', onSectionMove)
+            renderer.domElement.removeEventListener('pointerdown', onSectionPointerDown)
+            renderer.domElement.removeEventListener('pointermove', onSectionPointerMove)
+            renderer.domElement.removeEventListener('pointerup', onSectionPointerUp)
+            renderer.domElement.removeEventListener('pointercancel', onSectionPointerUp)
             renderer.domElement.removeEventListener('mousemove', handleMeasureHover)
             renderer.domElement.removeEventListener('mousemove', handleKitHover)
             renderer.domElement.removeEventListener('mouseup', onSectionUp)
@@ -4889,11 +4906,11 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
 
         // A LONG PRESS IS THE RIGHT CLICK (USER 2026-11-20: "hace la pagina responsiva para PC tablet y telefonos …
         // debe funcionar perfectamente adaptada a cada pantalla"). A finger has no right button: the object's menu
-        // (New ticket) and a BIM element's menu had no way in on a tablet. A finger held still on the model for
-        // LONG_PRESS_MS opens what a right click opens there — the same handler, the same rules (the object must
-        // be selected first). A finger that moves (an orbit, a pinch) or lifts earlier cancels it. Where the
-        // browser itself raises `contextmenu` on a long press (Android), that one arrives first and this timer
-        // is dropped: the menu opens once.
+        // (New ticket), a BIM element's menu, the brush's marks and the cancelling of a measurement had no way in
+        // on a touch screen. A finger held still on the model for LONG_PRESS_MS sends there what a right click
+        // sends — the same events to the same handlers, the same rules (the object must be selected first). A
+        // finger that moves (an orbit, a pinch) or lifts earlier cancels it. Where the browser itself raises
+        // `contextmenu` on a long press (Android), that one arrives first and this timer is dropped.
         const LONG_PRESS_MS = 550
         const LONG_PRESS_SLOP_PX = 8
         let press: { id: number; x: number; y: number; timer: ReturnType<typeof setTimeout> } | null = null
@@ -4903,10 +4920,29 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (e.pointerType === 'mouse' || !e.isPrimary) return
             const x = e.clientX, y = e.clientY
             rightDownPos = { x, y }                     // (the menu's own "was it a drag" test reads this)
+            const target = e.target instanceof Element ? e.target : container
             press = { id: e.pointerId, x, y, timer: setTimeout(() => {
                 press = null
                 pressFired = true
-                handleContextMenu(new MouseEvent('contextmenu', { clientX: x, clientY: y, bubbles: true, cancelable: true }))
+                // THE WHOLE RIGHT CLICK, where the finger is: the button down and up, then `contextmenu` — what a
+                // mouse sends, so that EVERY tool's right click answers (the object's and a BIM element's menu,
+                // the brush's mark, a measurement in course cancelled), not one handler picked here.
+                const press2 = (shiftKey: boolean) => {
+                    const init = { button: 2, buttons: 2, clientX: x, clientY: y, shiftKey, bubbles: true, cancelable: true }
+                    target.dispatchEvent(new MouseEvent('mousedown', init))
+                    target.dispatchEvent(new MouseEvent('mouseup', { ...init, buttons: 0 }))
+                }
+                if (activeToolRef.current === 'erase') {
+                    // THE BRUSH removes ONE mark with Shift + right click: a finger held ON a mark removes it —
+                    // tried first, and known to have happened by the brush's own report of its marks
+                    let removed = false
+                    const report = onEraseMarksChangedRef.current
+                    onEraseMarksChangedRef.current = n => { removed = true; report?.(n) }
+                    try { press2(true) } finally { onEraseMarksChangedRef.current = report }
+                    if (removed) return
+                }
+                press2(false)
+                target.dispatchEvent(new MouseEvent('contextmenu', { button: 2, clientX: x, clientY: y, bubbles: true, cancelable: true }))
             }, LONG_PRESS_MS) }
         }
         const handlePressMove = (e: PointerEvent) => {
