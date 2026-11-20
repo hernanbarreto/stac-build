@@ -1968,6 +1968,27 @@ reconstruction:
                                         # 3/4") — 0.75: every keyframe lies in four cubes, a seam stands on 48 shared
                                         # keyframes instead of 32, twice the cubes. NOT changed here: the copy's job
                                         # carries its own value.
+      cube_closing: steps               # what the cube run does AFTER ITS GRAPH (USER 2026-11-19: "No entiendo por qué
+                                        # siguen habiendo tantas partes que no usan la placa … es tiempo perdido" /
+                                        # the design: "Dije que si al diseño, dale"). steps = THE RECORD: every cube
+                                        # placed and WRITTEN (676 MB each), then read back by each step (uncertainty,
+                                        # depth graph, the outputs' two passes, the poses) and by the server (the
+                                        # per-keyframe records) — pccr 2026-08-24's copy, 170 cubes on the network
+                                        # volume: 44 min with the card idle. single_pass = each cube read ONCE as it
+                                        # was inferred, placed in memory, every step's piece taken from it, the
+                                        # records written by the cube run itself, no placed cube on disk: the same
+                                        # files (six real cubes: 278 products identical; tests/
+                                        # test_cube_closing_pass.py). single_pass needs certify.keep_aligned_chunks
+                                        # false (it leaves no placed cube to keep): both together FAIL the launch.
+      cube_closing_device: numpy        # numpy | cpu | cuda — the single pass's arithmetic. numpy = the record's own
+                                        # functions; a torch device = vendor/VGGT-Long/loop_utils/closing_torch.py,
+                                        # THE SAME BITS (an exact fused multiply-add repeats the BLAS product numpy's
+                                        # matmul runs; tests/test_closing_torch.py). cuda with no card FAILS.
+      cube_seams_device: numpy          # numpy | cpu | cuda — the seams' fits (loop_utils/seams_torch.py: the same
+                                        # pairs, masks and samples exactly, every number of the fits within 1e-9)
+      cube_graph_device: numpy          # numpy | cpu | cuda — the cube graph's solve with its residuals in one batch
+                                        # (loop_utils/chunk_graph_torch.py: the same solver and tolerances; the cost
+                                        # and the poses of the record within the solver's own tolerance)
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).
