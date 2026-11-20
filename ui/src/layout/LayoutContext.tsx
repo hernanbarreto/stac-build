@@ -49,6 +49,8 @@ function defaults(): LayoutState {
     const legacyW = Number(localStorage.getItem('stac.assistantWidth'))
     if (legacyW) inspectorWidth = legacyW
   } catch { /* storage unavailable */ }
+  // (a first visit on a page where both panels cannot be open: the sessions' list, not the assistant, is shown)
+  if (oneAtATime({ leftWidth: 280, inspectorWidth })) inspectorOpen = false
   return {
     leftTab: 'sessions',
     leftWidth: 280,
@@ -72,11 +74,28 @@ function load(): LayoutState {
     if ((saved.dockTab as string | undefined) === 'report') saved.dockTab = d.dockTab
     // (the certificate panel — the inspector's 'acta' tab — left the interface on 2026-11-19)
     if ((saved.inspectorTab as string | undefined) === 'acta') saved.inspectorTab = 'properties'
-    return { ...d, ...saved }
+    const s = { ...d, ...saved }
+    // (a layout stored on a wide screen, opened on a narrow one: the left panel — where a session is chosen — wins)
+    if (s.leftTab && s.inspectorOpen && oneAtATime(s)) s.inspectorOpen = false
+    return s
   } catch { return d }
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+
+// ── THE PAGE'S SIZE (USER 2026-11-20: "hace la pagina responsiva para PC tablet y telefonos, con cortes por
+// resolucion de pantalla"; the cuts he approved). Under OVERLAY_MAX_W the side panels open OVER the viewer
+// (styles/layout.css); the two are then kept open together only while a strip of the viewer of at least
+// MIN_VIEWER_STRIP stays between them — a tablet on its side keeps both, a tablet upright one at a time.
+const OVERLAY_MAX_W = 1279
+const MIN_VIEWER_STRIP = 240
+const RAIL_W = 48
+const pageWidth = () => { try { return window.innerWidth } catch { return 1920 } }
+/** the side panels open over the viewer at this page width */
+export const panelsOverlay = (w = pageWidth()) => w <= OVERLAY_MAX_W
+/** both panels cannot be open together at this page width (with these panel widths) */
+const oneAtATime = (s: Pick<LayoutState, 'leftWidth' | 'inspectorWidth'>, w = pageWidth()) =>
+  panelsOverlay(w) && w - RAIL_W - s.leftWidth - s.inspectorWidth < MIN_VIEWER_STRIP
 
 interface LayoutContextValue {
   state: LayoutState
@@ -94,6 +113,9 @@ interface LayoutContextValue {
   openDock: (tab: DockTab) => void
   setDockHeight: (h: number) => void
   setDensity: (d: Density) => void
+  /** the page is too narrow for both side panels: opening one closes the other (asked when it matters, so that a
+   *  resized window is never answered from an old measure) */
+  panelsExclusive: () => boolean
 }
 
 const LayoutContext = createContext<LayoutContextValue | null>(null)
@@ -113,15 +135,24 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
     setState(s => ({ ...s, ...(typeof p === 'function' ? p(s) : p) }))
   }, [])
 
+  // a page that became too narrow for both panels (a rotated tablet, a shrunk window): the one opened last is
+  // not known here — the right one gives way, as at load
+  useEffect(() => {
+    const onResize = () => setState(s => (s.leftTab && s.inspectorOpen && oneAtATime(s) ? { ...s, inspectorOpen: false } : s))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
   const value = useMemo<LayoutContextValue>(() => ({
     state,
-    setLeftTab: tab => patch({ leftTab: tab }),
-    toggleLeftTab: tab => patch(s => ({ leftTab: s.leftTab === tab ? null : tab })),
+    // (opening one panel closes the other where both do not fit — oneAtATime)
+    setLeftTab: tab => patch(s => ({ leftTab: tab, ...(tab && oneAtATime(s) ? { inspectorOpen: false } : {}) })),
+    toggleLeftTab: tab => patch(s => (s.leftTab === tab ? { leftTab: null } : { leftTab: tab, ...(oneAtATime(s) ? { inspectorOpen: false } : {}) })),
     setLeftWidth: w => patch({ leftWidth: clamp(w, LIMITS.leftMin, LIMITS.leftMax) }),
-    setInspectorOpen: open => patch({ inspectorOpen: open }),
-    toggleInspector: () => patch(s => ({ inspectorOpen: !s.inspectorOpen })),
+    setInspectorOpen: open => patch(s => ({ inspectorOpen: open, ...(open && oneAtATime(s) ? { leftTab: null } : {}) })),
+    toggleInspector: () => patch(s => (s.inspectorOpen ? { inspectorOpen: false } : { inspectorOpen: true, ...(oneAtATime(s) ? { leftTab: null } : {}) })),
     setInspectorTab: tab => patch({ inspectorTab: tab }),
-    openInspector: tab => patch({ inspectorOpen: true, inspectorTab: tab }),
+    openInspector: tab => patch(s => ({ inspectorOpen: true, inspectorTab: tab, ...(oneAtATime(s) ? { leftTab: null } : {}) })),
     setInspectorWidth: w => patch({ inspectorWidth: clamp(w, LIMITS.inspMin, LIMITS.inspMax) }),
     setDockOpen: open => patch({ dockOpen: open }),
     toggleDock: () => patch(s => ({ dockOpen: !s.dockOpen })),
@@ -129,6 +160,7 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
     openDock: tab => patch({ dockOpen: true, dockTab: tab }),
     setDockHeight: h => patch({ dockHeight: clamp(h, LIMITS.dockMin, LIMITS.dockMax) }),
     setDensity: d => patch({ density: d }),
+    panelsExclusive: () => oneAtATime(state),
   }), [state, patch])
 
   return <LayoutContext.Provider value={value}>{children}</LayoutContext.Provider>

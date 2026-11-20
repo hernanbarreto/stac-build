@@ -121,6 +121,7 @@ export function MenuButton({ label, entries, ariaLabel, chevron = false, variant
   return (
     <>
       <button ref={btn} type="button" disabled={disabled} aria-haspopup="menu" aria-expanded={open}
+        aria-label={label === '' || label == null ? ariaLabel : undefined} title={label === '' || label == null ? ariaLabel : undefined}
         className={`stac-menubtn stac-menubtn--${variant} ${open ? 'stac-menubtn--open' : ''} ${className}`.trim()}
         onClick={() => setOpen(o => !o)}>
         {icon && <span className="stac-menubtn__icon" aria-hidden>{icon}</span>}

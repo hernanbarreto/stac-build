@@ -270,6 +270,8 @@
   --z-viewport-overlay: 10;
   --z-hud: 20;
   --z-float: 60;
+  --z-overlay-panel: 80;          /* a side panel opened OVER the viewer (pages under 1280 px): above the viewer's
+                                     own toolbar and overlays, under every menu */
   --z-popover: 100;
   --z-banner: 150;
   --z-dock: 200;

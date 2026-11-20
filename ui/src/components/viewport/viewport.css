@@ -28,6 +28,9 @@
 .stac-vptoolbar-wrap {
   position: absolute;
   inset: var(--hud-inset);
+  /* (a side panel open OVER the viewer: the bar keeps to the part in sight — layout.css, --ov-left / --ov-right) */
+  left: calc(var(--hud-inset) + var(--ov-left, var(--sp-0)));
+  right: calc(var(--hud-inset) + var(--ov-right, var(--sp-0)));
   z-index: var(--z-float);
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(calc(var(--hud-cube-box) + var(--sp-2)), 1fr);
@@ -154,7 +157,7 @@
 .stac-hud__banner {
   position: absolute;
   top: calc(var(--hud-inset) + var(--toolbar-float-h) + var(--sp-2));
-  left: 50%;
+  left: calc(50% + (var(--ov-left, var(--sp-0)) - var(--ov-right, var(--sp-0))) / 2);
   transform: translateX(-50%);
   z-index: var(--z-hud);
   width: min(100% - var(--sp-8), var(--dialog-w-lg));
@@ -163,7 +166,7 @@
 .stac-hud__cube {
   position: absolute;
   top: var(--hud-inset);
-  right: var(--hud-inset);
+  right: calc(var(--hud-inset) + var(--ov-right, var(--sp-0)));
   z-index: var(--z-hud);
 }
 
@@ -237,8 +240,8 @@
    chips — it lay over the scale bar and the grid's text whenever the viewer was under about 890 px. */
 .stac-hud__bottom {
   position: absolute;
-  left: var(--hud-inset);
-  right: var(--hud-inset);
+  left: calc(var(--hud-inset) + var(--ov-left, var(--sp-0)));
+  right: calc(var(--hud-inset) + var(--ov-right, var(--sp-0)));
   bottom: var(--hud-inset);
   z-index: var(--z-hud);
   display: flex;
@@ -443,13 +446,13 @@
 
 .stac-vpcard--topright {
   top: calc(var(--hud-inset) + var(--nav-cube-size) + var(--sp-8));
-  right: var(--hud-inset);
+  right: calc(var(--hud-inset) + var(--ov-right, var(--sp-0)));
   min-width: var(--popover-min-w);
 }
 
 .stac-vpcard--topcenter {
   top: calc(var(--hud-inset) + var(--toolbar-float-h) + var(--sp-2));
-  left: 50%;
+  left: calc(50% + (var(--ov-left, var(--sp-0)) - var(--ov-right, var(--sp-0))) / 2);
   transform: translateX(-50%);
   flex-direction: row;
   align-items: center;

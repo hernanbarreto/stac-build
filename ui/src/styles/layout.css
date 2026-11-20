@@ -19,6 +19,10 @@
   /* THE VIEWER KEEPS ITS ROOM (USER 2026-11-20: "muchas cosas … quedan ocultas segun la resolucion"): the two side
      panels take their stored widths only while the viewer keeps --viewer-min-w (tokens.css); on a narrower page
      they give way, equally, instead of squeezing it to nothing */
+  /* how much of the viewer a side panel opened OVER it covers on each side (none while the panels stand beside
+     it): the viewer's toolbar, cube and corner chips keep to what is left in sight (viewport.css) */
+  --ov-left: var(--sp-0);
+  --ov-right: var(--sp-0);
   display: grid;
   grid-template-rows: var(--header-h) minmax(0, 1fr) var(--statusbar-h);
   grid-template-columns: var(--activity-w) minmax(0, var(--left-w)) minmax(var(--viewer-min-w), 1fr) minmax(0, var(--inspector-w));
@@ -39,6 +43,61 @@
 
 .stac-app--left-closed.stac-app--inspector-closed {
   grid-template-columns: var(--activity-w) 0 minmax(0, 1fr) 0;
+}
+
+/* ── MEDIUM: tablets, small windows (USER 2026-11-20, the cuts he approved: "1. si") ─────────────────────
+   Under 1280 px of page the two side panels no longer stand beside the viewer — at 768 px they left it 120 px.
+   The viewer takes the whole middle and a panel OPENS OVER it, from its own edge; LayoutContext keeps one open
+   at a time when both would leave no viewer between them. */
+@media (max-width: 1279px) {
+  .stac-app,
+  .stac-app--left-closed,
+  .stac-app--inspector-closed,
+  .stac-app--left-closed.stac-app--inspector-closed {
+    grid-template-columns: var(--activity-w) minmax(0, 1fr);
+  }
+
+  .stac-app {
+    --ov-panel-max: calc(100vw - var(--activity-w) - var(--sp-12));
+    --ov-left: min(var(--left-w), var(--ov-panel-max));
+    --ov-right: min(var(--inspector-w), var(--ov-panel-max));
+  }
+
+  .stac-app--left-closed {
+    --ov-left: var(--sp-0);
+  }
+
+  .stac-app--inspector-closed {
+    --ov-right: var(--sp-0);
+  }
+
+  .stac-app .stac-app__main,
+  .stac-app .stac-app__left,
+  .stac-app .stac-app__inspector {
+    grid-column: 2;
+  }
+
+  .stac-app__left,
+  .stac-app__inspector {
+    z-index: var(--z-overlay-panel);
+    max-width: calc(100% - var(--sp-12));   /* a strip of the viewer always stays in reach */
+    box-shadow: var(--elev-3);
+  }
+
+  .stac-app__left {
+    justify-self: start;
+    width: var(--left-w);
+  }
+
+  .stac-app__inspector {
+    justify-self: end;
+    width: var(--inspector-w);
+  }
+
+  .stac-app--left-closed .stac-app__left,
+  .stac-app--inspector-closed .stac-app__inspector {
+    display: none;
+  }
 }
 
 /* The header and the status bar sit above the three scrolling regions, so a

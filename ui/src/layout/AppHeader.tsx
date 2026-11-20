@@ -4,7 +4,7 @@
  * session ▾, scan ▾, search (Ctrl+K), assistant toggle, user ▾.
  * Purely presentational: every entry is built by App from its handlers.
  */
-import { ChevronRight, Search, Sparkles, User } from 'lucide-react'
+import { ChevronRight, Menu as MenuIcon, Search, Sparkles, User } from 'lucide-react'
 import { Kbd } from '../components/ui/Kbd'
 import { IconButton } from '../components/ui/IconButton'
 import { MenuButton, type MenuEntry } from '../components/ui/Menu'
@@ -69,12 +69,24 @@ export function AppHeader({ menus, sessions, activeSession, onSelectSession, sca
   const activeScanLabel = scans.find(s => s.key === activeScan)
   const vlmLabel = vlmStatus === 'up' ? t('assistant.modelUp') : vlmStatus === 'loading' ? t('assistant.modelLoading') : vlmStatus === 'busy' ? t('assistant.modelBusy') : t('assistant.modelDown')
 
+  // THE FOUR MENUS UNDER ONE BUTTON on a narrow page (USER 2026-11-20: "hace la pagina responsiva para PC tablet y
+  // telefonos"): the bar needs about 1,000 px whole — narrower, its right end (the user's menu, the assistant) was
+  // pushed out of the page. The same entries, each menu under its name; regions.css shows the bar or this button.
+  const burgerEntries: MenuEntry[] = menus.flatMap((m, i): MenuEntry[] => [
+    ...(i ? [{ type: 'separator' as const, id: `sep:${m.id}` }] : []),
+    { type: 'header' as const, id: `head:${m.id}`, label: m.label },
+    ...m.entries.map((e): MenuEntry => (!e.type || e.type === 'item'
+      ? { ...e, id: `${m.id}:${e.id}`, disabled: e.disabled || m.disabled }
+      : { ...e, id: `${m.id}:${e.id}` })),
+  ])
+
   return (
     <header className="stac-header">
       <div className="stac-header__brand">
         <img src="/favicon.png" alt="" className="stac-header__logo" />
         <span className="stac-header__name">{t('app.name')}</span>
       </div>
+      <MenuButton className="stac-header__burger" variant="bar" ariaLabel={t('header.menuBar')} icon={<MenuIcon aria-hidden />} label="" entries={burgerEntries} />
       <nav className="stac-header__menus" aria-label={t('header.menuBar')}>
         {menus.map(m => (
           <MenuButton key={m.id} label={m.label} entries={m.entries} ariaLabel={m.label} disabled={m.disabled} variant="bar" />
@@ -100,7 +112,7 @@ export function AppHeader({ menus, sessions, activeSession, onSelectSession, sca
       </button>
       <IconButton label={`${t('assistant.title')} — ${vlmLabel}`} icon={<Sparkles aria-hidden />} tone="measure" active={inspectorOpen}
         className={vlmStatus === 'up' ? '' : 'stac-header__vlm--off'} onClick={onToggleInspector} shortcut="Mod+J" />
-      <MenuButton variant="bar" ariaLabel={t('header.userMenu')} align="right" icon={<User aria-hidden />} label={userName} entries={userEntries} />
+      <MenuButton className="stac-header__user" variant="bar" ariaLabel={t('header.userMenu')} align="right" icon={<User aria-hidden />} label={userName} entries={userEntries} />
     </header>
   )
 }

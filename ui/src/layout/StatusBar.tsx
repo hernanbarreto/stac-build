@@ -39,7 +39,7 @@ export function StatusBar({ serverAlive, connected, sessionLabel, scanLabel, mes
       <Sep />
       <span className="stac-status__item stac-status__item--grow" title={message}>
         <span className="stac-status__session">{sessionLabel ?? t('status.noSession')}</span>
-        {scanLabel && <><Sep /><span className="stac-status__scan">{scanLabel}</span></>}
+        {scanLabel && <span className="stac-status__group stac-status__group--scan"><Sep /><span className="stac-status__scan">{scanLabel}</span></span>}
         {message && <><Sep /><span className={`stac-status__message stac-status__message--${messageTone}`}>{message}</span></>}
       </span>
       {job && (
@@ -47,21 +47,31 @@ export function StatusBar({ serverAlive, connected, sessionLabel, scanLabel, mes
           <Badge tone="brand" size="sm" dot>{job}{jobPct != null ? ` ${fmt.percent(jobPct / 100)}` : ''}</Badge>
         </span>
       )}
-      <Sep />
-      <span className="stac-status__item stac-mono" title={t('status.units')}>{t('status.metres')}</span>
-      <Sep />
-      <span className="stac-status__item stac-mono" title={t('status.epochTitle')}>
-        {t('status.epoch')} {epoch != null ? fmt.integer(epoch) : t('status.dash')}
-        {storedEpochs > 0 && <Badge tone="info" size="sm">{t('status.storedEpochs', { count: storedEpochs })}</Badge>}
+      {/* each readout with its separator, in a group the page's width can drop whole (regions.css): on a narrow
+          page the bar keeps the connection, the session, the running job and the console's button */}
+      <span className="stac-status__group stac-status__group--units">
+        <Sep />
+        <span className="stac-status__item stac-mono" title={t('status.units')}>{t('status.metres')}</span>
       </span>
-      <Sep />
-      <span className="stac-status__item stac-status__cursor stac-mono" title={t('status.cursorTitle')} aria-live="off">
-        {cursor ? `X ${coord(cursor.x)}  Y ${coord(cursor.y)}  Z ${coord(cursor.z)} m` : `X ${t('status.dash')}  Y ${t('status.dash')}  Z ${t('status.dash')}`}
+      <span className="stac-status__group stac-status__group--epoch">
+        <Sep />
+        <span className="stac-status__item stac-mono" title={t('status.epochTitle')}>
+          {t('status.epoch')} {epoch != null ? fmt.integer(epoch) : t('status.dash')}
+          {storedEpochs > 0 && <Badge tone="info" size="sm">{t('status.storedEpochs', { count: storedEpochs })}</Badge>}
+        </span>
       </span>
-      <Sep />
-      <span className="stac-status__item stac-mono" title={t('status.pointsTitle')}>
-        {points > 0 ? t('status.points', { n: fmt.millions(points) }) : t('status.noPoints')}
-        {fps > 0 && <> <Sep /> {t('status.fps', { n: fmt.integer(fps) })}</>}
+      <span className="stac-status__group stac-status__group--cursor">
+        <Sep />
+        <span className="stac-status__item stac-status__cursor stac-mono" title={t('status.cursorTitle')} aria-live="off">
+          {cursor ? `X ${coord(cursor.x)}  Y ${coord(cursor.y)}  Z ${coord(cursor.z)} m` : `X ${t('status.dash')}  Y ${t('status.dash')}  Z ${t('status.dash')}`}
+        </span>
+      </span>
+      <span className="stac-status__group stac-status__group--points">
+        <Sep />
+        <span className="stac-status__item stac-mono" title={t('status.pointsTitle')}>
+          {points > 0 ? t('status.points', { n: fmt.millions(points) }) : t('status.noPoints')}
+          {fps > 0 && <> <Sep /> {t('status.fps', { n: fmt.integer(fps) })}</>}
+        </span>
       </span>
       <Sep />
       <button type="button" className={`stac-status__btn ${consoleOpen ? 'stac-status__btn--on' : ''}`.trim()} onClick={onToggleConsole} aria-pressed={consoleOpen} title={t('dock.console')}>

@@ -104,6 +104,52 @@
   opacity: var(--opacity-disabled);
 }
 
+/* THE HEADER GIVES WAY IN STEPS (USER 2026-11-20: the page on every screen). Whole, it needs about 1,000 px; a
+   narrower page pushed its right end — the assistant's button, the user's menu — out of reach. */
+.stac-header__burger {
+  display: none;
+  flex-shrink: 0;
+}
+
+.stac-header__context {
+  flex: 0 1 auto;
+}
+
+.stac-header__context .stac-menubtn {
+  flex: 0 1 auto;
+  min-width: var(--sp-12);       /* a selector shrinks to its first letters, never to its arrow alone */
+}
+
+@media (max-width: 1180px) {
+  .stac-header__name {
+    display: none;               /* the logo stays */
+  }
+
+  .stac-header__search {
+    min-width: 0;                /* the search field becomes its magnifier: one press opens the same palette */
+    flex-shrink: 0;
+  }
+
+  .stac-header__search-label,
+  .stac-header__search .stac-kbd {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .stac-header__menus {
+    display: none;               /* the four menus, under one button */
+  }
+
+  .stac-header__burger {
+    display: inline-flex;
+  }
+
+  .stac-header__user .stac-menubtn__label {
+    display: none;               /* the user's menu keeps its icon */
+  }
+}
+
 /* ── Activity bar ───────────────────────────────────────────────────── */
 .stac-activity {
   display: flex;
@@ -282,6 +328,37 @@
 .stac-status__item--grow {
   flex: 1;
   overflow: hidden;
+}
+
+/* A READOUT AND ITS SEPARATOR, dropped whole as the page narrows (USER 2026-11-20: the page on every screen). The
+   bar cut its right end — the points, the console's button — without a word; now it gives up, in this order, the
+   units and the epoch, the cursor's coordinates, then the points and the scan's name. */
+.stac-status__group {
+  display: contents;
+}
+
+@media (max-width: 1100px) {
+  .stac-status__group--units,
+  .stac-status__group--epoch {
+    display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .stac-status__group--cursor {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .stac-status__group--points,
+  .stac-status__group--scan {
+    display: none;
+  }
+}
+
+.stac-status__btn {
+  flex-shrink: 0;
 }
 
 .stac-status__session {

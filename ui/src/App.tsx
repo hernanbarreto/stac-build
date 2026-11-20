@@ -1597,7 +1597,8 @@ function App() {
     // panel lateral derecho ni el izquierdo, nunca"): the object is selected — its box, its dimensions — and
     // the panels stay as he has them. (A selection from the list or the palette still shows its properties;
     // the chat stays open when it is the inspector's tab: switching would close it.)
-    if (!fromModel && layout.state.inspectorTab !== 'assistant') layout.openInspector('properties')
+    // (where the page holds one side panel at a time, the list he is choosing from is not closed for it)
+    if (!fromModel && layout.state.inspectorTab !== 'assistant' && !layout.panelsExclusive()) layout.openInspector('properties')
     const seg = segments.find(s => s.id === id)
     if (seg?.focus) viewportRef.current?.flyToPoint(seg.focus.center, seg.focus.radius)
   }

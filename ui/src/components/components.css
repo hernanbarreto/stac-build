@@ -1289,7 +1289,7 @@
 /* gravity sandbox panel (features/PhysicsPanel.tsx) — floats bottom-left over the viewport */
 .stac-physics {
   position: absolute;
-  left: var(--sp-4);
+  left: calc(var(--sp-4) + var(--ov-left, var(--sp-0)));
   bottom: calc(var(--sp-4) + var(--toolbar-float-h));
   z-index: 5;
   width: 300px;
