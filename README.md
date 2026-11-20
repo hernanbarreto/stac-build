@@ -37,7 +37,7 @@ closures, the scale, the orientation, the gauge, the bundle adjustment and the f
 A **precision core** then measures and corrects, in order:
 
 - the camera;
-- a continuous metric gauge along the walk;
+- a metric gauge: one scale for the whole session (the scale along the walk is solved and reported, not applied);
 - learned native-pixel tracks;
 - a bundle adjustment judged on held-out tracks;
 - a per-keyframe "bend" of the network's depth onto the adjusted landmarks, then COLMAP's multi-view fusion rule: a
@@ -705,7 +705,12 @@ $m=\operatorname{med}\ell$ and $\sigma=1.4826\,\operatorname{med}|\ell-m|$, a re
 ```
 
 the session's own 95 % interval widened by the project's factor (no bound below three seams). It is logged for the seams
-and judges the closures (zaragoza: $|\ln s+0.0044|\le0.0468$; pccr 2026-08-31: $|\ln s-0.0248|\le0.1523$).
+(zaragoza: $|\ln s+0.0044|\le0.0468$; pccr 2026-08-31: $|\ln s-0.0248|\le0.1523$). Until 2026-11-19 it also judged
+the closures: a bridge whose relative scale lay outside it was set aside before the solve. **No closure is set aside by
+it now.** The cubes' own metric locks differ by up to ×2 where the image carries no usable information (a door crossed
+with the frame blocked, darkness), so a right closure between a well and a badly locked cube must have a scale away
+from 1: on pccr 2026-08-24, 519 of the 644 closures the bound had set aside had a scale the two cubes' metres explain.
+Each closure carries `scale_outside_seams_bound`, the count is declared, and the Cauchy loss judges a loop edge.
 
 **Revisit closures** (`cube_run.bridges` / `closures`). F4's own revisit pairs (§14.3) over the probe's co-visibility
 are handed to the graph (`Model.cube_revisits`). A revisit $(i,j)$ whose two keyframes lie in cubes $a,b$ that share no
@@ -742,8 +747,8 @@ the solve; pccr 2026-08-31: 49 of 75, 43.
   spread ($\sigma_{\text{lock}}=1.4826\,\operatorname{med}_e\lvert\ln s_e\rvert/\sqrt2$ = 8.8 %) it still bent three
   seams by 6–10 cm. F6's 10-view support floor then emptied the keyframes at those transitions: #19–25, #55–65 and
   #187–199 published 0–2 k points each, against a median of 27 k. The metre is `scale_align`'s (every anchor of the
-  session); the scale along the walk is F2's continuous gauge (§14.2), a smooth curve of the walked distance that
-  cannot put a step at a transition. The locks' spread is still measured and recorded (`locks_spread_log`).
+  session); the session's scale is F2's gauge (§14.2) — ONE value for the whole session since 2026-11-20: its
+  curve along the walk, applied as an open chain, re-opened the revisits this graph closes. The locks' spread is still measured and recorded (`locks_spread_log`).
 - **Cost.** The seams squared (an exact fit of the same pixels is never down-weighted); the revisit closures under
   Cauchy, so a wrong one is down-weighted, never trusted like a seam,
 
@@ -773,6 +778,22 @@ with offsets {4, 10} held out. They are solved for per-frame $(a_f,b_f)$ with a 
 $p'=c+(p-c)(az+b)/z$, only if it is bounded and the decision rule approves it.
 
 ---
+
+**How the stage closes** (`structure.cube_seams_device`, `cube_graph_device`, `cube_closing`,
+`cube_closing_device`). The arithmetic after the inference is the same on every path; what changed on 2026-11-20 is
+where it runs and how often a cube is read from the network volume (676 MB each):
+
+- each cube's DA3 lock is measured and applied on the prediction about to be saved — the cube is written once;
+- the seams are fitted on the card, each cube read once (the same pairs and correspondences, every number within
+  1e-13 of the record; 6 s against 69 s on six cubes of pccr 2026-08-24);
+- the graph's solve evaluates its residuals and its finite-difference Jacobian in one float64 batch (`cpu`: the
+  stored cost on pccr 2026-08-24's graph in 69 s against 28 min);
+- `single_pass`: everything after the graph — placement, uncertainty, depth graph, the point files, the poses and
+  the per-keyframe records — in ONE read of every cube, no placed cube written (the 278 products of a six-cube run
+  identical to the step-by-step path's, on the card; 17 s against 59 s). It cannot be combined with
+  `certify.keep_aligned_chunks`, which keeps the placed cubes.
+
+The record of each is still selectable (`numpy`, `steps`).
 
 ## 13. Global metric scale and the upright frame
 
@@ -874,14 +895,35 @@ held-out RMS is within 1.1 standard errors of the minimum.
 - The default instrument is the first available one.
 - Another instrument replaces it only if the decision rule says it improves the paired held-out error.
 
-**Application.** The scale is $s_k=\exp(h(c_k)^\top\hat x)$. Camera centres are re-integrated along the walk:
+**Application** (`gauge.profile`). The rule since 2026-11-20 is `constant`: **one scale for the whole session**,
+
+```math
+s=\exp\bar x,\qquad \bar x=\frac{\sum_i y_i\,\sigma_i^{-2}}{\sum_i\sigma_i^{-2}}
+```
+
+over the applied instrument's absolute rows — the same least squares with every knot held equal (a relative row says
+nothing of a constant). Every camera centre is scaled about the first, $C'_k=C_0+s\,(C_k-C_0)$, with rotations
+unchanged and $s$ recorded as the depth factor about each camera: the walk keeps the shape the cube graph closed (§12).
+The curve $\hat x(c)$ above is still solved, judged and reported, and `gauge.json` says what it would have applied
+(`constant.along_walk_would_apply`).
+
+`along_walk`, the rule until then, applies the curve: $s_k=\exp(h(c_k)^\top\hat x)$ and the centres re-integrated
+along the walk,
 
 ```math
 C'_0=C_0,\qquad C'_k=C'_{k-1}+\tfrac12(s_k+s_{k-1})(C_k-C_{k-1}),
 ```
 
-with rotations unchanged and $s_k$ recorded as a depth factor about each camera. F2 refuses to run unless the live epoch
-is 0, because it measures against VGGT-Ω's own depth.
+an **open chain**: written when the cubes were a chain without revisits, it knows nothing of the closures of §12.
+Measured on pccr 2026-08-24 (the parallel copy, 2026-11-20): the curve ranged ×0.81–×1.25 and moved cameras up to
+2.31 m after the graph had closed the revisits (2.06 m in the original run; 0.62 m on pccr 2026-08-31, 0.21 m on
+zaragoza and observatorio, 0.09 m on bufferStop). The vector between the two cameras of the 774 closures the graph
+honours moved 23.9 cm at the median (90 % under 66.6 cm); F5 brought it back to 16.6 cm, and not at all for visits far
+apart along the walk (49.5 cm). A rack seen at 28 % and at 70 % of the walk — 0.81 m front to rear on the placed cubes —
+was published 1.65 m deep; 0.73 m of that is this step. It stays selectable, and a session frozen before the key
+loads it (what that session was made with).
+
+F2 refuses to run unless the live epoch is 0, because it measures against VGGT-Ω's own depth.
 
 ### 14.3 F4 — native-pixel tracks (`precision/tracks.py`)
 
@@ -910,6 +952,13 @@ score) runs on CUDA under deterministic torch.
 - Coordinates are mapped to native pixels.
 - A track is **held out** when the first 8 bytes of SHA-256(seed, query frame, $u$, $v$), read as an integer, fall below
   $0.2\cdot2^{64}$. This is a deterministic 20 % split, independent of order.
+
+**The file.** `tracks.npz` holds 17 arrays (pccr 2026-08-24: 228 M observations, 12.3 GB). numpy's writer deflates them
+one after another on one core — 9 minutes with the card held and idle. With `tracks.npz_threads: 16` every member's
+`.npy` stream is cut in pieces of 16 MiB deflated at the same time and written in order (`precision/npz_threads.py`); a
+piece that is not a member's last ends on a sync flush, so the pieces end to end are one deflate stream that any ZIP
+reader inflates. The arrays are numpy's, bit for bit (12.34 GB compared on that file); the file carries no clock, so
+the same arrays give the same file. F5 and F6 read the members on threads. `0` is numpy's own writer and reader.
 
 ### 14.4 F3 — resolution probe (removed)
 
@@ -985,6 +1034,14 @@ decision:
 They need at least 12 correspondences, and their inlier RMS must not exceed the 95th bootstrap percentile of the
 keyframes' leave-one-view-out error $P_{95}(\rho_k)$ — the session's own bound (pccr 2026-08-31: 2.26 px, R2 applied,
 held-out 0.534 px; zaragoza: 42.24 px, R1, 0.398 px).
+
+**What a run records about its own time** (`refine.timing.json`, outside every compared artifact). `phases`: the wall
+time of every phase around the solves (the tracks read, the range filter, the groupings, the triangulations, each
+solve's inputs / probe / problem / solve / result, the held-outs, the judge) — F5 is one thread, so they partition
+the run. `card_memory_gb`: what each solve allocated at its peak, what torch reserved and the card's total. On pccr
+2026-08-24 the card sat idle 21 of F5's 75 minutes, and the solve filled it (79.3 of 80 GB): the solver's two memory
+bounds, `refine.torch_ba.keep_pair_plans_gb` and `keep_jacobians_gb` (what a chunked solve keeps between trials
+instead of making it again — the same tensors), stay 0 until that measurement says what fits.
 
 ### 14.6 F6 — VGGT-Ω's depth bent onto F5's landmarks (`precision/depth_on_f5.py`)
 
@@ -1121,6 +1178,15 @@ keyframe's metric frame:
 They vote on the keyframes within ±12 of their anchor and never become points.
 
 ---
+
+**How the vote is computed** (`cloud.vote_batch: 32`; `0` = one witness at a time, the record). A keyframe is judged by
+every co-visible keyframe (a median of 249 on pccr 2026-08-24, 773 446 pairs). The record uploads each witness's maps
+for every pair and z-buffers it with two stable sorts; the fast engine keeps the session's maps on the card, votes the
+witnesses in batches and takes the z-buffer as one exact minimum (it checks once, under torch's strict mode, that the
+reduction gives the record's bits, and keeps the sorts where it does not). Tau, every total, every published depth
+map and every support map are the record's, bit for bit; measured on the card on that session's maps, 24.7 s → 10.7 s
+for 16 keyframes of 249 witnesses. The published points' provenance is looked up in one pass over the cloud (it was
+one pass per keyframe: 6 minutes on 117 M points).
 
 ## 15. The published cloud
 
