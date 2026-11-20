@@ -256,6 +256,14 @@ class TracksConfig:
 SOLVERS = ("ceres", "torch")
 
 
+def _keep_gb(tb: dict, key: str) -> float:
+    v = tb.get(key, 0.0)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= float(v) < float("inf"):
+        raise ValueError(f"precision.refine.torch_ba.{key} {v!r}: GB of the card kept between LM trials, >= 0 "
+                         f"(0 = the record: nothing kept)")
+    return float(v)
+
+
 @dataclass(frozen=True)
 class TorchBAConfig:
     """The torch bundle adjustment's stopping rules and damping (precision/ba_torch.py) — Ceres' own values
@@ -268,6 +276,11 @@ class TorchBAConfig:
     lambda_init: float              # the first LM damping (Ceres' initial_trust_region_radius 1e4 ↔ λ 1e-4)
     lm_diag_min: float              # Ceres' min_lm_diagonal / max_lm_diagonal: the damping's diagonal clamp
     lm_diag_max: float
+    keep_pair_plans_gb: float = 0.0     # BOUNDS (the card's memory), never decisions (USER 2026-11-20: "todo lo que no
+    keep_jacobians_gb: float = 0.0      # cambie el resultado debe programarse mas rapido"): a problem solved in chunks
+                                        # keeps, up to these GB, each chunk's pair plan between LM trials and its
+                                        # Jacobians between a linearisation and its trials — 0 = the record: made
+                                        # again at every trial. The same bits either way.
 
 
 @dataclass(frozen=True)
@@ -777,7 +790,9 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                                min_relative_decrease=_num(tb, "min_relative_decrease", "refine.torch_ba", lo=0.0, hi=1.0),
                                lambda_init=_num(tb, "lambda_init", "refine.torch_ba", lo=0.0, lo_excl=True),
                                lm_diag_min=_num(tb, "lm_diag_min", "refine.torch_ba", lo=0.0, lo_excl=True),
-                               lm_diag_max=_num(tb, "lm_diag_max", "refine.torch_ba", lo=0.0, lo_excl=True)),
+                               lm_diag_max=_num(tb, "lm_diag_max", "refine.torch_ba", lo=0.0, lo_excl=True),
+                               keep_pair_plans_gb=_keep_gb(tb, "keep_pair_plans_gb"),
+                               keep_jacobians_gb=_keep_gb(tb, "keep_jacobians_gb")),
     )
     if refine.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.refine.heldout_confidence' must be below 1")

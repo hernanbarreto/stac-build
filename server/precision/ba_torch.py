@@ -628,8 +628,39 @@ class _ChunkedProblem:
     prior_terms = _Problem.prior_terms
     apply = _Problem.apply
     norm_x = _Problem.norm_x
-    invalidate = _Problem.invalidate
     _camera_solve = _Problem._camera_solve
+
+    # WHAT IS THE SAME AT EVERY TRIAL IS KEPT, WITHIN TWO MEMORY BOUNDS (USER 2026-11-20: "todo lo que no cambie el
+    # resultado debe programarse mas rapido"). The record makes, at EVERY LM trial, each chunk's pair plan again
+    # (the landmark-sharing observation pairs sorted by camera pair — it depends on the tracks alone) and each
+    # chunk's loss-scaled Jacobians TWICE more after the linearisation made them (they depend on the state alone,
+    # and a rejected trial only changes λ). Kept tensors are the tensors that would be made again: the same bits.
+    # refine.torch_ba.keep_pair_plans_gb / keep_jacobians_gb (0 = the record: nothing kept); what does not fit its
+    # bound is made again, chunk by chunk, as before.
+    def _plan_kept(self, ci: int, sub) -> None:
+        if ci in self._plans:
+            return
+        n = sum(int(v.numel()) * int(v.element_size()) for v in sub._pairs.values() if hasattr(v, "element_size"))
+        if self._plan_bytes + n <= self._plan_budget:
+            self._plans.add(ci)
+            self._plan_bytes += n
+        else:
+            sub._pairs = None                                              # (made again at the next trial)
+
+    def _weighted_of(self, ci: int, sub, p0: int, p1: int):
+        """(r_w, J_c, J_pt) of chunk ``ci`` at the current state: the linearisation's own when it was kept."""
+        kept = self._jac.get(ci)
+        if kept is not None:
+            return kept
+        self._bind(sub, p0, p1)
+        r_w, J_c, J_pt, _c = sub._weighted()
+        return r_w, J_c, J_pt
+
+    def invalidate(self):
+        """The state moved (an accepted step): the linearisation and its kept Jacobians are stale."""
+        self._lin = None
+        self._jac = {}
+        self._jac_bytes = 0
 
     def __init__(self, w2c0: np.ndarray, params_by_block0: List[List[float]], block_of: np.ndarray,
                  cam_idx: np.ndarray, pt_idx: np.ndarray, uv: np.ndarray, X0: np.ndarray, huber_px: float,
@@ -675,6 +706,11 @@ class _ChunkedProblem:
                            huber_px, cam_free, device=device, torch_ba=torch_ba, gauge=False, lazy_cols=True)
             self.chunks.append((p0, p1, sub))
         self._lin = None
+        gb = float(1 << 30)
+        self._plan_budget = int(float(getattr(torch_ba, "keep_pair_plans_gb", 0.0) or 0.0) * gb)
+        self._jac_budget = int(float(getattr(torch_ba, "keep_jacobians_gb", 0.0) or 0.0) * gb)
+        self._plans, self._plan_bytes = set(), 0
+        self._jac, self._jac_bytes = {}, 0
 
     def _bind(self, sub, p0, p1):
         """The chunk reads the whole problem's CURRENT state (its own copies are never used)."""
@@ -714,13 +750,18 @@ class _ChunkedProblem:
         H = torch.zeros(self.n_c, self.n_c, **d)
         g = torch.zeros(self.n_c, **d)
         cost = 0.0
-        for p0, p1, sub in self.chunks:
+        self._jac, self._jac_bytes = {}, 0
+        for ci, (p0, p1, sub) in enumerate(self.chunks):
             self._bind(sub, p0, p1)
             r_w, J_c, J_pt, c = sub._weighted()
             Hpp[p0:p1] = segment_sum(J_pt.transpose(1, 2) @ J_pt, sub.pt_idx, sub.P, sub.pt_ends)
             gp[p0:p1] = segment_sum(torch.einsum("mai,ma->mi", J_pt, r_w), sub.pt_idx, sub.P, sub.pt_ends)
             sub._accumulate_camera(H, g, J_c, r_w, nco)
             cost += c
+            n = sum(int(v.numel()) * int(v.element_size()) for v in (r_w, J_c, J_pt))
+            if self._jac_bytes + n <= self._jac_budget:
+                self._jac[ci] = (r_w, J_c, J_pt)                           # (the step's two passes read them)
+                self._jac_bytes += n
             del r_w, J_c, J_pt
         e_p, J_p = self.prior_terms(self.R, self.t)
         if e_p.shape[0]:
@@ -740,16 +781,15 @@ class _ChunkedProblem:
         # Schur: S = H − Σ W Hpp⁻¹ Wᵀ ;  ĝ = g − Σ W Hpp⁻¹ g_p — chunk by chunk, in order
         red = torch.zeros(self.n_c, dtype=torch.float64, device=self.device)
         S_sum = torch.zeros(self.n_c, self.n_c, dtype=torch.float64, device=self.device)
-        for p0, p1, sub in self.chunks:
-            self._bind(sub, p0, p1)
-            _r_w, J_c, J_pt, _c = sub._weighted()
+        for ci, (p0, p1, sub) in enumerate(self.chunks):
+            _r_w, J_c, J_pt = self._weighted_of(ci, sub, p0, p1)
             del _r_w
             W = J_c.transpose(1, 2) @ J_pt                                  # (m,nco,3)
             del J_c, J_pt
             Y = W @ Hpp_inv[p0:p1][sub.pt_idx]
             red += sub._reduce_vec(torch.einsum("mij,mj->mi", Y, gp[p0:p1][sub.pt_idx]), nco)
             S_sum += sub._schur_pairs(Y, W, nco, pair_chunk)
-            sub._pairs = None                                              # the plan is per chunk, not kept
+            self._plan_kept(ci, sub)                                       # kept within its bound, else made again
             del W, Y
         g_red = g - red
         S = H - S_sum
@@ -761,9 +801,8 @@ class _ChunkedProblem:
         # back-substitution Δp = Hpp⁻¹ (−g_p − Wᵀ Δc) and the predicted decrease, chunk by chunk
         dp = torch.empty(self.P, 3, dtype=torch.float64, device=self.device)
         pred = 0.0
-        for p0, p1, sub in self.chunks:
-            self._bind(sub, p0, p1)
-            r_w, J_c, J_pt, _c = sub._weighted()
+        for ci, (p0, p1, sub) in enumerate(self.chunks):
+            r_w, J_c, J_pt = self._weighted_of(ci, sub, p0, p1)
             W = J_c.transpose(1, 2) @ J_pt
             dc_obs = sub._gather_cam_delta(dc, nco)
             back = segment_sum(torch.einsum("mij,mi->mj", W, dc_obs), sub.pt_idx, sub.P, sub.pt_ends)

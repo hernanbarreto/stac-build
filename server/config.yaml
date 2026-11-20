@@ -2793,6 +2793,15 @@ reconstruction:
         lambda_init: 1.0e-4
         lm_diag_min: 1.0e-6
         lm_diag_max: 1.0e+32
+        keep_pair_plans_gb: 0           # BOUNDS (the card's memory), never decisions (USER 2026-11-20: "todo lo que no
+        keep_jacobians_gb: 0            #   cambie el resultado debe programarse mas rapido"). A problem solved in
+                                        #   chunks (above 24 M residual blocks: pccr 2026-08-24) makes, at EVERY LM
+                                        #   trial, each chunk's pair plan again (a stable sort of its landmark-sharing
+                                        #   observation pairs — the same at every trial; the whole plan of that
+                                        #   session is ~8 GB) and each chunk's Jacobians twice more after the
+                                        #   linearisation made them. Up to these GB they are KEPT (what does not fit
+                                        #   is made again): the same bits (tests/test_ba_torch_kept.py). 0 = the
+                                        #   record. To be set after the card's memory peak of F5 is measured.
       triangulation_device: cuda        # 2026-11-01 (USER "todo debe correr en GPU"): numpy (the path of record) |
                                         #   cpu | cuda — the batched multi-view DLTs of every triangulation of F5
                                         #   (the rungs' landmarks, the held-outs, the leave-one-view-out) and of
