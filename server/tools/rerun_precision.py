@@ -20,6 +20,13 @@ the server's config.yaml of today (each difference declared) — the rest stays 
 
     python -m tools.rerun_precision <scan dir>            what it would do, and whether it can (nothing is touched)
     python -m tools.rerun_precision <scan dir> --go       do it
+
+``--from <step>``: only that step and the ones after it run again, over what the earlier steps left (the chain's own
+``from_step``; USER 2026-11-20, the depth factor of F6: "harías solo F6 sobre la F2 y F5 que ya tenemos en la prueba
+pero cambiando la decisión de f6?" — yes: ``--from f6_bend``). The earlier steps must still be what the chain left
+(their stamps: inputs, code, configuration) — otherwise the chain itself starts where they differ, and says so.
+``--set a.b.c=value`` (repeatable): that key of the scan's frozen configuration for this run, declared in the log
+(a decision being tried on ONE session before config.yaml takes it).
 """
 from __future__ import annotations
 
@@ -82,6 +89,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m tools.rerun_precision")
     ap.add_argument("scan")
     ap.add_argument("--go", action="store_true")
+    ap.add_argument("--from", dest="from_step", default=None)
+    ap.add_argument("--set", dest="sets", action="append", default=[])
     a = ap.parse_args(argv)
     scan = Path(a.scan).resolve()
     out = scan / "output"
@@ -105,19 +114,47 @@ def main(argv=None) -> int:
         if was != now:
             _set(new, key, now)
             changed.append(f"{key}: {was!r} -> {now!r}")
-    say(f"{session}: the frozen configuration {sha[:12]}; taken from today's config.yaml: "
+    import yaml
+    for item in a.sets:
+        key, _, text = item.partition("=")
+        if not _ or not key.strip():
+            raise SystemExit(f"--set {item!r}: write it as a.b.c=value")
+        value = yaml.safe_load(text)
+        was = _get(new, key.strip())
+        _set(new, key.strip(), value)
+        changed.append(f"{key.strip()}: {was!r} -> {value!r} (--set, this run)")
+    say(f"{session}: the frozen configuration {sha[:12]}; changed for this run: "
         + ("; ".join(changed) if changed else "nothing (already the same)"))
     pcfg_new = load_precision_config(new, log=lambda *x: None)
     steps = [s for s in chain_steps(pcfg_new) if s.key != KEEP]
-    say("steps: " + " -> ".join(s.key for s in steps) + f"   (kept as it is: {KEEP})")
+    keys = [s.key for s in steps]
+    if a.from_step is not None and a.from_step not in keys:
+        raise SystemExit(f"--from {a.from_step!r}: not a step of this chain {keys}")
+    first = keys.index(a.from_step) if a.from_step is not None else 0
+    say("steps: " + " -> ".join(keys[first:]) + f"   (kept as they are: {', '.join([KEEP] + keys[:first])})")
 
     problems = []
     live, why = product_is_live(out)
     say(f"published cloud now: {why}")
-    for rel in ("precision/tracks.npz", "_restart_epochs/_epoch_0/camera_poses.txt", "camera_frames.txt",
-                "omega_run/results_output", "da3_windows/windows.json"):
+    needed = ["precision/tracks.npz", "camera_frames.txt", "omega_run/results_output"]
+    if any(k == "f2_gauge" for k in keys[first:]):
+        needed.append("da3_windows/windows.json")
+    for rel in needed:
         if not (out / rel).exists():
             problems.append(f"{rel} is not on disk")
+    # the way back to Omega's epoch 0: stashed after a published cloud, or already taken by an earlier attempt of
+    # this very re-run (a relaunch after a failure resumes where the chain stopped — its own resume rule)
+    from correction.epoch import current_epoch
+    if first == 0:
+        if not ((out / "_restart_epochs" / "_epoch_0").is_dir() or (out / "_epoch_0").is_dir() or int(current_epoch(out)) == 0):
+            problems.append("no way back to epoch 0 (neither _restart_epochs/_epoch_0 nor _epoch_0) and the scan is not in it")
+    else:
+        from precision.runner import load_state
+        done = [r.get("key") for r in (load_state(scan).get("done") or [])]
+        if done[:first] != keys[:first]:
+            problems.append(f"the chain's finished records {done} do not hold {keys[:first]} — nothing to run "
+                            f"'{a.from_step}' over")
+        say(f"the session is in epoch {int(current_epoch(out))}; the chain's finished records: {done}")
     n_kf = len((out / "camera_frames.txt").read_text().split()) if (out / "camera_frames.txt").exists() else 0
     n_rec = len(list((out / "omega_run/results_output").glob("frame_*.npz"))) if (out / "omega_run/results_output").exists() else 0
     if n_rec != n_kf:
@@ -140,8 +177,8 @@ def main(argv=None) -> int:
         say("dry run — nothing was touched (--go runs it)")
         return 0
 
-    acquire_engine_lease(JOB_PERMIT_OWNER, stage="precision chain again (F0, F2, F5, F6)", session=session,
-                         token="rerun-precision")
+    acquire_engine_lease(JOB_PERMIT_OWNER, stage="precision chain again (" + ", ".join(keys[first:]) + ")",
+                         session=session, token="rerun-precision")
     say("the card's lease is this process's until it ends")
     code = 1
     try:
@@ -161,7 +198,7 @@ def main(argv=None) -> int:
         pcfg = load_precision_config(session_dir=scan, log=say)
         assert [s.key for s in chain_steps(pcfg) if s.key != KEEP] == [s.key for s in steps]
         t0 = time.time()
-        rep = run_chain(scan, pcfg, steps=steps, log=say,
+        rep = run_chain(scan, pcfg, steps=steps, log=say, from_step=a.from_step,
                         before_gpu=lambda label: stop_semantic_service_verified(None, stage=f"precision {label}", log=say))
         say(f"core done in {(time.time() - t0) / 60:.1f} min — the published cloud (cloud.source {pcfg.cloud.source}) "
             f"is epoch {rep['epoch']} (configuration {fr['sha256'][:12]})")

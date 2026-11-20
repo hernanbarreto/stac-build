@@ -217,7 +217,11 @@ def test_the_key_is_typed():
     import yaml
     from precision.config import load_precision_config
     raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
-    assert load_precision_config(raw).cloud.vote_batch == 0, "declared, at the record's value"
+    # switched on 2026-11-20 (USER: "regla siempre una vez probadas se aplican todas las mejoras"): 32 witnesses at a
+    # time on the card — every published depth and support map bit for bit the record's (vote_card.py, real maps)
+    assert load_precision_config(raw).cloud.vote_batch == 32, "declared, switched on"
+    del raw["reconstruction"]["precision"]["cloud"]["vote_batch"]
+    assert load_precision_config(raw).cloud.vote_batch == 0, "absent (a session frozen before the key) = the record"
     for bad in (-1, True, 2.5, "8"):
         raw["reconstruction"]["precision"]["cloud"]["vote_batch"] = bad
         with pytest.raises(ValueError, match="vote_batch"):

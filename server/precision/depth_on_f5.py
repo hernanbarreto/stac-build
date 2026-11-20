@@ -168,6 +168,68 @@ def disabled_bend(n: int):
     return None, rule, coefs, prov
 
 
+BEND_SCOPES = ("keyframe", "session")
+
+
+def bend_scope(raw_cfg) -> str:
+    """``reconstruction.precision.bend.scope`` — WHO DECIDES THE DEPTH FACTOR (USER 2026-11-20, shown that the factor
+    decided keyframe by keyframe was the cause of the displaced copies of pccr 2026-08-24: "si" to one factor for the
+    session, F6 alone over the F2 and F5 the session has).
+
+      keyframe   THE RECORD (absent = this): each keyframe's k = c0 + c1·u + c2·v fitted on the landmarks of its own
+                 window (``bend.windows``), verified on its held-out rows.
+      session    ONE factor for the whole session: c0 fitted once on every landmark row of the session (the same
+                 robust fit, the window = the whole walk), c1 = c2 = 0, the same for every keyframe.
+
+    Why one: the factor makes Omega's depth agree with the scale of F5's cameras, and that is a property of the
+    SESSION. Decided per keyframe it follows every local accident of F5 — pccr 2026-08-24 (2772 keyframes): c0 from
+    0.10 to 2.18, 44 keyframes under 0.80 and 72 over 1.05, all 'verified' (the held-out rows are landmarks of the
+    same F5); x0.87 on the stretch around a door where F5 shortened the camera steps, which published a cabinet seen
+    from 5.9 m half a metre short of the same cabinet seen from 1 m. MEASURED on that session with the floor tiles as
+    a ruler (their joints drawn by two different passes over the same floor): 3.4 cm apart at the median with the
+    factor per keyframe, 1.7 cm with one factor; the displaced copy falls 1.9 cm from its surface (16.5 cm before).
+
+    The key is read HERE, not in precision/config.py: that file is in every step's code stamp, and declaring the key
+    there would run F2 and F5 again on a session whose F2 and F5 are being kept. An unknown value fails naming it."""
+    sec = (((raw_cfg or {}).get("reconstruction") or {}).get("precision") or {}).get("bend") or {}
+    v = sec.get("scope", "keyframe")
+    if v not in BEND_SCOPES:
+        raise DepthOnF5Error(f"'reconstruction.precision.bend.scope' {v!r}: one of {list(BEND_SCOPES)}")
+    return str(v)
+
+
+def session_bend(rows: Dict[int, tuple], n: int, huber_k: float, iterations: int,
+                 keyframe_coefs: Dict[int, np.ndarray], keyframe_provenance: Dict[int, dict]):
+    """``bend.scope: session`` — ONE depth factor for the whole session (see :func:`bend_scope`): c0 = the robust fit
+    (`irls_huber_fit`, the bend's own) of the constant model on EVERY landmark row of the session; every keyframe
+    takes it, c1 = c2 = 0. ``keyframe_coefs`` / ``keyframe_provenance``: what the per-keyframe decision gave — kept in
+    each keyframe's record (``keyframe_c0``, ``keyframe_status``) and summarised in the returned info, so the report
+    says what the record WOULD have applied. Returns (coefs, provenance, info)."""
+    r = [rows[i][1] for i in range(n) if i in rows and len(rows[i][1])]
+    if not r:
+        raise DepthOnF5Error("no landmark row on Omega's depth in the whole session — its depth factor cannot be "
+                             "measured (bend.scope: session)")
+    rr = np.concatenate(r)
+    c, sig = irls_huber_fit(np.ones((len(rr), 1)), rr, huber_k, iterations)
+    c0 = float(c[0])
+    if not np.isfinite(c0) or c0 <= 0:
+        raise DepthOnF5Error(f"the session's depth factor came out {c0!r} from {len(rr):,} landmark rows")
+    kc = np.array([float(keyframe_coefs[i][0]) for i in range(n)])
+    info = {"c0": c0, "sigma_c0": float(sig[0]), "rows": int(len(rr)), "keyframes_with_rows": int(len(r)),
+            "median_of_the_rows": float(np.median(rr)),
+            "per_keyframe_would_apply": {"median": float(np.median(kc)), "p05": float(np.percentile(kc, 5)),
+                                         "p95": float(np.percentile(kc, 95)), "min": float(kc.min()),
+                                         "max": float(kc.max()),
+                                         "largest_consecutive_jump": float(np.abs(np.diff(kc)).max()) if n > 1 else 0.0}}
+    why = (f"bend.scope: session — one depth factor for the whole session, c0 {c0:.6f} fitted on {len(rr):,} landmark "
+           f"rows of {len(r)} keyframes")
+    coefs = {i: np.array([c0, 0.0, 0.0]) for i in range(n)}
+    prov = {i: {"status": "session", "window": None, "fit": None, "reason": why,
+                "keyframe_c0": float(kc[i]), "keyframe_status": keyframe_provenance[i].get("status")}
+            for i in range(n)}
+    return coefs, prov, info
+
+
 def bend_coefficients(rows: Dict[int, tuple], n: int, window: int, min_rows: int, huber_k: float,
                       iterations: int, error_factor: float) -> Tuple[Dict[int, np.ndarray], Dict[int, dict]]:
     """({i: (c0, c1, c2)}, {i: info}) — each keyframe fitted on the rows of i−w … i+w with the judged
@@ -1366,6 +1428,19 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         final_coefs, provenance = verify_keyframes(bc.windows, wb, coefs, infos, rows_A, N, W, H, fac,
                                                    bc.heldout_confidence, bc.bootstrap, bc.seed, bc.min_rows,
                                                    device=bend_dev)
+        if bend_scope(raw_cfg) == "session":
+            # ONE factor for the whole session (USER 2026-11-20); the per-keyframe decision above is still made
+            # and judged — its numbers stay in the report as what the record would have applied
+            final_coefs, provenance, session_info = session_bend(rows, N, gc.huber_k, bc.irls_iterations,
+                                                                 final_coefs, provenance)
+            window_rule = dict(window_rule, scope="session", session=session_info)
+            pk = session_info["per_keyframe_would_apply"]
+            log(f"{LOG_TAG} bend.scope: session — ONE depth factor for every keyframe: c0 {session_info['c0']:.5f} "
+                f"(± {session_info['sigma_c0']:.5f}) on {session_info['rows']:,} landmark rows of "
+                f"{session_info['keyframes_with_rows']} keyframes (their plain median {session_info['median_of_the_rows']:.5f}); "
+                f"keyframe by keyframe the record would have applied median {pk['median']:.4f}, 5-95 % "
+                f"{pk['p05']:.4f} / {pk['p95']:.4f}, min {pk['min']:.4f}, max {pk['max']:.4f}, largest jump between "
+                f"consecutive keyframes {pk['largest_consecutive_jump']:.3f}")
     else:
         wb, window_rule, final_coefs, provenance = disabled_bend(N)
         log(f"{LOG_TAG} bend.enabled: false — Omega's depth stands (k = 1) on F5's poses for every keyframe")

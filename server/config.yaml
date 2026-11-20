@@ -3057,6 +3057,17 @@ reconstruction:
     bend:                               # USER 2026-10-01 — the depth on F5 (precision/depth_on_f5.py)
       enabled: true                     # false = no per-keyframe bend, Omega's depth stands (k = 1) on F5's poses
                                         #   (the evaluation battery's variant "sin F6"). NEVER change in production
+      scope: keyframe                   # WHO DECIDES THE DEPTH FACTOR c0 (precision.depth_on_f5.bend_scope; read by F6
+                                        #   itself, not by precision/config.py — that file is in every step's stamp):
+                                        #   keyframe = THE RECORD, one fit per keyframe on its own window (windows:);
+                                        #   session  = ONE factor for the whole session (the same robust fit on every
+                                        #   landmark row of the walk), c1 = c2 = 0.
+                                        #   USER 2026-11-20: "si" to trying `session` on the copy of pccr 2026-08-24
+                                        #   (F6 alone over its F2 and F5). MEASURED there: per keyframe c0 ran from 0.10
+                                        #   to 2.18 and x0.87 on the stretch around a door — a cabinet seen from 5.9 m
+                                        #   published half a metre short of itself seen from 1 m; with one factor the
+                                        #   floor tiles' joints of two passes agree to 1.7 cm (3.4 cm per keyframe).
+                                        #   THIS VALUE CHANGES TO `session` ON HIS EYE ON THAT COPY — one session first.
       windows: [0, 1, 2, 4, 8]          # BOUND (search): ± keyframes pooled per bend; the HELD-OUT tracks choose
                                         #   (pccr: ±0, held-out |dz|/z 7.25 % unbent → 2.80 %)
       neighbors: [-12, -6, -3, 3, 6, 12]  # keyframe offsets that vote on each pixel (same as the repair)

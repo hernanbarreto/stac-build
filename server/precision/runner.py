@@ -149,8 +149,12 @@ STEPS: List[Step] = [
                                "output/precision/witness_poses.txt", "output/precision/witness_frames.txt",
                                "intake/cubes.json"),
          writes=("output/cleaned_cloud.ply", "output/intrinsic.txt", "output/precision/depth_on_f5.json"),
-         config=("bend", "depth", "cloud", "mono_detail", "gauge", "refine", "camera",
-                 "raw:reconstruction.simple", "raw:postprocessing")),
+         # raw:reconstruction.precision.bend AFTER "bend": the section as the job's configuration holds it takes the
+         # typed section's place in the stamp — it is the same keys plus ``scope`` (depth_on_f5.bend_scope: one
+         # depth factor per keyframe or one for the session), which F6 reads from the raw section so that
+         # declaring it does not enter F2's and F5's code stamps (precision/config.py is in every step's)
+         config=("bend", "raw:reconstruction.precision.bend", "depth", "cloud", "mono_detail", "gauge", "refine",
+                 "camera", "raw:reconstruction.simple", "raw:postprocessing")),
     Step("f6_sweep", "F6 native depth sweep", "da3", "precision.depth_sweep", gpu=True,
          reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json"),
          writes=("output/precision/depth_sweep.json",), config=("depth", "camera", "refine")),
