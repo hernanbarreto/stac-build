@@ -1397,6 +1397,14 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     – harness flake seen once: the `bare` state's click that closes the left panel can race (pc1920).
     – left small on touch (polish, not done): the brush's shape buttons 32 × 30, a table header's sort text
       (19 px high), the readout pins (20 px).
+  · ⭐ ON AN UPRIGHT SCREEN THE RIGHT PANEL COMES UP FROM THE BOTTOM — HIS IDEA (USER 2026-11-20, looking at
+    the phone stage: "en telefono y tal vez en tablet el agente debe aparecer desde abajo no?"), on his page
+    since 06:42 UTC (97491ae; styles only, no reload), WAITING FOR HIS EYE. layout.css `@media (max-width:
+    1279px) and (orientation: portrait)`: the inspector (Assistant | Properties) is a SHEET over the lower
+    55 % of the viewer's cell (`--sheet-frac`), full width (beside an open left panel where both fit); the
+    viewer's toolbar wrapper and bottom line stop above it (`--ov-bottom-frac`). The assistant's choice, told
+    to him: a screen WIDER than tall (a tablet or a phone on its side) keeps the panel at the right — there it
+    is height that is short. Its hide button is still the right-panel icon; no drag to resize the sheet.
   · STILL TO DO: stage 4 (the viewer by touch: the brush's marks — a right click today —, the section box's
     handles, cancelling one measurement, the names of the toolbar's icons; the phone's rendering defaults —
     pixel ratio, point budget — are HIS decision), and HIS EYE on a real tablet and phone through the fixed
