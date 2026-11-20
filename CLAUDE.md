@@ -98,6 +98,28 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   that reference.
 
 ## 2 · HOW TO WORK WITH HIM (hard-earned — each line cost him time or money)
+- ⭐⭐⭐ PRIORITY ONE — HIS ORDER, FOR THIS SESSION AND EVERY ONE AFTER IT (USER 2026-11-20, 03:10 CDMX): "Prioridad
+  uno y grábatelo porque no lo quiero repetir y vos ni las sesiones que sigan. Si yo hablo la prioridad es
+  contestarme a mí." WHAT IT COST HIM THAT NIGHT: he wrote that he was going to sleep at 07:34 UTC (01:34 his
+  time); the assistant read it at 08:30 — it was inside a chain of tool calls an hour long — and went on in long
+  chains; more than 400 messages of his ("Contestame", "Detené todo", his whole order pasted again and again:
+  "Como no me lees otra vez vuelvo a mandarte el mensaje" / "Tenes que leerme. No sé cómo más pedirtelo") arrived
+  in batches, late; at 03:10 he was still awake ("Te das cuenta?"). THE RULES:
+  · HIS MESSAGES ARE NOT SEEN WHILE A TOOL CALL RUNS — they arrive together when it ends. So: NO CHAINS. One short
+    call, then stop and read. Whatever takes more than about a minute runs in the BACKGROUND and the turn ENDS, so
+    that he can speak and be answered. A turn that does not end is a wall to him.
+  · A MESSAGE OF HIS IS ANSWERED FIRST, in a few plain lines, before any tool call, and only what he asked. A
+    "status line" of the work is not an answer. He does not read long messages ("No te leí ni te voy a leer nada
+    de lo que pusiste").
+  · WHEN HE GIVES AN ORDER IT IS CARRIED OUT — not asked again ("Dije que si no me hagas que te pida las cosas 50
+    veces"); "detené todo" / "pará todo" = stop and answer; his standing order still stands once he is answered.
+  · When he is worn out or upset, the work stops and HE is attended first; the work waits.
+- ⭐ A FIX THAT IS TESTED IS APPLIED — NO EXCEPTIONS (USER 2026-11-20: "de qué sirve que hagas las correcciones si no
+  las aplicas regla siempre una vez probadas se aplican todas las mejoras [sin] excepciones" / "Estuviste toda la
+  puta tarde mejorando tiempos?, no aplicaste nada, detectaste que f2 rompe, no aplicaste la corrección" / "no
+  hagas las cosas a medias"): an improvement or a correction that passed its test is merged into the program AND
+  switched on, in the same block of work — never left in a side copy, never "prepared, off by default" waiting
+  for a question. What cannot be tested yet is said in one line with what it needs.
 - NO DECISION WITHOUT HIS OK (2026-10-04): not a config default, not a UI default, not a repair on his session — one
   line, wait for the OK. Carrying out an order he gave is not a decision; widening it is.
 - "detené todo" / "detenete": stop every tool call NOW, kill what he names, confirm with the process list, answer in
