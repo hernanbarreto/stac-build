@@ -120,6 +120,15 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   hagas las cosas a medias"): an improvement or a correction that passed its test is merged into the program AND
   switched on, in the same block of work — never left in a side copy, never "prepared, off by default" waiting
   for a question. What cannot be tested yet is said in one line with what it needs.
+- ⭐ A DEFECT IS TRACED BEFORE A CAUSE IS NAMED (USER 2026-11-20, after an afternoon of hypotheses that each turned
+  out wrong: "si no sabes siquiera de que kf provienen los sectores que tiene probelma, como estas planteando y
+  buscando soluciones?" / "no inventes nada" / "estás cambiando de rumbo con cada mensaje que yo te mando … Vamos a
+  parar la pelota y empieza a hacer un análisis serio en serio" / "te dije analiza y me traes este mamarracho de
+  reporte"): first WHICH keyframes, passes and cubes publish it and from how far; then every stage measured with ONE
+  fixed method (a physical reference of the scene when there is one — the floor tiles of pccr), the known defects
+  re-placed on their own pixels under each stage; the UNITS of every stored product checked against that stage's
+  cameras before two stages are compared. No cause, no fix, no "¿sigo?" before that; the result is brought whole;
+  an unverified claim is said as unverified, and a wrong one is retracted in plain words.
 - NO DECISION WITHOUT HIS OK (2026-10-04): not a config default, not a UI default, not a repair on his session — one
   line, wait for the OK. Carrying out an order he gave is not a decision; widening it is.
 - "detené todo" / "detenete": stop every tool call NOW, kill what he names, confirm with the process list, answer in
@@ -904,6 +913,74 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
+- ⭐⭐⭐⭐⭐ WHAT UN-DOES THE GRAPH TODAY IS F6'S DEPTH FACTOR DECIDED PER KEYFRAME — FOUND WITH THE FLOOR TILES AS A
+  RULER; F6 WITH ONE FACTOR IS RUNNING ON THE COPY (2026-11-20 17:08 UTC; RESUME HERE FIRST — the F2 block below is
+  its background: the old F2 was harmful and is gone, the copy was relaunched with one scale and STILL had displaced
+  copies). The audit of every step: `docs/pipeline_audit_2026-11-20.md`.
+  · THE RELAUNCH (one scale x0.9825; cubes and F4 reused; tools/rerun_precision): F2 35 min, F5 110 min (R2 applied,
+    held-out 0.6131 px, cameras moved <= 15.3 cm), F6 127 min, epoch 6, 112,404,867 points. Then `bufferStop_prueba`
+    (cloud only by his order; 3,919,659 points; its job cancelled during SAM3 on his "detene el sam3" — an order to
+    /api/pipeline/run WITHOUT `"segment": []` segments every scan).
+  · HIS EYE ON IT: "siguen algo desplazados" / "una placa ahi flotando en el medio" / "ademas hay como un
+    desplazamiento lateral" / "en la de pccr original, no esta esa lamina … si que esta mas separado por ej los racks,
+    pero no estan desplazados" / "evidentemente hay correcciones que no se estan haciendo". Then, on the assistant's
+    hypotheses, each wrong (scale per stretch held by the closures; per-cube scale priors in the graph; "the far depth
+    is 10 % short"; "the vote's 30° limit silences 103 witnesses" — said without verifying, false): "busca de que
+    frames se genra esa placa" / "si no sabes siquiera de que kf provienen los sectores que tiene probelma, como estas
+    planteando y buscando soluciones?" / "no inventes nada" / "estás cambiando de rumbo con cada mensaje que yo te
+    mando. Eso quiere decir que no tenes idea donde mirar. Vamos a parar la pelota y empieza a hacer un análisis
+    serio en serio" (the rule it left: §2).
+  · THE PLATE: the front of the white cabinet of video frame 1328, published by 30 keyframes of video 3304–3333 and
+    3484–3540 (cubes 38–40) that saw it from 5.9 m, 45 cm from the same cabinet as the near pass (video 216–1663,
+    1 m) published it.
+  · THE RULER (scratchpad dl/serio/, read only): the raised floor's tiles — each keyframe's own tile size (its depth's
+    scale: 0.2–1.1 % per stretch), the same joints drawn by two keyframes a step apart (depth against camera steps),
+    by two different passes over the same floor, whether tiles are square (the camera model). THE UNITS, checked on
+    the cameras: the Omega records are in the cubes' units BEFORE scale_align; epoch 0 = x0.97158, epoch 4 = x0.95456
+    (x F2's 0.98248), F5's cameras x0.95392 — the assistant first compared them without that factor (a 3 % error in
+    every "one scale alone" figure of that afternoon, corrected before the audit was delivered).
+  · MEASURED, stage by stage (joints between different passes, median | the plate to its surface | the rack front to
+    rear): seams alone 3.7 cm | 54.5 cm | 1.67 m · + the graph's closures 3.2 | 0.9 | 0.79 · + F2 one scale 3.2 |
+    0.9 | 0.78 · (the OLD F2 instead: 6.4 | 6.5 | 1.49; tile spread 8 → 31 %) · + F5's camera model and cameras 1.5 |
+    2.9 | 0.88 · + F6's factor per keyframe = published 3.4 | 45.4 | 1.02 · F6 with ONE factor 1.4 | 4.0 | 0.92.
+    AFTER THE CUBE GRAPH BOTH KNOWN PIECES ARE RIGHT; F6's per-keyframe factor un-does it.
+  · THE MECHANISM: F6's bend multiplies each keyframe's Omega depth by k = c0 (+ c1, c2) fitted on F5's landmarks of
+    its window (±4 chosen; the held-out error is 3.01–3.04 % for EVERY window: the rule has nothing to choose with).
+    c0 per keyframe on this session: median 0.9500, from 0.10 to 2.18 (44 keyframes under 0.80, 72 over 1.05, all
+    "verified" — on landmarks of the same F5). F5 shortens the camera path where the images carry no information
+    (x0.75 through door 1, x0.80 over video 3400–3766 = door 2, x0.87 at the dark turn) and the factor follows: x0.87
+    on the plate's keyframes, x0.89 on the rack's rear pass — everything those keyframes see is pulled towards the
+    camera in proportion to its distance. Putting those keyframes back to the typical factor ON THE PUBLISHED CLOUD
+    puts the plate 1.9 cm from the cabinet (16.5 cm) and lines the rack's side up.
+  · AS A SCALE THE FACTOR ADDS NOTHING: the depth at the scale the cameras already carry (x0.9546) reads 1.5 cm
+    between passes, one fitted factor 1.4 cm; the tiles accept anything from x0.9477 to x0.9546.
+  · UNDER TEST (USER: "Harías solo F6 sobre la F2 y F5 que ya tenemos en la prueba pero cambiando la decisión de
+    f6?" / "Si, si mejora este f6 corregimos f5"): `reconstruction.precision.bend.scope: keyframe | session`
+    (e0d5387; read by F6 itself — precision/config.py is in every step's code stamp, declaring it there would run F2
+    and F5 again; the raw bend section enters F6's stamp). `python -m tools.rerun_precision <scan> --from f6_bend
+    --set reconstruction.precision.bend.scope=session --go`, launched 17:08 UTC: the chain kept F0, F2, F5 (pre-flight
+    with the chain's own resume rule), F6's first checkpoint 17:24: ONE factor c0 0.94828 on 97,243,153 landmark rows
+    for the 2772 keyframes; held-out half B 3.54 % (3.01 % per keyframe — against F5's own landmarks). It replaces the
+    copy's cloud (~19:15 UTC). config.yaml keeps `scope: keyframe` UNTIL HIS EYE ON THE COPY (one session first).
+  · THE AUDIT HE ORDERED ("quiero una auditoría correcta y completa de que todos los pasos quedan coherentes que un
+    paso no rompe lo que corrigió el anterior que realmente los pasos agregan valor coherencia y necesidad absoluta
+    … Cada cálculo cada paso que damos en el proceso de reconstrucción debe ser necesario y coherente"), delivered
+    17:22 UTC (b6303d4). VERDICTS: the graph's closures = the step that adds the most; F2 one scale = a second
+    estimate of the metre, moves no ruler (REDUNDANT); the old F2 HARMFUL; F4 + F5 = 7.5 of the chain's 11.5 h, they
+    bring 3.2 → 1.5 cm between passes and the camera model (tiles 3.4 % → 1.5 % off) and cost the far piece 0.9 →
+    2.9 cm; F6's factor per keyframe HARMFUL, as a scale REDUNDANT; the vote necessary but no safety net (no witness
+    sees through the plate at any angle); PointDiT (55 min, 20.7 M of the 112.4 M points) NOT JUDGED by these rulers;
+    the DA3 lock per cube redundant; WRITTEN AND READ BY NOTHING: precision/layer_mono_detail.glb and
+    layer_mixed_unresolved.glb, precision/refine_residuals.npz, maplong_run/uncert/, depth_graph.json (verdict SKIP
+    on six sessions), omega_probe.json; the scale is decided five times, two are needed.
+  · HIS DECISIONS PENDING (asked, none taken): his eye on the copy's new cloud; then F5 (hold its camera steps where
+    it has no information); which redundant / unused steps go; the 566 bridges over 6 m (42 min of card); THE REAL
+    SIZE OF A TILE of that floor (published it reads 0.585 m — with 600 or 609.6 mm the cloud is 2.5–4 % small).
+  · NOT EXPLAINED / NOT SOLVED: nothing ties the two sides of the rack (no valid closure between the cubes that saw
+    its front and those that saw its rear: 0.78 m at the cube stage, its real depth unknown); the cubes' slow scale
+    drift along the walk (the tile from 0.63 to 0.59 m in cube depth).
+  · OWED BY THE ASSISTANT: the fix of F5's phase / card-memory record (precision.refine imported twice when it runs
+    as __main__ — a small shared module; NOT while a run is alive); the two stale tests of test_refine_judge.py.
 - ⭐⭐⭐⭐ THE COPY'S CLOUD IS PUBLISHED, AND THE STAGE THAT RE-OPENS WHAT THE GRAPH CLOSED IS FOUND: F2, THE GAUGE
   (2026-11-20 08:08 UTC; RESUME HERE FIRST — the study below is its background). TOLD TO HIM 08:17 UTC WITH THE
   QUESTION "¿la lanzo?" (the test below): HIS ANSWER AND HIS EYE ON THE COPY'S CLOUD ARE PENDING. Nothing of the
