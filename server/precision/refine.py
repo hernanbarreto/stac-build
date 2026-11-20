@@ -89,6 +89,31 @@ LOG_TAG = "[refine]"
 LADDER = ("R0", "R1", "R2")
 
 
+# ── THE CPU AROUND THE SOLVES, MEASURED (2026-11-20: on pccr 2026-08-24's copy the card sat idle 20.9 of F5's
+#    75.3 minutes, and 22.6 of them lay outside every measured phase). ``lap(name)`` gives the wall time since the
+#    previous lap to ``name`` (summed over a run): F5 is one thread walking through these phases, so the laps
+#    PARTITION its time. Written to refine.timing.json ("phases") — the wall clock's own file, outside every
+#    compared artifact; nothing reads it back.
+_PHASES: Dict[str, float] = {}
+_LAP = [time.perf_counter()]
+LAP_TAG = [""]                 # "" while a rung's own solve runs, "+" during its continuation solve
+
+
+def lap(name: str) -> None:
+    now = time.perf_counter()
+    _PHASES[name] = _PHASES.get(name, 0.0) + (now - _LAP[0])
+    _LAP[0] = now
+
+
+def laps(reset: bool = False) -> Dict[str, float]:
+    """The phases measured so far, seconds (``reset``: and start again from now)."""
+    out = {k: round(v, 1) for k, v in _PHASES.items()}
+    if reset:
+        _PHASES.clear()
+        _LAP[0] = time.perf_counter()
+    return out
+
+
 class RefineError(RuntimeError):
     """A structural impossibility of the stage — always with the exact reason."""
 
@@ -803,14 +828,20 @@ def _rung_and_continuation(name: str, start: RungResult, wh, fit_g, held_g, sig,
                            prior_w2c: np.ndarray, log: Callable, **kw):
     """One rung from ``start``'s solution, then the continuation solve from the rung's own end
     state (point 59). Returns (rung, its held-out, its dropped ledger, continuation, solver error)."""
+    LAP_TAG[0] = ""
     r = run_rung(name, start.w2c, start.params_by_block[0], wh, fit_g, start.X, sig, cfg,
                  prior_w2c=prior_w2c, **kw)
+    lap(f"{name}.result")
+    LAP_TAG[0] = "+"
     cont = run_rung(name, r.w2c, r.params_by_block[0], wh, fit_g, r.X, sig, cfg,
                     prior_w2c=prior_w2c,
                     **({**kw, "params_by_block0": r.params_by_block} if "block_of" in kw else kw))
+    lap(f"{name}+.result")
+    LAP_TAG[0] = ""
     held_r, dropped = _heldout_of(r, held_g, solver, cfg)
     held_c, _ = _heldout_of(cont, held_g, solver, cfg)
     err = solver_error(held_r, held_c)
+    lap(f"{name}.heldout")
     log(f"{LOG_TAG} {name}: Ceres cost {r.initial_cost:.6g} → {r.final_cost:.6g} in {r.iterations} "
         f"step(s); continuation → {cont.final_cost:.6g} in {cont.iterations}; solver error on the "
         f"held-out {err['error']:.3g} px (median |Δ| over {err['n_tracks']} tracks; signed "
@@ -861,16 +892,20 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     if not (np.isfinite(fac) and fac > 0.0):
         raise RefineError(f"error_factor {error_factor!r} must be finite and > 0 "
                           f"(correction_graph.graph.improvement_error_factor)")
+    lap("before_range")
     if range_m and range_m > 0:
         keep = within_range(track, frame, uv, kf_frames, w2c0, params0, solver, cfg.min_tri_deg, range_m)
         log(f"{LOG_TAG} range {range_m:g} m (reconstruction.view_range_m): {int((~keep).sum()):,} of {len(keep):,} "
             f"observation(s) of a landmark farther than it from their keyframe left out of the fit and the held-out")
         track, frame, uv, split = track[keep], frame[keep], uv[keep], split[keep]
+    lap("range")
     # the arrays only (TrackGroups.listed): every F5 reader takes them; the lists were 66 GB on pccr 2026-08-24
     fit_g = group_tracks(track[split == 0], frame[split == 0], uv[split == 0], kf_frames, lists=False)
     held_g = group_tracks(track[split == 1], frame[split == 1], uv[split == 1], kf_frames, lists=False)
+    lap("groups")
     dropped_fit: dict = {"tracks": 0, "observations": 0}
     X0 = triangulate_tracks(fit_g, w2c0, params0, solver, cfg.min_tri_deg, dropped=dropped_fit)
+    lap("triangulate_start")
     if len(X0) < 3:
         raise RefineError(f"{len(X0)} fit track(s) triangulate at ≥ {cfg.min_tri_deg:g}° — "
                           f"nothing to refine against")
@@ -879,7 +914,9 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
     base = RungResult("init", w2c0, [list(params0)], np.zeros(len(w2c0), int), float("nan"), 0, "",
                       X=X0)
     held: Dict[str, Dict[int, float]] = {}
+    lap("clusters")
     held["init"], dropped_init = _heldout_of(base, held_g, solver, cfg)
+    lap("heldout_start")
     if not solve:
         log(f"{LOG_TAG} refine.enabled: false — no rung solved; the initial poses and camera stand "
             f"(held-out median {np.median(list(held['init'].values())) if held['init'] else float('nan'):.3f} px "
@@ -945,6 +982,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                        {"improves": False, "worsens": False, "n_tracks": 0,
                         "reason": "no held-out track common to both states — nothing to judge"})
             take = bool(verdict["improves"])
+            lap(f"{name}.judge")
         rep.update({"verdict_vs_best": verdict, "taken": take})
         rungs[name] = rep
         parent = r
@@ -1235,11 +1273,14 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                           f"disagree")
     w2c0 = np.linalg.inv(poses)
     use_device(cfg.triangulation_device)                 # every DLT of this stage on the declared device
+    lap("setup")
     _t_load = time.perf_counter()
     tr = load_tracks_v2(session_dir, threads=pcfg.tracks.npz_threads)
     _phase = {"load_tracks_s": round(time.perf_counter() - _t_load, 1)}
+    lap("load_tracks")
     tid = tr["track_query_id"]
     split_obs = split_of_observations(tid, tr["track_split"], tr["obs_track"])
+    lap("split")
     sigma_rel, inst = _gauge_sigma(out)
     log(f"{LOG_TAG} {len(kf)} keyframes, {len(tid):,} tracks, gauge σ {sigma_rel:.4f} ({inst})")
     from precision.config import raw_of
@@ -1249,10 +1290,12 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
                        error_factor=fac, log=log, solve=bool(cfg.enabled), range_m=float(pcfg.view_range_m))
     best = core["best"]
+    lap("ladder_end")
     _t = time.perf_counter()
     bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,
                                                      max_px=float(np.hypot(cam.width, cam.height))), cfg)
     _phase["heldout_leave_one_view_out_s"] = round(time.perf_counter() - _t, 1)
+    lap("heldout_leave_one_view_out")
     wit = sorted(set(tr["obs_frame"][tr["frame_kind"] == KIND_WITNESS].tolist()) - set(kf))
     # the witnesses localise against the landmarks AS THE BEST RUNG SOLVED THEM (in its world,
     # with its camera) — not against X0, triangulated from the initial poses with F0's camera
@@ -1260,6 +1303,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     wloc = localize_witnesses(best, core["X"], tr["obs_track"], tr["obs_frame"],
                               tr["obs_uv_native"], wit, (cam.width, cam.height), bound, cfg)
     _phase["witnesses_s"] = round(time.perf_counter() - _t, 1)
+    lap("witnesses")
     core["timing"].update(_phase)                       # refine.timing.json: the CPU around the solves, measured
     log(f"{LOG_TAG} phases: " + ", ".join(f"{k} {v}" for k, v in _phase.items()))
     pdir = out / "precision"
@@ -1300,8 +1344,9 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                          "rms_px": {str(f): r.get("rms_px") for f, r in wloc.items()}},
            "applied": False}
     # the solver's wall clock, outside the compared artifact (point 36)
-    (pdir / TIMING_NAME).write_text(json.dumps({"stage": "refine", "ceres_seconds": core["timing"]},
-                                               indent=1, default=float))
+    lap("report")
+    (pdir / TIMING_NAME).write_text(json.dumps({"stage": "refine", "ceres_seconds": core["timing"],
+                                                "phases": laps()}, indent=1, default=float))
     np.savez_compressed(pdir / RESIDUALS_NAME,
                         heldout_track=np.array(list(core["held"][best.name].keys()), np.int64),
                         heldout_rms_px=np.array(list(core["held"][best.name].values()), np.float32),

@@ -1006,7 +1006,11 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     # the same keyframe keeps its LAST observation there and a track left with one image is skipped
     # (measured 2026-11-01 on pccr's main tracks: without this rule two same-image observations
     # triangulated at the camera put one residual of 7e11 px into the problem and the solve stalled)
+    from precision.refine import LAP_TAG, lap           # the CPU around the solve, measured (refine.timing.json)
+    tag = f"{name}{LAP_TAG[0]}"
+    lap(f"{tag}.before")
     tracks, cam_idx, pt_idx, uv, X0 = problem_inputs(fit_groups, X_start, N)
+    lap(f"{tag}.inputs")
     if not len(tracks):
         raise RefineError(f"refine {name}: no landmark with two observations reached the problem ({len(X_start):,} "
                           f"landmark(s) to start from) — a bundle adjustment of the priors alone is no solve")
@@ -1047,6 +1051,7 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
             raise RefineError(f"refine {name}: every one of the {n_rep0:,} observation(s) projects off the raster or "
                               f"behind its camera at the start — nothing to solve")
     del probe
+    lap(f"{tag}.probe")
     n_rep = int(len(uv))
     prior_w2c = w2c_start if prior_w2c is None else np.asarray(prior_w2c, np.float64)
     if prior_w2c.shape != np.asarray(w2c_start).shape:
@@ -1057,7 +1062,9 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     n_prior = N
     if log is None and os.environ.get("STAC_BA_TORCH_TRACE"):
         log = lambda m: print(f"[ba_torch {name}] {m}", flush=True)       # noqa: E731
+    lap(f"{tag}.problem")
     summary = solve(prob, int(cfg.max_iterations), log=log)
+    lap(f"{tag}.solve")
     if log:
         log(f"{summary['termination_type']}: cost {summary['initial_cost']:.6e} → {summary['final_cost']:.6e}, "
             f"{summary['num_successful_steps']} accepted / {summary['num_unsuccessful_steps']} rejected step(s), "

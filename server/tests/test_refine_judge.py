@@ -163,3 +163,24 @@ def test_witness_poses_are_written_round_trip_exact():
     src = inspect.getsource(R.run_refine)
     assert "write_poses_exact" in src and ".10g" not in src
     assert "improvement_error_factor" in src and "TIMING_NAME" in src
+
+
+def test_the_phases_around_the_solves_are_measured_and_partition_the_run():
+    """`precision.refine.lap` (2026-11-20: the card idle 20.9 of F5's 75.3 minutes on pccr 2026-08-24's copy): every
+    phase around the solves has its wall time, a rung's solve apart from its continuation's ("+"), and the laps add
+    up to the time the ladder took — nothing of it is outside a named phase."""
+    import time
+    w2c0, init, track, frame, uv, split, kf = _problem()
+    R.laps(reset=True)
+    t = time.perf_counter()
+    R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, 0.01, CFG, SOLVER, error_factor=FAC, log=QUIET,
+                  range_m=15.0)
+    took = time.perf_counter() - t
+    ph = R.laps()
+    for k in ("range", "groups", "triangulate_start", "clusters", "heldout_start", "R0.inputs", "R0.probe",
+              "R0.problem", "R0.solve", "R0.result", "R0+.solve", "R0+.result", "R0.heldout", "R1.solve", "R1.judge",
+              "R2+.solve", "R2.judge"):
+        assert k in ph, k
+    assert all(v >= 0 for v in ph.values())
+    assert abs(sum(ph.values()) - took) < 0.05 * took + 1.0, (sum(ph.values()), took)
+    assert R.laps(reset=True) and R.laps() == {}
