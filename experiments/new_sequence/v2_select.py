@@ -104,7 +104,7 @@ class Overlap:
             tot = sum(wr for _, wr in parts)
             self._own[i] = [(P, wr / tot) for P, wr in parts]
             if len(self._own) > 4 * BATCH:
-                for k in sorted(self._own)[:-2 * BATCH]:
+                for k in list(self._own)[:-2 * BATCH]:          # the oldest entries (the newest is the one returned)
                     del self._own[k]
         return self._own[i]
 
