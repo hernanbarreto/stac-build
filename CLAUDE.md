@@ -965,8 +965,48 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
+- ⭐⭐⭐⭐⭐⭐⭐⭐ THE ARCHITECTURE OF 2026-11-21 (morning) — ITS TEST ON THREE SESSIONS (RESUME HERE FIRST; the block
+  below is its background). Designed with him step by step that morning; his order to run it: "queda asi y corre asi,
+  correlo y vemos luego la nube … creas una nueva sesion bufferstop_prueba y me dejas esta nube ahi publicada, al
+  terminar, haces lo mismo con pccr3104 y con pccr2408, en todos los casos cuando la nube se publico, borra a mano
+  todo el tendal de archivos que hayan quedado antes de empezar la siguiente reconstruccion". His order of the same
+  day, with two clouds published: "quiero que vayas anotando los numeros porque la mejora es real, se nota".
+  · THE NINE STEPS, as he approved them ("eso mismo"): 1 AMB3R over every frame (its poses and depth) · 2 the
+    selection, on AMB3R's poses and depth: the keyframes (overlap of 92 to 96 % with the last chosen one), the
+    revisits, and F4's witnesses = the frames between keyframes · 3 the cubes of Omega: 64 keyframes sharing 32; DA3
+    uses the same · 4 DA3 per cube at 504: each keyframe's DA3 depth, for the scale · 5 Omega per cube: its poses and
+    depth · 6 the tie: seams, Omega bridges on the revisits, the graph; the 15 m measured with each cube's size, which
+    comes from that cube's DA3 depth · 7 the scale: one number, DA3's depth against the tied Omega depth · 8 F0, F4,
+    F5 (F4: keyframes, F4's witnesses, revisits; F5's tolerance from the seams) · 9 F6: the factor per keyframe, the
+    vote between keyframes, the cleaner, the publication.
+  · HIS EYE (2026-11-21): "Yo lo veo igual o mejor que la original en pccr3108 y bufferstop que ya están" /
+    bufferStop: "esta igual o mejor la reconstruccion eh!, muy buena y mas rapido" / "pccr3108 lo mismo, igual o
+    mejor, sin ningun error a la vista". He pointed at the hole in bufferStop's keyframes between video frames 425
+    and 450 ("aunque se ve muy bien y sin errores raros la reconstruccion"): the selection's longest stretch without
+    a keyframe, 25 frames — the original's 8-frame rule is not in this architecture.
+  · THE NUMBERS — `experiments/new_sequence/CHECKLIST_arquitectura.md` holds every one, step by step. Test /
+    validated original: bufferStop — 209 / 174 keyframes, 6 / 5 cubes, seams 1.6–2.7 / 2.6–4.2 cm, F5 held-out
+    0.2998 / 0.2550 px, vote coverage 58.5 / 60.5 %, 3,406,141 / 3,837,478 points, the walk 12.9 / 12.94 m, F0 to F6
+    18.1 / about 25 min, the whole run 37.2 min. pccr 2026-08-31 — 450 / 547 keyframes, 14 / 17 cubes, seams
+    1.5–4.1 / 1.0–3.7 cm, F5 held-out 0.5090 / 0.534 px, vote coverage 58.7 / 59.9 %, 18,541,200 / 18.8 M points,
+    F0 to F6 46.8 / 94.4 min, the whole run 69.5 min. pccr 2026-08-24, so far — 3024 / 2765 keyframes, 94 / 86 cubes,
+    the 93 seams 2.0 cm median and 8.1 max (2.0 / 24.2), after the graph 2.2 median and 11.0 max (2.3 / 51.0).
+  · THE CODE: `experiments/new_sequence/arq_front.py` (the pipeline's worker with the nine steps' substitutions),
+    `arq_select.py`, `arq_omega.py`, `arq_session.py`, `arq_clean.py`, `arq_queue.py`, `arq_watch.py`. No file of
+    server/ or of the fork is edited. Commits 90213b5, 64b8422 and the one after them; nothing pushed.
+  · THE SESSIONS: `bufferStop_prueba` and `pccr3108_prueba` published, their intermediates removed.
+    `pccr2408_prueba` RUNNING since 2026-11-21 13:27 UTC, attended by the queue (`arq_queue.py`, started with
+    `v2_launch.py`; logs in /workspace/tmp/new_sequence/arq/logs/: queue.log, pccr2408_prueba.log): when its cloud is
+    published the queue removes what the run left behind. The checklist's line 5 is ticked then, with its numbers.
+  · WHAT THE RUNS TAKE AS GIVEN, his to decide: each video's stored AMB3R pass is in metres since the original
+    intake (its 16-frame DA3) and the selection's 15 m range needs that metre — on a NEW video this architecture has
+    no source for it; what each keyframe sees of every other is measured once, with the cube plan, on AMB3R's poses
+    and depth, and the revisits and F6's vote read that one list; a session of ONE cube has no seam, so no tolerance
+    for F5 (the run stops naming it); the fork sets a bridge aside by the seams' scale bound (the pipeline's rule).
+  · /root/dev_data (the assistant's test data, 12 GB) was moved by the queue to
+    /workspace/tmp/dev_data_from_local_disk before pccr 2026-08-24's run: the local disk is the cleaner's scratch.
 - ⭐⭐⭐⭐⭐⭐⭐ THE CANDIDATE PIPELINE WITHOUT I3, F2 AND THE DA3 LOCK PER CUBE — KEPT ASIDE, NOT THE MAIN LINE YET (USER
-  2026-11-21; RESUME HERE FIRST). His order: "anotalo en claude.md guarda los codigos que tenemos para este pipeline
+  2026-11-21; the block above is where to resume). His order: "anotalo en claude.md guarda los codigos que tenemos para este pipeline
   no los pases aun a la linea principal pero los dejamos para que luego de validarlos con mas sesiones pase a ser el
   pipeline porque es mas rapido y tiene el mismo resultado".
   · WHAT IT IS: today's pipeline as it stands (its own keyframe selection with the 8-frame rule and the coverage

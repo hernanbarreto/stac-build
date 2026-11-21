@@ -82,4 +82,39 @@ A box is ticked only when its check has been shown with its numbers.
   - the intermediates removed (the queue's log): da3_cubes 1,467 MB, da3_run 425 MB, tracks.npz 476 MB, sky masks,
     after the worker's own end removed 2,332 MB. The scan holds: Omega's records 1,175 MB, the octree 874 MB, origins
     649 MB, the cloud 501 MB (and its raw copy 501 MB), frames 243 MB, intake 76 MB.
-- [ ] **5. Crear `pccr2408_prueba`, correrla y dejar la nube publicada.**
+- [ ] **5. Crear `pccr2408_prueba`, correrla y dejar la nube publicada.** RUNNING since 2026-11-21 13:27 UTC (the
+      queue, `arq_queue.py`). Log: `/workspace/tmp/new_sequence/arq/logs/pccr2408_prueba.log`. So far, against the
+      validated pccr 2026-08-24 (in brackets):
+  - step 2 — 3024 keyframes of 13,692 frames (2765); overlap between consecutive keyframes 0.870 / 0.941 / 0.969
+    (2 under 92 %, 18 over 96 %: the 30 keyframes taken where the overlap jumped over the band); frames between
+    keyframes: median 4, max 80; F4's witnesses: the 10,668 frames between keyframes; 2302 revisits; the selection
+    ran in 1058 s.
+  - step 3 — 94 cubes: ninety-three of 64 keyframes and one of 48, each sharing 32 with the next (86 cubes).
+  - step 4 — DA3 per cube at 504: 94 windows in 1461 s, 17.3 GiB at the peak.
+  - steps 5, 6 — 2158 bridges; the 93 seams 0.7 / 2.0 / 8.1 cm (min / median / max) (median 2.0, max 24.2);
+    1534 closures in the solve; cubes moved at most 6.09 m; seams after the solve 2.2 cm median, 11.0 max
+    (2.3 median, 51.0 max). The tie ended 3 h 58 min after the start.
+
+## His eye (USER 2026-11-21, with `bufferStop_prueba` and `pccr3108_prueba` published)
+
+- *"Yo lo veo igual o mejor que la original en pccr3108 y bufferstop que ya están"*.
+- bufferStop: *"esta igual o mejor la reconstruccion eh!, muy buena y mas rapido"*. He pointed at the hole in the
+  keyframes between video frames 425 and 450 — *"aunque se ve muy bien y sin errores raros la reconstruccion"*: the
+  selection's longest stretch without a keyframe (25 frames; the 8-frame rule of the original is not in this
+  architecture; those frames are F4's witnesses).
+- pccr 3108: *"pccr3108 lo mismo, igual o mejor, sin ningun error a la vista"*.
+- *"quiero que vayas anotando los numeros porque la mejora es real, se nota"*.
+
+## The two finished sessions side by side (test / validated original)
+
+| | bufferStop | pccr 2026-08-31 |
+|---|---|---|
+| keyframes | 209 / 174 | 450 / 547 |
+| cubes | 6 / 5 | 14 / 17 |
+| seams of the tie | 1.6 – 2.7 cm / 2.6 – 4.2 cm | 1.5 – 4.1 cm / 1.0 – 3.7 cm |
+| F4's tracks | 927,301 / 761,874 | 4,179,050 / — |
+| F5 held-out | 0.2998 px / 0.2550 px | 0.5090 px / 0.534 px |
+| vote coverage | 58.5 % / 60.5 % | 58.7 % / 59.9 % |
+| published points | 3,406,141 / 3,837,478 | 18,541,200 / 18.8 M |
+| F0 to F6 | 18.1 min / about 25 min | 46.8 min / 94.4 min |
+| the whole run | 37.2 min | 69.5 min |
