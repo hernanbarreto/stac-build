@@ -34,6 +34,46 @@ A box is ticked only when its check has been shown with its numbers.
 - **The fork sets a bridge aside** when its scale is outside the seams' bound (the pipeline's rule as it stands):
   46 of bufferStop's 53 bridges.
 
+## The design as he closed it for the main line (USER 2026-11-21, evening) — NOT ported, only on his word
+
+His question: *"si este se valida estas preparado para volcar esto al pipeline principal y sea el pipeline de
+reconstruccion?, ajustando ademas el readme con las imagenes de diagrama en bloques y la matematica actualizada?"* —
+answered yes; two days of work estimated; its closing check: the main pipeline reproduces `bufferStop_prueba`'s numbers.
+
+TEN STEPS (the nine of the test, with the 16-frame DA3 run after AMB3R):
+
+1. AMB3R sobre todos los frames. Da las poses y la profundidad de AMB3R, y sus keyframes propios.
+2. Sonda DA3 sobre 16 keyframes propios de AMB3R, repartidos a lo largo del video. Da el metro de AMB3R.
+3. Selección. Lee las poses y la profundidad de AMB3R en metros, hasta 15 m. Entrega los keyframes (solape de 92 a
+   96 % con el último elegido), las revisitas y los testigos de F4, que son los frames que quedan entre keyframes.
+4. Cubos de Omega: 64 keyframes compartiendo 32. DA3 usa los mismos.
+5. DA3 por cubo, a resolución 504. Da la profundidad DA3 de cada keyframe, para la escala.
+6. Omega por cubo. Da las poses y la profundidad de Omega.
+7. Atada: costuras, puentes de Omega sobre las revisitas, y grafo. Los 15 m se miden con el tamaño de cada cubo, que
+   sale de la profundidad DA3 de ese cubo.
+8. Escala: un número, de comparar la profundidad DA3 con la profundidad de Omega ya atada.
+9. F0, F4 y F5. F4 usa keyframes, testigos de F4 y revisitas. La tolerancia de F5 sale de las costuras.
+10. F6: factor por keyframe, voto entre keyframes, limpiador y publicación.
+
+His decisions, in his words:
+
+- **AMB3R's metre** (the test took it from each session's stored AMB3R pass): *"para que no cambie, corremos el da3
+  sobre los 16 kf como hasta ahora al principio y asunto terminado"* / *"puede tomar 16 kf distribuidos de los que
+  haya selecionado amb3r que ya pasan por su filtro, los tomamos de ahi"*. AMB3R keeps Omega as its model. Read for
+  it: AMB3R-SLAM's README and code — its default model is Depth Anything 3 NESTED (metric), `--model_name omega`
+  (ours) is not: the five stored passes measure 1.56 – 12.05 m per AMB3R unit; AMB3R's own keyframes are 28 / 95 /
+  427 on bufferStop / pccr 08-31 / pccr 08-24, of which 10 / 49 / 252 carry their own depth (the others take the
+  nearest reconstructed frame's, as the 16-frame run does today).
+- **The hole in bufferStop's keyframes (video 425 – 450):** *"el hueco lo dejamos asi como esta, no afecto en nada y es
+  consistente con los limites que pusimos, no hay que rellenar nada, es un hueco real que ve lo mismo"*.
+- **PointDiT:** *"si de momento queda afuera, no eliminado, pero si apagado"*.
+- **A short session:** *"siempre 2 cubos como minimo y listo, y con minimo de 48 KF, si detecta menos de eso, que
+  falle la reconstruccion, lo indica en pantalla, insuficiente información, o lo que fuera, listo, no se puede
+  reconstruir por nuestro metodo"*. With 65 keyframes or more the rule is 64 sharing 32; with 48 to 64, two cubes
+  that share half, each with two thirds of the keyframes (48: two cubes of 32 sharing 16).
+
+Not run with this architecture: zaragoza and observatorio.
+
 ## The five tasks
 
 - [x] **1. Programar esta arquitectura.** `arq_front.py` (the pipeline's worker with the nine steps' substitutions),
@@ -94,6 +134,10 @@ A box is ticked only when its check has been shown with its numbers.
   - steps 5, 6 — 2158 bridges; the 93 seams 0.7 / 2.0 / 8.1 cm (min / median / max) (median 2.0, max 24.2);
     1534 closures in the solve; cubes moved at most 6.09 m; seams after the solve 2.2 cm median, 11.0 max
     (2.3 median, 51.0 max). The tie ended 3 h 58 min after the start.
+  - step 7 — the scale: x1.0266 over the 3024 keyframes (MAD 4.8 %, spread 0.588 – 2.056); the cameras' walk
+    103.4 m.
+  - step 8, so far — F5's anchor tolerance 1.03 % (seams 0.37 – 7.20 %); F4: 5508 windows (251 keyframe,
+    2302 revisit, 2955 witness), started 17:56 UTC.
 
 ## His eye (USER 2026-11-21, with `bufferStop_prueba` and `pccr3108_prueba` published)
 

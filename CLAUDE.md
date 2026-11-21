@@ -1005,6 +1005,25 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     for F5 (the run stops naming it); the fork sets a bridge aside by the seams' scale bound (the pipeline's rule).
   · /root/dev_data (the assistant's test data, 12 GB) was moved by the queue to
     /workspace/tmp/dev_data_from_local_disk before pccr 2026-08-24's run: the local disk is the cleaner's scratch.
+  · ⭐ THE DESIGN AS HE CLOSED IT FOR THE MAIN LINE (USER 2026-11-21, evening) — NOT PORTED: the port starts only on
+    his word, once pccr 2026-08-24's test is validated. His question: "si este se valida estas preparado para volcar
+    esto al pipeline principal y sea el pipeline de reconstruccion?, ajustando ademas el readme con las imagenes de
+    diagrama en bloques y la matematica actualizada?" (answered yes: the test runs the worker with substitutions made
+    from outside; the port moves them into the code and DELETES what they replace — I0, I1, the coverage fill, the
+    turn frames, I3, the lock, F2 — with their configuration keys and tests; two days estimated; its closing check:
+    the main pipeline reproduces bufferStop_prueba's numbers). TEN STEPS = the nine above with the 16-frame DA3 run
+    after AMB3R: 1 AMB3R over every frame (poses, depth, its own keyframes) · 2 the 16-frame DA3 run on 16 of AMB3R's
+    own keyframes spread along the video: AMB3R's metre · 3 the selection on AMB3R's poses and depth in metres, up to
+    15 m · 4 – 10 the steps 3 – 9 above. His words: "para que no cambie, corremos el da3 sobre los 16 kf como hasta
+    ahora al principio y asunto terminado" / "puede tomar 16 kf distribuidos de los que haya selecionado amb3r que ya
+    pasan por su filtro, los tomamos de ahi" (AMB3R keeps Omega as its model; read in AMB3R-SLAM's README and code:
+    its default model, DA3 NESTED, is metric, `--model_name omega` is not — the five stored passes measure 1.56 –
+    12.05 m per AMB3R unit). The hole: "el hueco lo dejamos asi como esta, no afecto en nada y es consistente con
+    los limites que pusimos, no hay que rellenar nada, es un hueco real que ve lo mismo". PointDiT: "si de momento
+    queda afuera, no eliminado, pero si apagado". A short session: "siempre 2 cubos como minimo y listo, y con minimo
+    de 48 KF, si detecta menos de eso, que falle la reconstruccion, lo indica en pantalla, insuficiente información
+    … no se puede reconstruir por nuestro metodo" (65 keyframes or more: 64 sharing 32; 48 to 64: two cubes sharing
+    half, each with two thirds of the keyframes). Zaragoza and observatorio have not run with this architecture.
 - ⭐⭐⭐⭐⭐⭐⭐ THE CANDIDATE PIPELINE WITHOUT I3, F2 AND THE DA3 LOCK PER CUBE — KEPT ASIDE, NOT THE MAIN LINE YET (USER
   2026-11-21; the block above is where to resume). His order: "anotalo en claude.md guarda los codigos que tenemos para este pipeline
   no los pases aun a la linea principal pero los dejamos para que luego de validarlos con mas sesiones pase a ser el
