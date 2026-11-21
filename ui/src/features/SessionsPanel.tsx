@@ -9,7 +9,7 @@
  * archivo zip"). Presentational: every handler comes from App.
  */
 import { useState } from 'react'
-import { ArrowUpFromLine, Building2, Crosshair, Download, FolderOpen, Hammer, Layers, Loader2, Pencil, Play, Plug, Plus, Star, Tag, Trash2, Upload, Check, X } from 'lucide-react'
+import { ArrowUpFromLine, Crosshair, Download, FolderOpen, Hammer, Layers, Loader2, Pencil, Play, Plug, Plus, Star, Tag, Trash2, Upload, Check, X } from 'lucide-react'
 import { Panel, Row, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
 import { IconButton } from '../components/ui/IconButton'
@@ -137,8 +137,8 @@ export function SessionsPanel(p: SessionsPanelProps) {
           <Row className="stac-sessions__meta">
             <span>{t.plural('sessions.frames', s.frameCount)}</span>
             {s.hasCloud && <span>{fmt.bytesMb(s.cloudSizeMb)}</span>}
-            {s.hasSegments && <Tag aria-hidden />}
-            {s.hasBim && <><Building2 aria-hidden />{s.bimCount > 1 ? <span>{s.bimCount}</span> : null}</>}
+            {/* no segmentation / BIM mark per session (USER 2026-11-20: "no hacen falta para cada sesion
+                porque ya se indica la cantidad en la solapa correspondiente, es para que quede mas limpio") */}
           </Row>
         ),
         // ONE badge, most specific state first: what the card is doing beats
@@ -154,10 +154,14 @@ export function SessionsPanel(p: SessionsPanelProps) {
             ? <Badge tone="info" size="sm">{(job?.queue_position ?? 0) > 1
                 ? t('sessions.queued', { n: (job!.queue_position - 1) })
                 : t('sessions.queuedNext')}</Badge>
+            // reconstructed = the running job's own dot, in GREEN; the session that is open = that green dot
+            // inside a ring (USER 2026-11-20: "cambiemosle el reconstructed por un punto verde, el mismo que
+            // indica cuando se esta reconstruyendo pero en verde ... y la que esta abierta el punto verde con
+            // un circulo indicando que esa esta abierta")
             : loaded
-              ? <Badge tone="ok" size="sm">{t('sessions.loaded')}</Badge>
+              ? <Badge tone="ok" size="sm" dot className="stac-badge--ring" title={t('sessions.loaded')} aria-label={t('sessions.loaded')} />
               : s.hasCloud
-                ? <Badge tone="neutral" size="sm">{t('sessions.built')}</Badge>
+                ? <Badge tone="ok" size="sm" dot title={t('sessions.built')} aria-label={t('sessions.built')} />
                 // nothing for a project with no reconstruction: a badge on
                 // every row is noise (USER 2026-09-23, "carga demasiado la ui")
                 : undefined,

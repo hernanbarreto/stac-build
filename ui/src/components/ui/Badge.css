@@ -63,6 +63,12 @@
   flex-shrink: 0;
 }
 
+/* the dot of the item that is OPEN: the same dot inside a ring (USER 2026-11-20) */
+.stac-badge--ring .stac-badge__dot {
+  outline: var(--bw) solid currentColor;
+  outline-offset: var(--bw-selected);
+}
+
 .stac-colordot {
   display: inline-block;
   width: var(--dot);
