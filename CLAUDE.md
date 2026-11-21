@@ -965,8 +965,70 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
-- ⭐⭐⭐⭐⭐⭐ THE RECONSTRUCTION WENT BACK TO ITS STATE OF 2026-11-19 — HIS ORDER (USER 2026-11-20, night; RESUME HERE
-  FIRST — it supersedes the checklist block below): "volve a la reconstruccion que teniamos cuando hicimos las
+- ⭐⭐⭐⭐⭐⭐⭐ THE CANDIDATE PIPELINE WITHOUT I3, F2 AND THE DA3 LOCK PER CUBE — KEPT ASIDE, NOT THE MAIN LINE YET (USER
+  2026-11-21; RESUME HERE FIRST). His order: "anotalo en claude.md guarda los codigos que tenemos para este pipeline
+  no los pases aun a la linea principal pero los dejamos para que luego de validarlos con mas sesiones pase a ser el
+  pipeline porque es mas rapido y tiene el mismo resultado".
+  · WHAT IT IS: today's pipeline as it stands (its own keyframe selection with the 8-frame rule and the coverage
+    fill, its turn frames and witness frames, PointDiT on) with three things taken out — his words: "este pipeline,
+    sin i3, sin f2, sin candado por cubo, sin da3 que decida nada mas que cuanto escalo la nube para pasarla a
+    metros" / "da3 metro nada mas": (1) NO I3 — the walk the cube plan reads comes from AMB3R's poses of the
+    keyframes; (2) NO DA3 LOCK PER CUBE — each cube is scaled to AMB3R's metre (the similarity of its camera centres
+    onto AMB3R's), so that the 15 m range means 15 m; the cubes' relative scale stays the seams' and the graph's;
+    (3) NO F2 — F5's one input from F2, the relative tolerance of its position anchors, is the median over the
+    tie's seams of (residual / the distance it was measured at); his "ok, de acuerdo" to it. DA3 runs once for the
+    session's metre (scale_align); nothing runs after F6.
+  · THE CODE: `experiments/new_sequence/` — `v5_front.py` is the driver (workers.map_worker._map_work run in a
+    process of its own with substitutions on the loaded modules; NO FILE OF server/ OR OF THE FORK IS EDITED), with
+    `v3_front.py` (the walk from AMB3R, the redirect of Omega's launch, the tolerance from the seams, the chain F0,
+    F4, F5, F6), `v3_omega.py` (the cube stage with CubeRun.metric_lock replaced), `v2_front.py`, `card.py` (the
+    card's lease) and `v2_launch.py` (the backend's interpreter and environment). Launch: `python v2_launch.py
+    <log> v5_front.py <scan dir>`. `CHECKLIST_v5.md` holds the run's numbers; CHECKLIST.md / _v2 / _v3 / _v4 the
+    other tests of the day.
+  · HIS VERDICT ON BUFFERSTOP (session `bufferStop_v5`, the same 174 keyframes as the validated `bufferStop`):
+    "quedo igual geometricamente hablando". The run's numbers against the pipeline's on that video: seams 2.7–4.1 cm
+    (2.6–4.2), F4 761,874 tracks (the same), F5 held-out 0.2554 px (0.2550), vote coverage 59.1 % (60.5 %),
+    3,214,161 points (3,837,478); 42.2 min with PointDiT.
+  · OPEN IN IT — THE METRE: with DA3 frame by frame (what runs when I3's windows are gone) the cloud comes out 7.5 %
+    SMALLER — the cameras' walk 11.96 m against 12.94 m on the same keyframes — and the scale is noisier between
+    keyframes (MAD 7–10 % against 3.5 % with the windows' depth). His words: "podemos hacer el da3 por los mismos
+    cubos que teniamos antes para mejorar la escala eso no cambia, una unica escala sacada de da3 por cubos en lugar
+    de da3 por frames individuales" — proposed to him as the next version (DA3 once, in windows of keyframes, for
+    the one scale; no lock, no F2, no I3 walk); NOT RUN: "no, ahora no". Which metre is right is not known without a
+    real length of the scene.
+  · IT BECOMES THE PIPELINE ONLY ON HIS WORD, after it is validated on more sessions.
+  · THE OTHER TESTS OF 2026-11-21, ALL ON COPIES OF BUFFERSTOP, EACH JUDGED BY HIS EYE:
+    – A NEW ORDER (Omega + lock per cube, F0, F2 per cube, F4, F5 per cube with one camera, the depth per cube, THEN
+      the tie; `CHECKLIST.md`): flyers ("hay voladores"); the seams tied better (1.5 against 3.1 cm) and the vote
+      contradicted more (23.3 % against 14.2 %). Not taken.
+    – A NEW KEYFRAME SELECTION (his design: AMB3R first over every frame; the video walked from frame 0, each frame
+      compared with the last chosen keyframe; overlap above 90 % = the same view, skipped; between 90 % and 85 % a
+      candidate; under 85 % the best candidate is chosen; a jump over the band takes both frames; his limits: "si, me
+      cierran"; `v2_select.py`, the overlap on AMB3R's map): 104 keyframes against 174. v2 (with it, PointDiT off):
+      "tiene mas basura y algun duplicado que la original no tiene"; v3 (v2 without I3, F2 and the lock): "es muy
+      parecida a la anterior" / "no es mejor que la original"; PointDiT on against off on v3: 99.6 % of the points
+      within 2 cm of the other cloud (the painted comparison, `v3_compare.py`). By elimination the loss against
+      the original is the selection's (the assistant's deduction, not measured). THE SELECTION IS NOT TAKEN AS IT IS.
+    – THE KEYFRAMES AS THE ONLY FRAMES ("solo los frames que votan los que entran en todo el circuito son los KF,
+      nada mas … hace de cuenta que los unicos frames que tiene la sesion son los kf"; v4): "bastante espantosa, peor
+      que v3 y mucho peor que la original". F4 without the frames between keyframes: 60,166 tracks against 383,861,
+      F5 held-out 0.75 px against 0.21. Not taken.
+    – A SECOND TIE after F6's depth, on Omega's bridges alone (v2, epoch 4): moved the cubes 11–12 cm; his eye on
+      v2: not good. Not taken.
+    – FOUND, NOT CHANGED: with the co-visibility cut the cap of 64 counts KEYFRAMES only — the turn frames ride on
+      top (cubes of up to 90 Omega views in today's pipeline, 110 with the new selection); his words when he saw
+      it: "son 64 con solape de 32, no hay vuelta con eso".
+  · NOTHING THAT ONLY INFORMS (USER 2026-11-21, on the worker's line "Omega's walk … against the I3 walk …
+    (evidence, never a verdict)", commit 81002bb of 2026-10-06, the assistant's: "que es esa estupidez de informar
+    y no decidir" / "nada que no se corrija o no sirva para que quede mejor sirve para nada" / "es un trabajo
+    profesional, no podes poner esas estupideces"): a calculation that corrects nothing is not computed, and a log
+    line says what was done and nothing else. OWED TO HIM: the list of everything in the pipeline that only informs,
+    to take it all out on his order.
+  · THE TEST SESSIONS are his to keep or delete (he deleted bufferStop_cubos, bufferStop_orden_nuevo and
+    bufferStop_prueba himself that day): bufferStop_v2, bufferStop_v3 with its two painted copies, bufferStop_v4,
+    bufferStop_v5; the working data under /workspace/tmp/new_sequence/.
+- ⭐⭐⭐⭐⭐⭐ THE RECONSTRUCTION WENT BACK TO ITS STATE OF 2026-11-19 — HIS ORDER (USER 2026-11-20, night; the block
+  above is where to resume — this one supersedes the checklist block below): "volve a la reconstruccion que teniamos cuando hicimos las
   versiones que estan publicadas, a la ultima con la que corrio pccr2408 que termino correctamente, si hace falta
   clonar y bajar pointdit hacelo tambien" / "ojo que hicimos correcciones en el sistema eh!!, solo la parte de
   reconstruccion tenes que traer".
