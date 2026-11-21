@@ -161,7 +161,9 @@ export function SessionsPanel(p: SessionsPanelProps) {
             : loaded
               ? <Badge tone="ok" size="sm" dot className="stac-badge--ring" title={t('sessions.loaded')} aria-label={t('sessions.loaded')} />
               : s.hasCloud
-                ? <Badge tone="ok" size="sm" dot title={t('sessions.built')} aria-label={t('sessions.built')} />
+                // a QUIETER green than the open one's, so that the open session stands out (USER 2026-11-20: "a
+                // los que estan reconstruidos poneles un verde mas apagado para que se note mejor el que esta abierto")
+                ? <Badge tone="ok" size="sm" dot className="stac-badge--quiet" title={t('sessions.built')} aria-label={t('sessions.built')} />
                 // nothing for a project with no reconstruction: a badge on
                 // every row is noise (USER 2026-09-23, "carga demasiado la ui")
                 : undefined,

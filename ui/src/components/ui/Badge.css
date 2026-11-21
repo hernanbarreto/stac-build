@@ -69,6 +69,11 @@
   outline-offset: var(--bw-selected);
 }
 
+/* a state that exists but is not the one in use: the same dot, quieter (USER 2026-11-20) */
+.stac-badge--quiet .stac-badge__dot {
+  opacity: var(--opacity-disabled);
+}
+
 .stac-colordot {
   display: inline-block;
   width: var(--dot);
