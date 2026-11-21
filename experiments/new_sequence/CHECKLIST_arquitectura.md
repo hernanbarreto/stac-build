@@ -62,5 +62,24 @@ A box is ticked only when its check has been shown with its numbers.
       da3_cubes 625 MB, da3_run 198 MB, tracks.npz 113 MB, sky masks 1 MB, the way back to epoch 0 — after the
       worker's own end removed 1,691 MB of pose-only epochs and Omega cube files. The scan holds: Omega's records
       840 MB, frames 207 MB, the octree 162 MB, origins 119 MB, the cloud 92 MB (and its raw copy 92 MB), intake 36 MB.
-- [ ] **4. Crear `pccr3108_prueba`, correrla, dejar la nube publicada y borrar los intermedios.**
+- [x] **4. Crear `pccr3108_prueba`, correrla, dejar la nube publicada y borrar los intermedios.** Log:
+      `/workspace/tmp/new_sequence/arq/logs/pccr3108_prueba.log`; 69.5 min on the card. Against the validated
+      pccr 2026-08-31 (in brackets):
+  - step 2 — 450 keyframes of 3044 frames (547); overlap between consecutive keyframes 0.920 / 0.944 / 0.960; frames
+    between keyframes: median 6, max 58; F4's witnesses: the 2594 frames between keyframes; 45 revisits.
+  - step 3 — 14 cubes: thirteen of 64 keyframes and one of 34, each sharing 32 with the next (17 cubes).
+  - step 4 — DA3 per cube at 504: 14 windows in 311 s.
+  - steps 5, 6 — the cubes sized with their own DA3 window: 1.74 – 3.77; the 13 seams 1.5 – 4.1 cm (1.0 – 3.7);
+    30 bridges, 29 closures in the solve (43); cubes moved at most 55.1 cm (61); seams after the solve 1.8 cm
+    median, 5.1 max.
+  - step 7 — the scale: x0.8633 over the 450 keyframes (MAD 5.4 %, spread 0.735 – 1.267); the cameras' walk 18.0 m.
+  - step 8 — F4: 533 windows (37 keyframe, 45 revisit, 451 witness), 26,252,623 observations, 4,179,050 tracks,
+    32.4 min; F5's anchor tolerance 1.18 % (seams 0.88 – 1.63 %); held-out R0 0.5263, R1 0.5209, R2 0.5090 px,
+    applied (0.534); cameras moved at most 6.2 cm; 7.1 min.
+  - step 9 — F6: every keyframe hears a median of 80 keyframes; vote coverage 58.7 % (kept 52.9 %, contradicted
+    17.3 %, in place 6.7 %, under the support 23.8 %) (59.9 %, kept 55.3 %); raw 101,980,232 → published
+    18,541,200 points (126.5 M → 18.8 M), epoch 2; 6.5 min.
+  - the intermediates removed (the queue's log): da3_cubes 1,467 MB, da3_run 425 MB, tracks.npz 476 MB, sky masks,
+    after the worker's own end removed 2,332 MB. The scan holds: Omega's records 1,175 MB, the octree 874 MB, origins
+    649 MB, the cloud 501 MB (and its raw copy 501 MB), frames 243 MB, intake 76 MB.
 - [ ] **5. Crear `pccr2408_prueba`, correrla y dejar la nube publicada.**
