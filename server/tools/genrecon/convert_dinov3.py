@@ -6,7 +6,7 @@ from transformers import DINOv3ViTConfig, DINOv3ViTModel
 # (relative to THIS repo, wherever it is: a rebuild tested in a scratch tree ran this script with the paths
 #  written as /workspace/stac-build/… and rewrote the LIVE pod's file — with the same bytes — on 2026-11-18)
 VENDOR = Path(__file__).resolve().parents[3] / "vendor"
-SRC = VENDOR / "GenRecon" / "weights" / "src" / "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+SRC = VENDOR / "pointdit" / "pretrained" / "dinov3" / "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
 DST = VENDOR / "GenRecon" / "weights" / "dinov3-vitl16-hf"
 sd = torch.load(SRC, map_location="cpu"); sd = sd.get("model", sd) if isinstance(sd, dict) and "model" in sd else sd
 D = sd["cls_token"].shape[-1]; L = len({k.split(".")[1] for k in sd if k.startswith("blocks.")}); R = sd["storage_tokens"].shape[1]
@@ -40,4 +40,17 @@ per = sd["rope_embed.periods"].float(); hf_per = 1.0 / m.rope_embeddings.inv_fre
 print("rope periods max rel diff", float(((per - hf_per).abs() / per).max()))
 DST.mkdir(parents=True, exist_ok=True); m.save_pretrained(DST, safe_serialization=True)
 print("saved", DST, sorted(p.name for p in DST.iterdir()))
-# (the result is pinned by its sha256 in scripts/rebuild/models.tsv: the conversion is verified by that)
+# validation against Meta's reference implementation (the hub code the pod already has)
+sys.path.insert(0, str(VENDOR / "pointdit" / "third_party" / "dinov3"))
+try:
+    from dinov3.hub.backbones import dinov3_vitl16
+    ref = dinov3_vitl16(pretrained=True, weights=str(SRC)).eval()
+    x = torch.randn(1, 3, 256, 256)
+    with torch.no_grad():
+        out = m(pixel_values=x).last_hidden_state          # [cls, registers, patches], after the learned norm
+        r = ref.forward_features(x)
+        ref_cls, ref_pat = r["x_norm_clstoken"], r["x_norm_patchtokens"]
+    print("cls max abs diff", float((out[:, 0] - ref_cls).abs().max()), "patch max abs diff", float((out[:, 1 + R:] - ref_pat).abs().max()),
+          "patch scale", float(ref_pat.abs().mean()))
+except Exception as e:
+    print("reference check skipped:", type(e).__name__, str(e)[:200])

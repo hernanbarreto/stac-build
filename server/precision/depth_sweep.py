@@ -721,7 +721,7 @@ def triangulated_landmarks(session_dir: Path, pcfg, inp: SweepInputs):
     from precision.camera import undistort_solver
     from precision.refine import group_tracks, triangulate_tracks
     from precision.tracks import load_tracks_v2
-    tr = load_tracks_v2(session_dir, threads=pcfg.tracks.npz_threads)
+    tr = load_tracks_v2(session_dir)
     groups = group_tracks(tr["obs_track"], tr["obs_frame"], tr["obs_uv_native"], inp.kf)
     X = triangulate_tracks(groups, inp.kf_w2c, inp.cam.params, undistort_solver(pcfg.camera),
                            pcfg.refine.min_tri_deg)

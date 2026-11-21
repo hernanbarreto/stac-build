@@ -135,18 +135,13 @@ STEPS: List[Step] = [
          reads=("frames", "output/camera.json"),
          writes=("output/precision/tracks.npz", "output/precision/tracks.json"), config=("tracks",)),
     Step("f5_refine", "F5 joint refinement", "mapanything", "precision.refine",
-         # the cube graph it holds inside its cost (precision/graph_prior.py) and, for the decision by zone before it
-         # applies its result (precision/decide.py), the keyframes' records, their frames and the first pass's map
-         reads=_GEOMETRY_IN + ("output/precision/tracks.npz", "output/maplong_run/chunk_graph.json",
-                               "output/maplong_run/chunk_sim3.json", "output/omega_run/results_output", "frames",
-                               "intake/cubes.json"),
+         reads=_GEOMETRY_IN + ("output/gauge.json", "output/precision/tracks.npz"),
          writes=("output/precision/refine.json", "output/precision/witness_poses.txt",
                  "output/precision/witness_frames.txt", "output/precision/refine_residuals.npz",
-                 "output/precision/decisions.json", "output/camera.json") + _POSE_FILES,
-         config=("refine", "camera", "coherence", "bend", "tracks", "raw:reconstruction.simple",
-                 "raw:correction_graph.graph")),
-    Step("f6_bend", "F6 depth on F5: Omega's depth at the session's factor + multi-view vote (the product)", "da3",
-         "precision.depth_on_f5", gpu=True,              # its maps and its vote run on the card (f6_torch.require_cuda)
+                 "output/camera.json") + _POSE_FILES,
+         config=("refine", "camera")),
+    Step("f6_bend", "F6 depth on F5: Omega bent to F5's landmarks + multi-view vote (the product)", "da3",
+         "precision.depth_on_f5",
          # intake/cubes.json: what each keyframe sees of every other — the co-visible keyframes of other moments
          # vote too (depth_on_f5.covisible_witnesses, USER 2026-11-07)
          reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json",
@@ -154,8 +149,8 @@ STEPS: List[Step] = [
                                "output/precision/witness_poses.txt", "output/precision/witness_frames.txt",
                                "intake/cubes.json"),
          writes=("output/cleaned_cloud.ply", "output/intrinsic.txt", "output/precision/depth_on_f5.json"),
-         config=("bend", "depth", "cloud", "gauge", "refine",
-                 "camera", "raw:reconstruction.simple", "raw:postprocessing")),
+         config=("bend", "depth", "cloud", "mono_detail", "gauge", "refine", "camera",
+                 "raw:reconstruction.simple", "raw:postprocessing")),
     Step("f6_sweep", "F6 native depth sweep", "da3", "precision.depth_sweep", gpu=True,
          reads=_GEOMETRY_IN + ("frames", "output/precision/tracks.npz", "output/precision/refine.json"),
          writes=("output/precision/depth_sweep.json",), config=("depth", "camera", "refine")),
@@ -532,7 +527,11 @@ def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
     drop = set()
     if pcfg.cloud.source == "omega_bent":
         # USER 2026-10-01 (pccr epoch 7): the depth on F5 IS the product — no plane sweep, no F7.
-        return [s for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
+        # With mono_detail on, PointDiT runs inside it: the step takes the card (vLLM stands down).
+        from dataclasses import replace as _replace
+        mono = bool(getattr(getattr(pcfg, "mono_detail", None), "enabled", False))
+        return [(_replace(s, gpu=True) if (mono and s.key == "f6_bend") else s)
+                for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
     drop.add("f6_bend")
     if fusion:
         drop.add("f7_cloud")

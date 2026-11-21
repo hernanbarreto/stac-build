@@ -923,6 +923,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   points. Viewer: segmentation lamps / windows as lights, point opacity, shadows for meshes.
 
 ## 6 · TRIED AND DISCARDED — do not bring back without his word (details in `git show 2f13136:CLAUDE.md`)
+- ⭐ POINTDIT IS BACK IN THE CHAIN (2026-11-20, night — §7, the block "THE RECONSTRUCTION WENT BACK"): the entry below
+  is the record of its removal of that afternoon, UNDONE the same night on his order; "the edge-detail model" in this
+  file, in the audit and in the checklist is PointDiT (the name had been taken out of every file for that removal).
 - ⭐ THE EDGE-DETAIL MODEL (the monocular detail at the edges, inside F6 since 2026-10-04): REMOVED 2026-11-20 — USER: "el detalle de
   bordes the edge-detail model nunca me cerro un modelo con licencia no comercial que tarda un huevo sin un resultado ni necesidad
   aparente, hay que sacarlo, eliminalo de la cadena, del repo, de todo, no tiene ningun sentido". Deleted: its code
@@ -962,7 +965,48 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
-- ⭐⭐⭐⭐⭐ THE REFACTORING BY THE CHECKLIST — RESUME HERE FIRST (USER 2026-11-20, evening). `docs/pipeline_checklist.md`
+- ⭐⭐⭐⭐⭐⭐ THE RECONSTRUCTION WENT BACK TO ITS STATE OF 2026-11-19 — HIS ORDER (USER 2026-11-20, night; RESUME HERE
+  FIRST — it supersedes the checklist block below): "volve a la reconstruccion que teniamos cuando hicimos las
+  versiones que estan publicadas, a la ultima con la que corrio pccr2408 que termino correctamente, si hace falta
+  clonar y bajar pointdit hacelo tambien" / "ojo que hicimos correcciones en el sistema eh!!, solo la parte de
+  reconstruccion tenes que traer".
+  · WHAT WAS RESTORED: every file of the reconstruction — server/precision, its tests, workers/map_worker.py and
+    precision_worker.py, config.yaml, the evaluation's and tools' shared files, main.py and repro.py (touched since
+    only by the removal of the edge-detail model), the pipeline's documents, the rebuild kit's description of the pod
+    — is identical to commit 25636e2 (2026-11-20 08:26 UTC): the code BEFORE every change of 2026-11-20 (the speed
+    patches, F2's one scale, the depth graph switched off, checklist lines 1 – 4), i.e. the validated algorithm with
+    the three corrections he ordered after pccr 2026-08-24's run (which ran at 73921aa, 2026-11-10): the report-only
+    computations removed (a26f08f), rotated videos extracted upright (42f66c4), the cube overlap as a parameter at
+    one half (023cd5e). The fork vendor/VGGT-Long is back at bcdb0d9 (its later commits stay on its branch).
+    PointDiT IS BACK: vendor/pointdit at 11f53a3 (the commit the published runs record), DINOv3's code inside it at
+    6876159, its two checkpoints downloaded again from their pinned revision, the two DINOv3 files, torchmetrics
+    1.9.0 and lightning-utilities 0.15.3 in env da3.
+  · WHAT WAS NOT TOUCHED: the application — interface (ui/src stays as it is: its two layer entries of that model
+    stay out, as he had removed those views on 2026-11-19), exporter, chat and voice, BIM comparison, tickets,
+    remote access, session archives, the kept identity of the five scans (correction/). CLAUDE.md, the audit and
+    the checklist stay as documents.
+  · WHAT WENT ASIDE, NOT LOST: the unclosed work on checklist lines 5 – 6 (F2 removed) and the start of line 7 is
+    `git stash` "2026-11-20 NOT CLOSED: …"; lines 1 – 4 are in the history (9a13f32, 074cc6e, 1852390, 71c870f).
+  · THE CHECK: `bash scripts/checklist/check_reconstruction_restored.sh` — the reconstruction's files against
+    25636e2 (working files and last commit), the vendor trees, the weights against the kit's fingerprints, the
+    environment, the chain.
+  · WHY (the evening's measurements, the assistant's own instruments — bufferStop_prueba and 12 real cubes of the
+    pccr copy): with ONE depth factor (line 2) F5's result reads worse than no F5 in every zone (neighbours
+    1.14 → 1.47 cm) and with a factor per keyframe much better (0.42 cm) — the change of line 2 made the results
+    worse where it was measured; within a cube Omega gives each keyframe its own focal and the depth scale follows
+    it; the SAME keyframe in two cubes differs (the same pixel 2.9 cm apart at the median, focal 2.2 %) while
+    different keyframes of one cube agree to ~1 cm; corrections between cubes from Omega's output alone gave no
+    usable gain (one focal: small; averaging versions: none; forcing versions to coincide: breaks the cubes — in a
+    chain it ran away, scale drifting 30 % in five cubes; his eye on that test cloud: "que es esa explosion y todos
+    los voladores y ruido" / "duplicados, no se entiende nada"). The concept he reasoned that evening (one camera,
+    one pose and one depth map per keyframe; the first cube as the reference; correspondences BEFORE the tying; the
+    final tying last) is NOT implemented — it stays his design to take up.
+  · ⚠ AN IRREVERSIBLE DELETION OUTSIDE THE POD IS CONFIRMED EXPLICITLY (2026-11-20): cleaning line 1 the assistant
+    deleted from the repo's draft release the last copy of DINOv3 ViT-H+ (PointDiT's encoder; Meta's stored link
+    had expired) on a one-line notice; his words: "conseguilo, poruqe yo no te dije que lo borraras". Recovered
+    the same night: a public copy with the SAME sha256 (7c1da9a5…41488), confirmed byte for byte against Meta's
+    official link he then pasted (valid three days, stored nowhere), and uploaded to the release again.
+- ⭐⭐⭐⭐⭐ THE REFACTORING BY THE CHECKLIST — SUPERSEDED BY THE BLOCK ABOVE (USER 2026-11-20, evening). `docs/pipeline_checklist.md`
   is THE list: the audit's 36 conclusions, one per line, never merged, the pending ones in their order of execution
   (his: "la lista no debe ser una ensalada de pendientes, debe ser exactamente la hoja de ruta de lo que se va a
   hacer"). HIS RULES FOR IT:

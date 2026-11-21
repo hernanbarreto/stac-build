@@ -1968,27 +1968,6 @@ reconstruction:
                                         # 3/4") — 0.75: every keyframe lies in four cubes, a seam stands on 48 shared
                                         # keyframes instead of 32, twice the cubes. NOT changed here: the copy's job
                                         # carries its own value.
-      cube_closing: single_pass         # what the cube run does AFTER ITS GRAPH (USER 2026-11-19: "No entiendo por qué
-                                        # siguen habiendo tantas partes que no usan la placa … es tiempo perdido" /
-                                        # the design: "Dije que si al diseño, dale"). steps = THE RECORD: every cube
-                                        # placed and WRITTEN (676 MB each), then read back by each step (uncertainty,
-                                        # depth graph, the outputs' two passes, the poses) and by the server (the
-                                        # per-keyframe records) — pccr 2026-08-24's copy, 170 cubes on the network
-                                        # volume: 44 min with the card idle. single_pass = each cube read ONCE as it
-                                        # was inferred, placed in memory, every step's piece taken from it, the
-                                        # records written by the cube run itself, no placed cube on disk: the same
-                                        # files (six real cubes: 278 products identical; tests/
-                                        # test_cube_closing_pass.py). single_pass needs certify.keep_aligned_chunks
-                                        # false (it leaves no placed cube to keep): both together FAIL the launch.
-      cube_closing_device: cuda         # numpy | cpu | cuda — the single pass's arithmetic. numpy = the record's own
-                                        # functions; a torch device = vendor/VGGT-Long/loop_utils/closing_torch.py,
-                                        # THE SAME BITS (an exact fused multiply-add repeats the BLAS product numpy's
-                                        # matmul runs; tests/test_closing_torch.py). cuda with no card FAILS.
-      cube_seams_device: cuda           # numpy | cpu | cuda — the seams' fits (loop_utils/seams_torch.py: the same
-                                        # pairs, masks and samples exactly, every number of the fits within 1e-9)
-      cube_graph_device: cpu            # numpy | cpu | cuda — the cube graph's solve with its residuals in one batch
-                                        # (loop_utils/chunk_graph_torch.py: the same solver and tolerances; the cost
-                                        # and the poses of the record within the solver's own tolerance)
     scale_align: true                   # metric: DA3 anchor + scale_align (global similarity:
                                         # scales cloud + poses by s = median DA3/Omega depth).
                                         # false → up-to-scale (raw Omega isolation test).
@@ -2058,18 +2037,8 @@ reconstruction:
     zoom_scale_fix: true                # zoom chunk → correct the scale, keep the chunk
     exact_seam_align: true              # rigid seams from exact pixel correspondences
     frame_ownership: true               # one frame → one writer in overlaps
-    depth_graph: false                  # cross-frame depth agreement stage (in-run, per-frame
-                                        # affine along rays, model ladder + authority bound).
-                                        # OFF 2026-11-20 (USER: "Todo lo redundante que detectaste ir
-                                        # quitándolo, no debe quedar nada que no agregue valor en la
-                                        # cadena"): its verdict was SKIP on the six sessions — it has
-                                        # never changed a depth — and it is a depth correction per
-                                        # keyframe that the cameras do not follow (docs/
-                                        # pipeline_audit_2026-11-20.md, Part IV). Tested on six real
-                                        # cubes of pccr 2026-08-24, both closing modes: the 276
-                                        # products (points, origins, records, poses, intrinsics,
-                                        # uncertainty) byte-identical with it off; only
-                                        # depth_graph.json and authority.json are no longer written.
+    depth_graph: true                   # cross-frame depth agreement stage (in-run, per-frame
+                                        # affine along rays, model ladder + authority bound)
     blend_copies: false                 # OFF 2026-09-28: the per-pixel MEAN of a shared frame's two
                                         # copies presumes they coincide (its own doc: "runs AFTER
                                         # the elastic consensus") — with elastic_seam off they
@@ -2672,7 +2641,7 @@ reconstruction:
                                         # ONCE on the keyframes → ONE Omega pass (chunks of walk)
                                         # → F0 camera → F2 gauge → F4 tracks → F3 probe → F5
                                         # refinement → F6 bend (cloud.source omega_bent, USER
-                                        # 2026-10-01: Omega's depth at the session's factor +
+                                        # 2026-10-01: Omega's depth bent to F5 per keyframe +
                                         # multi-view vote = THE cloud, published with its octree)
                                         # → chunk check (report). Then the cloud stage projects
                                         # the masks and the CERTIFY stage corrects (depth per
@@ -2718,15 +2687,6 @@ reconstruction:
                                         # windows); a 1024 frame runs exactly as the 1024 sessions do (1036)
       model_id: depth-anything/DA3NESTED-GIANT-LARGE-1.1
       knot_walk_m: 2.0                  # BOUND: knot spacing of the continuous scale model
-      # WHAT F2 APPLIES. along_walk (THE RECORD): the scale fitted along the chainage — every step of the walk is
-      # rescaled by it and the walk is chained again from the first camera (precision.gauge.continuous_transforms).
-      # constant: ONE scale for the whole session, the weighted fit of one value to the same rows — the walk keeps
-      # the shape the cube graph closed. A TEST VARIANT (2026-11-20: on pccr 2026-08-24's copy along_walk applied
-      # x0.81–x1.25, moved cameras up to 2.3 m after the graph had closed the revisits and moved the 774 honoured
-      # ones 24 cm at the median); which one the pipeline uses is THE USER'S decision.
-      # ⭐ USER 2026-11-20, shown that along_walk re-opened what the cube graph had closed: "Eso está mal!!!, hay que
-      # revisarlo porque rompe escenas" / "La manera es una única escala y que no rompa nada" — constant is THE RULE.
-      profile: constant
       heldout_confidence: 0.95          # declared confidence of the held-out comparisons (the
                                         # same bar as correction_graph.graph.heldout_confidence)
       smooth_grid: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
@@ -2779,14 +2739,6 @@ reconstruction:
       # is refused
       tracker_weights_url: https://huggingface.co/facebook/VGGSfM/resolve/643a1eb2069dad9b4cff071960323542477272e3/vggsfm_v2_tracker.pt
       tracker_weights_sha256: 451f1d218be1ef661c81d6254cbc633a5190e7d6069fe51621cc29ba5d90a404
-      # how tracks.npz is WRITTEN at the end of F4 and READ by F5 / F6. 0 = THE RECORD: numpy's own writer deflates
-      # the 17 members one after another on one core (pccr 2026-08-24: 12.5 GB in 9.2 min, the card held and
-      # idle — USER 2026-11-20: "la veo ocupada pero no operativa") and its reader inflates them the same way.
-      # N > 0 = the members cut in pieces deflated N at a time and laid out in the same order, and read N members
-      # at a time (precision/npz_threads.py): the same arrays; the file itself is then the same at every run
-      # (numpy stamps each member with the clock). The thread count is no parameter of the tracks: it is
-      # written in tracks.timing.json, beside the time the write took.
-      npz_threads: 16                   # USER 2026-11-20: "aplica todas las mejoras de tiempo" (0 = numpy's own writer)
     # F5 — joint pose + session camera refinement, witness localisation (precision/refine.py)
     refine:
       enabled: true                     # false = no bundle adjustment (the evaluation battery's variant "sin F5",
@@ -2794,14 +2746,25 @@ reconstruction:
                                         #   NEVER change in production — true is the validated chain
       min_tri_deg: 2.0                  # BOUND: a landmark's rays span at least this (degrees)
       huber_px: 1.0                     # BOUND: Huber scale of the reprojection loss (native px)
-      max_iterations: 500               # BOUND: Levenberg-Marquardt iterations per rung
+      max_iterations: 500               # BOUND: Ceres iterations per rung (colmap_ba._tune_ceres)
+      ceres_threads: 1                  # MUST STAY 1 for bit-identical results (the load refuses
+                                        # any other value). MEASURED 2026-09-28: the same BA at 8
+                                        # threads differs run to run by up to 1.8e-11 in the poses
+                                        # (multi-threaded evaluation / Schur accumulation order);
+                                        # at 1 thread, with the alignment RANSAC seeded, it is bit
+                                        # for bit the same, allocation history included
       heldout_confidence: 0.95          # declared confidence (as everywhere else)
       permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
       seed: 0                           # their fixed seed
       min_witness_corr: 12              # BOUND: 2D-3D correspondences a witness needs for PnP
-      torch_ba:                         # the solver (precision/ba_torch.py: float64 on the card, every sum in a
-                                        #   fixed order — USER 2026-11-01: 'todo debe correr en gpu, en modo
-                                        #   determinista'): its stopping rules and damping, Ceres' own defaults
+      solver: torch                     # torch = the default since 2026-11-01 (USER: "hacelo todo a GPU ya mismo"); ceres (pycolmap, ONE CPU thread, hours on pccr) | torch:
+                                        #   precision/ba_torch.py — the same residuals, loss, priors and camera freedom
+                                        #   on the GPU in float64, Schur complement, sorted reductions (bit-identical
+                                        #   between runs); USER 2026-11-01: 'todo debe correr en gpu, en modo determinista'.
+                                        #   Validated against Ceres on a synthetic scene (tests/test_ba_torch.py); on a
+                                        #   real session the bar is the held-out residual against Ceres' (his rule)
+      torch_ba:                         # the torch solver's stopping rules and damping = Ceres' (colmap_ba._tune_ceres
+                                        #   and Ceres' defaults), so the GPU solve stops where the CPU one did
         function_tolerance: 1.0e-6
         parameter_tolerance: 1.0e-8
         gradient_tolerance: 1.0e-8
@@ -2809,15 +2772,6 @@ reconstruction:
         lambda_init: 1.0e-4
         lm_diag_min: 1.0e-6
         lm_diag_max: 1.0e+32
-        keep_pair_plans_gb: 0           # BOUNDS (the card's memory), never decisions (USER 2026-11-20: "todo lo que no
-        keep_jacobians_gb: 0            #   cambie el resultado debe programarse mas rapido"). A problem solved in
-                                        #   chunks (above 24 M residual blocks: pccr 2026-08-24) makes, at EVERY LM
-                                        #   trial, each chunk's pair plan again (a stable sort of its landmark-sharing
-                                        #   observation pairs — the same at every trial; the whole plan of that
-                                        #   session is ~8 GB) and each chunk's Jacobians twice more after the
-                                        #   linearisation made them. Up to these GB they are KEPT (what does not fit
-                                        #   is made again): the same bits (tests/test_ba_torch_kept.py). 0 = the
-                                        #   record. To be set after the card's memory peak of F5 is measured.
       triangulation_device: cuda        # 2026-11-01 (USER "todo debe correr en GPU"): numpy (the path of record) |
                                         #   cpu | cuda — the batched multi-view DLTs of every triangulation of F5
                                         #   (the rungs' landmarks, the held-outs, the leave-one-view-out) and of
@@ -2909,7 +2863,7 @@ reconstruction:
                                         # is "hasta ahora la mejor nube"; the witness fusion delivered
                                         # 9 M / 0.2 M points judged worse) — precision/corrected_cloud.py
       source: omega_bent                # USER 2026-10-01 (pccr epoch 7, the best cloud): omega_bent = Omega's
-                                        #   depth at the session's ONE factor (fitted on F5's landmarks) + multi-view vote (f6_bend,
+                                        #   depth BENT to F5's landmarks + multi-view vote (f6_bend,
                                         #   precision/depth_on_f5.py; no plane sweep, no F7) — see bend: below.
                                         # (was) omega_corrected: F6's depth (tier 0 sweep + tier 1 Omega ×
                                         #   s_k, maximum coverage) with F5's camera + poses, the
@@ -3016,15 +2970,6 @@ reconstruction:
                                         # surface behind it beyond the depth tolerance). Census 2026-11-09: pccr
                                         # 3108's kept pixels — a median 90 % of the views that can test them
                                         # confirm, 94.1 % pass; zaragoza — 63 %, 74.6 % pass (its doubles/floaters)
-      vote_batch: 32                    # HOW the vote is computed, never what it decides (USER 2026-11-20: "todo lo
-                                        # que no cambie el resultado debe programarse mas rapido"). 0 = THE RECORD: one
-                                        # witness at a time, its depth and judge maps uploaded from the host at every
-                                        # (keyframe, witness) pair and its surface z-buffered by two stable sorts —
-                                        # pccr 2026-08-24: 781,066 pairs, most of F6's time.
-                                        # N ≥ 1 = the session's maps resident on the card (a few GB), the witnesses N
-                                        # at a time, each witness's surface kept between keyframes, the z-buffer as
-                                        # one exact minimum: EVERY MAP THE SAME BIT FOR BIT (tests/
-                                        # test_f6_vote_fast.py; every matrix product is the record's own call).
       fusion_in_place: true             # ON (USER 2026-11-09: "los recuperados que están cerca de la cámara, ése es el
                                         # problema" / "aplicá esta nueva regla"): a pixel the vote did not keep whose
                                         # witnesses' surfaces on its ray (in range, ≥ min_support_views within τ of
@@ -3053,38 +2998,34 @@ reconstruction:
                                         #   least refine.min_tri_deg away from the keyframe's camera (a view from
                                         #   almost the same place agrees with any depth). The cloud's `confidence` is
                                         #   that support. 0 = no floor.
-    bend:                               # F6's depth (precision/depth_on_f5.py). ONE DEPTH FACTOR FOR THE SESSION
-                                        # (USER 2026-11-20): Omega's depth is multiplied by one number, the robust fit
-                                        # of z_landmark / z_Omega over every landmark row of the session. Until that
-                                        # date the factor was fitted keyframe by keyframe (a window, a "verification"
-                                        # on landmarks of the same F5): it followed F5's local errors — 0.10 … 2.18 on
-                                        # pccr 2026-08-24, a cabinet published half a metre from itself.
-      enabled: true                     # false = Omega's depth stands as it is on F5's poses (the evaluation
-                                        #   battery's variant "sin F6"). NEVER change in production
-      neighbors: [-12, -6, -3, 3, 6, 12]  # keyframe offsets that vote on each pixel
-      tau_quantile: 75.0                # agreement tolerance = p75 of the session's OWN neighbour disagreement,
-                                        #   measured every run
-      irls_iterations: 10               # Huber IRLS steps of the factor's fit, from the least-squares start
-      min_depth_m: 0.05                 # landmark rows where Omega's depth is under this are not used
-      seed: 0                           # the fixed seed of F6's process (nothing in it is drawn at random)
-    coherence:                          # THE COHERENCE MEASURE AND THE DECISION BY ZONE (USER 2026-11-20: "si empeora
-                                        # ese paso o esa decisión se vuelve al estado mejor"; precision/coherence.py).
-                                        # A stage's result is measured against the state it started from, zone by
-                                        # zone (a zone = a cube's keyframes): one keyframe's pixels carried into
-                                        # another with the state's cameras and depth — ALONG the ray (depth against
-                                        # depth) and ACROSS it (image against image) — over neighbours and over
-                                        # keyframes of other passes. The rule is his: 95 %, 1.1 x the measured error
-                                        # (correction_graph.graph.improvement_error_factor).
-      device: cuda                      # cpu | cuda — "todo en placa"
-      pixel_stride: 4                   # BOUND (cost): every 4th pixel of a keyframe (rows and columns) is carried
-      search_px: 8                      # BOUND (search): shifts of up to 8 px are searched across the ray
-      blur_sigma_px: 1.0                # the grey images are smoothed by 1 px before they are compared
-      min_pixels: 500                   # a pair with fewer pixels on a common surface is not measured
-      same_surface_sigmas: 3.0          # same surface = depths within 3 robust sigmas of the pair's own differences
+    bend:                               # USER 2026-10-01 — the depth on F5 (precision/depth_on_f5.py)
+      enabled: true                     # false = no per-keyframe bend, Omega's depth stands (k = 1) on F5's poses
+                                        #   (the evaluation battery's variant "sin F6"). NEVER change in production
+      windows: [0, 1, 2, 4, 8]          # BOUND (search): ± keyframes pooled per bend; the HELD-OUT tracks choose
+                                        #   (pccr: ±0, held-out |dz|/z 7.25 % unbent → 2.80 %)
+      neighbors: [-12, -6, -3, 3, 6, 12]  # keyframe offsets that vote on each pixel (same as the repair)
+      tau_quantile: 75.0                # agreement tolerance = p75 of the session's OWN neighbour disagreement
+                                        #   (pccr 1.96 %), measured every run
+      # USER 2026-10-01: "exactamente el mismo ajuste que la 7" — the fit of pccr epoch 7, the cloud
+      # judged best (omega_bent_epoch7.py). A Huber IRLS iterated to convergence instead read 3.90 % on
+      # the same landmarks (2.80 % with these): the MAD scale re-estimated without end shrinks the fit.
+      irls_iterations: 10               # Huber IRLS steps from the least-squares start (epoch 7)
+      min_rows: 20                      # a keyframe whose window holds fewer landmark rows keeps Omega's depth
+                                        #   (k = 1) — epoch 7
+      min_depth_m: 0.05                 # landmark rows where Omega's depth is under this are not used (epoch 7)
+      # USER 2026-10-07 (docs/plan_determinismo.md points 48 / 49): the per-keyframe fit is JUDGED —
+      # c1, c2 enter only if |c| >= improvement_error_factor x their measured fit error; c0 is verified
+      # on >= 5 held-out rows of that keyframe by the rule of point 1 (else the pooled fit of its
+      # neighbours); the window is the smoothest whose held-out error is within that factor x the
+      # measured error of the best. The confidence is the chain's declared one (as refine / gauge).
       heldout_confidence: 0.95          # declared confidence (as everywhere else)
-      bootstrap: 2000                   # BOUND (cost): resamples of the rule's interval (as refine.permutations)
+      bootstrap: 2000                   # BOUND (cost): resamples (as refine.permutations / metric_lock)
       seed: 0                           # their fixed seed
-    flyers:                             # (claude_stac.txt 2026-10-04) flyer
+      device: cuda                      # 2026-11-01 (USER "todo debe correr en GPU"): numpy (the path of record) | cpu |
+                                        #   cuda — the bend's IRLS fits, every keyframe of a window at once
+                                        #   (precision/bend_torch.py), and its bootstraps' medians (precision/
+                                        #   judge_torch.py, the same draws). pccr: 95 s of F6 on numpy.
+    flyers:                             # Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): flyer
                                         # diagnosis of the published cloud (precision/flyers.py). A flyer is an
                                         # ISOLATED point or one BETWEEN two surfaces of its own frame; classes
                                         # a mixed edge · b view-inconsistent · c low texture / highlight · d other.
@@ -3101,6 +3042,58 @@ reconstruction:
       specular_gray: 250                # BOUND (sensor): mean gray at or above this = saturated highlight (reflection)
       sample_points: 2000000            # BOUND (cost): points sampled for the session percentiles
       seed: 0
+    mono_detail:                        # claude_stac.txt 2026-10-04: PointDiT (monocular, affine-invariant, sharp
+                                        # edges) refines the DETAIL of the bent Omega depth inside f6_bend, before
+                                        # the edge-keeping vote; it never touches scale, gauge, poses or camera
+                                        # (precision/pointdit_runner.py, precision/mono_detail.py).
+      enabled: true                     # USER 2026-10-04 ("la nitidez de los bordes de pointdit es abrumadoramente
+                                        #   superior a omega"): ON for the end-to-end run; false = epoch 8 bit for bit.
+                                        #   A/B pccr 2026-10-04 (analysis/2026-10-04_pointdit/ab): held-out 2.48 → 2.55 %,
+                                        #   in the edge band 2.54 → 2.70 % (p90 29 → 39 %), contradicted 15.1 → 15.7 %,
+                                        #   mixed-edge flyers −30 %, +17 min. The cloud in the viewer decides.
+      model: H                          # H = PointDiT-H/16 + DINOv3 ViT-H+/16 (default) | L = PointDiT-L/16 + ViT-L/16
+      steps: 16                         # Euler steps of the ODE from zeros (deterministic). USER 2026-10-04: the
+                                        #   vendor says more steps refine fine detail — "la mayor cantidad que
+                                        #   podamos". MEASURED on a pccr tile (A100): 57 ms per step per tile,
+                                        #   linear; the map converges at 16 (median change vs 12: 0.01 % of the
+                                        #   depth range, vs 24: 0.00 %) while the p99 edge jump still creeps
+                                        #   (0.211 @2 → 0.227 @16 → 0.231 @24). 16 = ~9 min on pccr's 578 tiles.
+      repo_dir: vendor/pointdit         # pinned submodule (vendor/VENDORS.lock.md)
+      weights_dir: vendor/pointdit/pretrained
+      dinov3_dir: vendor/pointdit/pretrained/dinov3
+      norm_max: 2.9                     # output norm above this = invalid pixel (the paper: sky dome at 3.0)
+      verify_sha256: true               # every checkpoint checked against the prefix in its name, once per file
+      seed: 0                           # docs/plan_determinismo.md point 54: every inference runs under
+                                        #   repro.deterministic_torch(seed) — strict deterministic kernels, TF32
+                                        #   off, cuDNN fixed; the ODE starts from zeros and draws nothing, the
+                                        #   seed completes the record (card + numerics land in depth_on_f5.json)
+      tile_px: 512                      # BOUND (model): native tile side = PointDiT's training size
+      tile_overlap_frac: 0.25           # share of a tile its neighbour repeats; feathered after the alignment
+      context_scale: 1.0                # 1.0 = native tiles (finest detail); 2.0 = twice the window, downscaled
+                                        #   (more context, coarser detail) — both measurable in the Phase 8 A/B
+      fit_space: depth                  # per-tile affine: depth (z_cal ≈ s·z_mono + b) | inverse (1/z_cal ≈ …)
+      irls_iterations: 10               # Huber IRLS steps (epoch 7's construction, gauge.huber_k)
+      min_support_frac: 0.05            # a tile with less support than this share of its pixels is rejected
+      tile_residual_quantile: 95.0      # a tile whose relative residual is above this percentile of the
+                                        #   session's own tiles is rejected (its pixels keep Omega)
+      lowpass_patch_fraction: 0.5       # lowpass σ = Omega's 16-px patch on the camera grid × this: what the
+                                        #   calibrated depth resolves; finer than that comes from PointDiT
+      detail_scope: edges               # USER 2026-10-04 (first end-to-end run): the detail over EVERY surface bent
+                                        #   walls and shed points off a rack; what the user wanted was the filos.
+                                        #   edges = PointDiT's detail only within detail_zone_deg of a discontinuity
+                                        #   (edges, ducts, cables, thin structures) and only within τ of Omega; every
+                                        #   other pixel keeps Omega. surfaces = the first run's recipe (A/B only)
+      detail_zone_deg: 1.8071201913258195  # BOUND: reach of the detail around a discontinuity ('edges'), an ANGLE
+                                        # (USER 2026-11-09) — px = round(fx · tan θ) on F6's grid; pccr 3108's 12 px
+                                        # at F5's fx 380.34
+      side_reach_deg: 0.4519205433650306   # BOUND: how far past the band front / back are read, an ANGLE — pccr
+                                        # 3108's 3 px at fx 380.34
+      overlays: false                   # per-keyframe PNGs under output/precision/mono_overlays/ for the eye
+      tile_batch: 0                     # tiles of a keyframe per PointDiT forward pass: 0 = all of them at once
+                                        #   (USER 2026-10-08: speed; the batch is part of the run's config, so its
+                                        #   bits repeat); a card that cannot hold it FAILS the stage, never halves it
+      ab_edge_gradient_quantile: 90.0   # the Phase 8 A/B's edge band = image gradient energy above this percentile
+                                        #   of the session's pixels, or a step of the calibrated depth (never PointDiT)
     cloud_metrics:                      # the floor + edge metrics of EVERY run (precision/cloud_metrics.py;
                                         # pending A "run checks" closed 2026-10-04): floor after f6_bend
                                         # (chunk_check.json) and on the certified cloud, edges in the acta.
@@ -4840,9 +4833,15 @@ evaluation:
       stages_off: [certify]
     no_f6_bend:
       kind: chain
-      description: (c) without F6's depth factor — Omega's depth as it is (factor 1)
+      description: (c) without F6's depth refinement — no per-keyframe bend (k = 1) and no PointDiT detail
       overrides:
         "reconstruction.precision.bend.enabled": false
+        "reconstruction.precision.mono_detail.enabled": false
+    no_pointdit:
+      kind: chain
+      description: (d) without PointDiT's detail at the edges
+      overrides:
+        "reconstruction.precision.mono_detail.enabled": false
     no_f5:
       kind: chain
       description: (e) without F5's bundle adjustment — the gauge's poses and F0's camera pass through

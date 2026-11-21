@@ -457,8 +457,8 @@ def _map_work(pipe: WorkerPipe, session_dir: str, config: dict):
 
     # ── THE PRECISION CORE, INSIDE THE RECONSTRUCTION (USER 2026-09-28: "f0 a f7 es
     # etapa de reconstrucción, antes de cloudcompy"): F0 → F5 refine camera and poses
-    # against the images, the depth stage (F6: Omega's depth at the session's one
-    # factor + multi-view vote, USER 2026-10-01) publishes THE cloud with its
+    # against the images, the depth stage (F6 bend: Omega's depth bent to F5 per
+    # keyframe + multi-view vote, USER 2026-10-01) publishes THE cloud with its
     # octree, the chunk check reports on it.
     _run_precision_core(pipe, session_path, output_dir, config)
 
@@ -1567,46 +1567,6 @@ def _build_vggtomega_config(config: dict, frames_dir=None) -> dict:
 OMEGA_RECORD_THREADS = 8
 
 
-def _adopt_omega_records(save_dir: Path, out_dir: Path, stems, pipe: WorkerPipe) -> None:
-    """THE RECORDS THE CUBE RUN WROTE ITSELF (Model.cube_closing: single_pass — loop_utils/cube_run.py
-    closing_pass: from each placed cube in memory, the arithmetic of _emit_omega_depth below; no placed cube is
-    left on disk to read back): taken as they are, by a rename. omega_records.json — written LAST by the fork —
-    says the set is whole; it must be of the layout the fork recorded (chunk_sim3.json) and list exactly this
-    run's keyframes, in order. Idempotent: a record already taken stays where it is; one that is in neither
-    place FAILS."""
-    import json
-    doc = json.loads((save_dir / OMEGA_RECORDS_DOC).read_text())
-    layout = json.loads((save_dir / "chunk_sim3.json").read_text())
-    if doc.get("layout_sha256") != layout.get("layout_sha256"):
-        raise RuntimeError(f"[omega-depth] {OMEGA_RECORDS_DOC} is of the layout {str(doc.get('layout_sha256'))[:12]}…, "
-                           f"the fork placed {str(layout.get('layout_sha256'))[:12]}… — the records are of another "
-                           f"run")
-    if [int(x) for x in doc.get("frames", [])] != [int(x) for x in stems]:
-        raise RuntimeError(f"[omega-depth] {OMEGA_RECORDS_DOC} lists {len(doc.get('frames', []))} keyframe(s) that "
-                           f"are not this run's {len(stems)} selected keyframes, in order")
-    src_dir = save_dir / str(doc.get("dir", OMEGA_RECORDS_DIR))
-    taken, there = 0, 0
-    for num in stems:
-        src, dst = src_dir / f"frame_{num}.npz", out_dir / f"frame_{num}.npz"
-        if src.exists():
-            try:
-                os.replace(src, dst)
-            except OSError:                               # (another device: the bytes are copied, then the source goes)
-                shutil.copyfile(src, dst)
-                src.unlink()
-            taken += 1
-        elif dst.exists():
-            there += 1
-        else:
-            raise RuntimeError(f"[omega-depth] the record of frame {num} is neither in {src_dir} nor in {out_dir}")
-    try:
-        src_dir.rmdir()
-    except OSError:
-        pass
-    pipe.send_log(f"[omega-depth] {taken} per-frame omega record(s) taken from the cube run's closing pass "
-                  f"(a rename; depth, conf, K_omega, pose_c2w)" + (f"; {there} already in place" if there else ""))
-
-
 def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
                       selected_frames_path: str, pipe: WorkerPipe, cubes=None) -> None:
     """Write per-frame VGGT-Omega depth (globally scale-consistent) to
@@ -1638,9 +1598,6 @@ def _emit_omega_depth(save_dir: Path, output_dir: Path, ranges,
     out_dir = output_dir / "omega_run" / "results_output"
     out_dir.mkdir(parents=True, exist_ok=True)
     aligned = save_dir / "_tmp_results_aligned"
-    if cubes is not None and (save_dir / OMEGA_RECORDS_DOC).exists():
-        _adopt_omega_records(save_dir, out_dir, stems, pipe)
-        return
 
     # STAC fix: the omega depth MUST use the ALIGNED per-frame pose, NOT the raw chunk
     # extrinsic. world_points are aligned (per-chunk Sim3) but cd['extrinsic'] is raw →
@@ -2048,55 +2005,7 @@ def _structure_config(va_cfg: dict) -> dict:
             "min_chunk_keyframes": int(st.get("min_chunk_keyframes", 32)),
             # USER 2026-11-19 ("lo que hay que hacer … es que compartan muchas mas imagenes entre cubos"): the share
             # of its keyframes a cube has in common with the next; 0.5 = the half of 2026-11-08
-            "cube_overlap": _cube_overlap(st.get("cube_overlap", 0.5)),
-            # USER 2026-11-19 ("Todo debe hacerse en placa" / "Dije que si al diseño, dale"): what the cube run
-            # does after its graph, and where its arithmetic runs — the record's values when the key is absent
-            "cube_closing": _one_of(st.get("cube_closing", "steps"), CUBE_CLOSINGS, "cube_closing"),
-            **{k: _one_of(st.get(k, "numpy"), CUBE_DEVICES, k) for k in CUBE_DEVICE_KEYS}}
-
-
-CUBE_CLOSINGS = ("steps", "single_pass")
-CUBE_DEVICES = ("numpy", "cpu", "cuda")
-CUBE_DEVICE_KEYS = ("cube_closing_device", "cube_seams_device", "cube_graph_device")
-OMEGA_RECORDS_DIR, OMEGA_RECORDS_DOC = "omega_records", "omega_records.json"    # (loop_utils/cube_run.py's names)
-
-
-def _one_of(v, allowed, key: str) -> str:
-    if not isinstance(v, str) or v not in allowed:
-        raise RuntimeError(f"reconstruction.vggtomega.structure.{key} {v!r}: one of {', '.join(allowed)}")
-    return v
-
-
-def _apply_cube_closing(cfg_v: dict, st_cfg: dict, keep_aligned: bool) -> dict:
-    """The cube run's closing keys into the vendor config (Model.cube_closing, .cube_closing_device,
-    .cube_seams_device, .cube_graph_device). The single pass leaves no placed cube on disk: asked for together
-    with certify.keep_aligned_chunks it FAILS here, naming both — nothing is switched silently."""
-    if st_cfg["cube_closing"] == "single_pass" and keep_aligned:
-        raise RuntimeError("reconstruction.vggtomega.structure.cube_closing is single_pass and certify."
-                           "keep_aligned_chunks is true — the single pass writes no placed cube "
-                           "(maplong_run/_tmp_results_aligned stays empty): set cube_closing: steps to keep them, "
-                           "or keep_aligned_chunks: false")
-    m = cfg_v.setdefault("Model", {})
-    m["cube_closing"] = st_cfg["cube_closing"]
-    for k in CUBE_DEVICE_KEYS:
-        m[k] = st_cfg[k]
-    return cfg_v
-
-
-def _link_or_copy(src: Path, dst: Path) -> str:
-    """``src`` under the name ``dst`` WITHOUT copying its bytes (a hard link: the same file under a second name;
-    the caller removes the first one) — a copy only where the file system cannot link (another device). The
-    fork's point files and origins reached output/ by a copy and a zlib round trip (pccr 2026-08-24's copy:
-    22 GB, 5.1 min with the card idle, for sources deleted a moment later). Returns "link" or "copy"."""
-    src, dst = Path(src), Path(dst)
-    if dst.exists() or dst.is_symlink():
-        dst.unlink()
-    try:
-        os.link(src, dst)
-        return "link"
-    except OSError:
-        shutil.copyfile(src, dst)
-        return "copy"
+            "cube_overlap": _cube_overlap(st.get("cube_overlap", 0.5))}
 
 
 def _cube_overlap(v) -> float:
@@ -2791,8 +2700,6 @@ def _run_vggtomega(pipe: WorkerPipe, frames_dir: Path, output_dir: Path,
         # cube graph's seams and closures fit only points within F6's range of their camera
         from precision.config import load_precision_config as _lpc_range
         vggt_config["Model"]["cube_range_m"] = float(_lpc_range(session_dir=output_dir.parent).view_range_m)
-        from reconstruction.loops.config import load_loops_config as _llc_close
-        _apply_cube_closing(vggt_config, _st_cfg, bool(_llc_close(config).certify.keep_aligned_chunks))
         _persist_cube_plan(_cplan, _sets, _owner, _n_selected, _walk0, _res, _ctx)
         pipe.send_log(f"CUBES (I4): walk {_walk0:.1f} m → {_plan_layout_text({'chunk_sets': _sets})}, every two "
                       f"neighbour blocks one cube; ONE Omega pass per cube, ONE Sim(3) graph")
@@ -3395,8 +3302,8 @@ def _postprocess_reconstruction(pipe: WorkerPipe, save_dir: Path, output_dir: Pa
 
     for i, ply_src in enumerate(ply_files):
         ply_dst = output_dir / f"chunk_{i:03d}.ply"
-        _how = _link_or_copy(Path(ply_src), ply_dst)
-        pipe.send_log(f"{'Linked' if _how == 'link' else 'Copied'} {Path(ply_src).name} → {ply_dst.name}")
+        shutil.copyfile(ply_src, ply_dst)
+        pipe.send_log(f"Copied {Path(ply_src).name} → {ply_dst.name}")
 
     # ── Copy GS PLY if available (DA3 with infer_gs=True) ──
     gs_dir = save_dir / "gs_ply"
@@ -3761,10 +3668,8 @@ def _generate_origins(vggt_save_dir: Path, output_dir: Path,
                             f"Chunk {i:03d} (src {K}): inline origins {n} vs PLY {ply_n} — "
                             f"points and origins are out of sync; the confidence mask used "
                             f"for the PLY and for the origins must be identical.")
-                    z.close()
-                    # the fork's own file under its output name (the same arrays: it used to be read,
-                    # inflated and deflated again for that)
-                    _link_or_copy(inline, output_dir / f"chunk_{i:03d}_origins.npz")
+                    np.savez_compressed(output_dir / f"chunk_{i:03d}_origins.npz",
+                                        **{k: z[k] for k in z.files})
                     _S_inline = (len(_cube_sets[K]) if (_cube_sets is not None and K < len(_cube_sets))
                                  else (_layout[K][1] - _layout[K][0]) if (
                                      _layout is not None and K < len(_layout)) else None)

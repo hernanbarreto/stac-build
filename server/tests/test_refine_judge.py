@@ -37,7 +37,7 @@ def _problem(seed=0, n_kf=14):
 
 def test_rungs_are_warm_started_nested_and_carry_their_continuation():
     w2c0, init, track, frame, uv, split, kf = _problem()
-    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, T._graph(len(kf)), CFG, SOLVER,
+    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, 0.01, CFG, SOLVER,
                          error_factor=FAC, log=QUIET)
     rungs = core["rungs"]
     costs = [rungs[n]["ceres"]["final_cost"] for n in ("R0", "R1", "R2")]
@@ -117,7 +117,7 @@ def test_a_rung_that_ends_above_its_parent_is_not_taken_and_the_next_starts_from
             r.final_cost = r.final_cost * 10.0
         return r
     monkeypatch.setattr(R, "run_rung", inflated)
-    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, T._graph(len(kf)), CFG, SOLVER,
+    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, 0.01, CFG, SOLVER,
                          error_factor=FAC, log=QUIET)
     r1 = core["rungs"]["R1"]
     assert r1["taken"] is False and "above R0" in r1["rejected"] and r1["nested_cost_check"]["passed"] is False
@@ -136,7 +136,7 @@ def test_heldout_tracks_that_do_not_round_trip_are_dropped_and_counted():
     bad = held_tracks[0]
     uv = uv.copy()
     uv[np.flatnonzero(track == bad)[0]] = [np.nan, np.nan]
-    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, T._graph(len(kf)), CFG, SOLVER,
+    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, 0.01, CFG, SOLVER,
                          error_factor=FAC, log=QUIET)
     assert core["dropped"]["heldout_init"]["tracks"] == 1
     for n in ("R0", "R1", "R2"):
@@ -149,7 +149,7 @@ def test_the_ladder_can_be_restricted_only_by_the_declared_diagnostic_variable(m
     w2c0, init, track, frame, uv, split, kf = _problem(seed=7)
     monkeypatch.setenv(R.RUNGS_ENV, "R0,R1")
     msgs = []
-    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, T._graph(len(kf)), CFG, SOLVER,
+    core = R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, 0.01, CFG, SOLVER,
                          error_factor=FAC, log=msgs.append)
     assert core["ladder"] == ["R0", "R1"] and core["ladder_restricted_by"] == R.RUNGS_ENV
     assert "R2" not in core["rungs"] and any("DIAGNOSTIC" in m for m in msgs)
@@ -163,24 +163,3 @@ def test_witness_poses_are_written_round_trip_exact():
     src = inspect.getsource(R.run_refine)
     assert "write_poses_exact" in src and ".10g" not in src
     assert "improvement_error_factor" in src and "TIMING_NAME" in src
-
-
-def test_the_phases_around_the_solves_are_measured_and_partition_the_run():
-    """`precision.refine.lap` (2026-11-20: the card idle 20.9 of F5's 75.3 minutes on pccr 2026-08-24's copy): every
-    phase around the solves has its wall time, a rung's solve apart from its continuation's ("+"), and the laps add
-    up to the time the ladder took — nothing of it is outside a named phase."""
-    import time
-    w2c0, init, track, frame, uv, split, kf = _problem()
-    R.laps(reset=True)
-    t = time.perf_counter()
-    R.refine_core(w2c0, init, WH, track, frame, uv, split, kf, T._graph(len(kf)), CFG, SOLVER, error_factor=FAC, log=QUIET,
-                  range_m=15.0)
-    took = time.perf_counter() - t
-    ph = R.laps()
-    for k in ("range", "groups", "triangulate_start", "clusters", "heldout_start", "R0.inputs", "R0.probe",
-              "R0.problem", "R0.solve", "R0.result", "R0+.solve", "R0+.result", "R0.heldout", "R1.solve", "R1.judge",
-              "R2+.solve", "R2.judge"):
-        assert k in ph, k
-    assert all(v >= 0 for v in ph.values())
-    assert abs(sum(ph.values()) - took) < 0.05 * took + 1.0, (sum(ph.values()), took)
-    assert R.laps(reset=True) and R.laps() == {}

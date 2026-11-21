@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""GPU determinism smoke test of the STRICT inference of the reconstruction: DA3 (intake I3 /
-F2 windows, docs/plan_determinismo.md point 27).
+"""GPU determinism smoke test of the two STRICT inferences of the reconstruction: DA3 (intake I3 /
+F2 windows, docs/plan_determinismo.md point 27) and PointDiT (F6 mono detail, point 54).
 
-It runs under ``torch.use_deterministic_algorithms(True)`` without warn-only: an op with no
+Both run under ``torch.use_deterministic_algorithms(True)`` without warn-only: an op with no
 deterministic CUDA kernel RAISES, and on a real run that raise would kill the reconstruction at
-the intake (DA3). This tool finds out BEFORE a run, on the real weights, the
+the intake (DA3) or at F6 (PointDiT). This tool finds out BEFORE a run, on the real weights, the
 real code path and real frames, in minutes:
 
-1. STRICT RAISE — the model is loaded by the pipeline's own loader (``extract_da3_depth._load_model``
-   with the pinned, sha-checked weights) and run on real frames of a session at the
-   pipeline's resolution, in bf16 autocast, strict. A missing deterministic kernel shows
+1. STRICT RAISE — each model is loaded by the pipeline's own loader (``extract_da3_depth._load_model``
+   with the pinned, sha-checked weights; ``precision.pointdit_runner.PointDiTRunner`` from the real
+   ``reconstruction.precision.mono_detail`` config) and run on real frames of a session at the
+   pipeline's resolution / tiles, in bf16 autocast, strict. A missing deterministic kernel shows
    up as the exception torch raises, naming the op.
 2. OP CENSUS — the first pass runs under a TorchDispatchMode that records every op executed. Ops
    outside torch's own namespaces (custom CUDA extensions, e.g. xformers) are LISTED APART: torch's
@@ -193,6 +194,56 @@ def run_da3(session: Path, n_frames: int, process_res: int, repeat: int, model_i
     return _passes(out, _one, repeat)
 
 
+# ── PointDiT ─────────────────────────────────────────────────────────────────────────────────
+
+def run_pointdit(session: Path, n_frames: int, repeat: int) -> Dict[str, Any]:
+    """F6's PointDiT calls (precision.mono_detail.run_stage: plan_tiles → runner.depth per tile,
+    at the configured tile size, steps, model and seed) on every tile of ``n_frames`` real frames."""
+    import cv2
+    from precision.config import load_precision_config
+    from precision.mono_detail import plan_tiles
+    from precision.pointdit_runner import PointDiTRunner
+    repro.ensure_cublas_workspace()                 # f6_bend runs under the step env: same here
+    out: Dict[str, Any] = {"model": "pointdit", "cotenants_at_start": _gpu_cotenants()}
+    # the session's job configuration (point 69: its frozen run_config.yaml, else declared)
+    md = load_precision_config(session_dir=session).mono_detail
+    out["config"] = {"model": md.model, "steps": int(md.steps), "seed": int(md.seed),
+                     "tile_px": int(md.tile_px), "tile_overlap_frac": float(md.tile_overlap_frac),
+                     "context_scale": float(md.context_scale), "enabled": bool(md.enabled)}
+    runner = PointDiTRunner(md)
+    if not runner.device.startswith("cuda"):
+        raise SystemExit("PointDiT smoke test needs CUDA (the pipeline runs it on the GPU)")
+    t0 = time.time()
+    runner.load()
+    out["load_s"] = round(time.time() - t0, 1)
+    images = []
+    for p in _spread(_frames(session), n_frames):
+        bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise SystemExit(f"unreadable frame {p}")
+        images.append((p.name, cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)))
+    out["frames"] = [n for n, _ in images]
+    plans = {n: plan_tiles(img.shape[0], img.shape[1], int(md.tile_px), float(md.tile_overlap_frac),
+                           float(md.context_scale)) for n, img in images}
+    out["tiles"] = {n: [[t.y0, t.x0, t.h, t.w, t.run_h, t.run_w] for t in ts] for n, ts in plans.items()}
+
+    def _one() -> Dict[str, Optional[str]]:
+        res: Dict[str, Optional[str]] = {}
+        for n, img in images:
+            for k, t in enumerate(plans[n]):
+                z, v = runner.depth(img[t.y0:t.y0 + t.h, t.x0:t.x0 + t.w], size=(t.run_h, t.run_w))
+                res[f"{n}#t{k}.z"] = _sha(z)
+                res[f"{n}#t{k}.valid"] = _sha(v)
+        return res
+
+    out = _passes(out, _one, repeat)
+    try:
+        out["footprint"] = runner.footprint()
+    except Exception as e:  # noqa: BLE001
+        out["footprint"] = f"unreadable: {e}"
+    return out
+
+
 # ── shared ───────────────────────────────────────────────────────────────────────────────────
 
 def _passes(out: Dict[str, Any], one, repeat: int) -> Dict[str, Any]:
@@ -253,8 +304,11 @@ def run_all(args) -> int:
             out = outdir / f"{model}_proc{k}.json"
             cmd = [sys.executable, str(Path(__file__).resolve()), model, "--session", str(args.session),
                    "--repeat", str(args.repeat), "--out", str(out)]
-            cmd += ["--frames", str(args.da3_frames), "--process-res", str(args.process_res),
-                    "--model-id", args.model_id]
+            if model == "da3":
+                cmd += ["--frames", str(args.da3_frames), "--process-res", str(args.process_res),
+                        "--model-id", args.model_id]
+            else:
+                cmd += ["--frames", str(args.pointdit_frames)]
             print(f"[smoke] {model} process {k + 1}/2: {' '.join(cmd[2:])}", flush=True)
             t0 = time.time()
             r = subprocess.run(cmd, cwd=str(_SERVER_DIR), env=env)
@@ -301,11 +355,17 @@ def main(argv=None) -> int:
     d.add_argument("--model-id", default=DA3_MODEL)
     d.add_argument("--repeat", type=int, default=2)
     d.add_argument("--out")
+    p = sub.add_parser("pointdit")
+    p.add_argument("--session", required=True)
+    p.add_argument("--frames", type=int, default=1)
+    p.add_argument("--repeat", type=int, default=2)
+    p.add_argument("--out")
     a = sub.add_parser("all")
     a.add_argument("--session", required=True)
     a.add_argument("--out-dir", required=True)
-    a.add_argument("--models", nargs="+", default=["da3"], choices=["da3"])
+    a.add_argument("--models", nargs="+", default=["da3", "pointdit"], choices=["da3", "pointdit"])
     a.add_argument("--da3-frames", type=int, default=4)
+    a.add_argument("--pointdit-frames", type=int, default=1)
     a.add_argument("--process-res", type=int, default=840)
     a.add_argument("--model-id", default=DA3_MODEL)
     a.add_argument("--repeat", type=int, default=2)
@@ -313,7 +373,10 @@ def main(argv=None) -> int:
     if args.cmd == "all":
         return run_all(args)
     session = Path(args.session).resolve()
-    doc = run_da3(session, args.frames, args.process_res, args.repeat, args.model_id)
+    if args.cmd == "da3":
+        doc = run_da3(session, args.frames, args.process_res, args.repeat, args.model_id)
+    else:
+        doc = run_pointdit(session, args.frames, args.repeat)
     _write(args.out, doc)
     return 0 if doc.get("status") == "ok" and doc.get("in_process_identical") else 1
 

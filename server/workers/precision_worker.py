@@ -2,7 +2,7 @@
 # claude_stac.txt §3 CORE, hosted by the reconstruction stage right after Omega
 # (USER 2026-09-28: "f0 a f7 es etapa de reconstrucción, antes de cloudcompy"):
 # F0 camera → F2 gauge → F4 tracks → F5 refinement → F6 bend (Omega's
-# depth at the session's one factor + multi-view vote, USER 2026-10-01 — the epoch-7
+# depth bent to F5 per keyframe + multi-view vote, USER 2026-10-01 — the epoch-7
 # recipe; cloud.source omega_bent) → the published cloud IS the reconstruction →
 # chunk check (report). The F6 sweep → F7 chain stays selectable (omega_corrected |
 # fusion). The steps and their resume live in precision/runner.py (the one list,

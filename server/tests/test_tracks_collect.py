@@ -26,16 +26,3 @@ def test_collector_equals_the_loop():
         assert np.array_equal(a["uv"], b["uv"]) and a["uv"].dtype == np.float32
         assert np.array_equal(a["sigma"], b["sigma"]) and np.array_equal(a["vis"], b["vis"])
         assert len(a["track"]) > 0 and (a["kind"] == TR.KIND_WITNESS).any()
-
-
-def test_the_frames_of_the_observations_are_the_set_of_them():
-    """`frames_of` (the report's coverage counts) is `set(obs_frame)`: frames repeated, missing, unordered, none,
-    and a negative id (the plain way)."""
-    from precision.tracks import frames_of
-    rng = np.random.default_rng(31)
-    for f in (rng.integers(0, 14000, 200_000), rng.integers(5, 9, 50), np.array([7]), np.zeros(0, np.int64),
-              np.array([3, -2, 3, 11]), rng.integers(0, 5000, 3000).astype(np.int32)):
-        got = frames_of(f)
-        assert got == set(int(x) for x in f) and all(type(x) is int for x in got)
-    kf = [3, 9, 11, 40]
-    assert len(frames_of(np.array([11, 3, 3, 8])) & set(kf)) == len(set(np.array([11, 3, 3, 8])) & set(kf)) == 2

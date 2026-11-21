@@ -1,4 +1,4 @@
-"""The flyer diagnosis (claude_stac.txt 2026-10-04). Synthetic, no GPU:
+"""Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): the flyer diagnosis. Synthetic, no GPU:
 a plate in front of a wall seen by three cameras; one injected flyer of each class must land in its class."""
 import sys
 from dataclasses import replace

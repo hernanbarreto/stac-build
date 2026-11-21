@@ -16,7 +16,7 @@ def test_seed_keys_and_regime_cover_every_seed_of_the_configuration():
     seeds = DET.seed_keys(raw)
     assert "reconstruction.precision.bend.seed" in seeds and "semantic.generation.temperature" in seeds
     assert all(k.endswith("seed") or k.endswith("temperature") for k in seeds)
-    assert len([k for k in seeds if k.endswith("seed")]) >= 13
+    assert len([k for k in seeds if k.endswith("seed")]) >= 14
     reg = DET.deterministic_regime(raw)
     assert reg["env"]["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8" and reg["env"]["PYTHONHASHSEED"] == "0"
     assert reg["torch"]["use_deterministic_algorithms"] is True and reg["vlm"]["temperature"] == 0.0

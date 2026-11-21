@@ -57,7 +57,7 @@ keyframe and weighs in no fit, pairing, scale, closure, co-visibility or statist
 | F2 | `precision.gauge` | the continuous metric gauge along the walk (DA3 windows vs mono, by held-out); refuses unless epoch 0 |
 | F4 | `precision.tracks` | native-pixel tracks: keyframe windows, revisit windows, witness windows; 20 % held out |
 | F3 | `precision.omega_probe` | VGGT-Ω resolution probe — report only |
-| F5 | `precision.refine` | joint refinement (torch LM): poses, camera, landmarks within the range; rungs R0 → R2, each taken only when the held-out improves beyond 1.1 × its own error with ≥ 5 judges. Since 2026-11-20 it CARRIES THE CUBE GRAPH (`precision/graph_prior.py`: every keyframe tied to its cube's middle keyframe as well as the cube's seams agree, the two keyframes of every closure as far as the solved graph honours it; no camera has a prior of its own) and its result is a CANDIDATE: measured against the state it started from, zone by zone, before it is applied (`precision/decide.py`) |
+| F5 | `precision.refine` | joint refinement (torch LM): poses, camera, landmarks within the range; rungs R0 → R3, each taken only when the held-out improves beyond 1.1 × its own error with ≥ 5 judges |
 | F6 | `precision.depth_on_f5` | THE PRODUCT — see 1.4 |
 | check | `precision.chunk_check` | floor / ceiling / camera per keyframe and per cube — report only |
 
@@ -65,21 +65,21 @@ When the chain must start again from F0 and no finished step has moved the geome
 0 from the lineage the publish kept in `output/_restart_epochs/` (`correction/restart.py`, `runner.needs_epoch0`).
 
 ### 1.4 F6 — the cloud (`precision/depth_on_f5.py`, `precision/f6_torch.py`, `cloud.source: omega_bent`)
-1. **The depth's factor — ONE for the session** (USER 2026-11-20): every keyframe's VGGT-Ω depth × one number, the
-   robust fit (Huber IRLS) of z_landmark / z_Ω over every landmark row of the session (rows within the range). Until
-   that date it was fitted keyframe by keyframe (k(u,v) = c0 + c1·ũ + c2·ṽ, c0 "verified" on F5's own held-out rows):
-   it followed F5's local errors — 0.10 … 2.18 on pccr 2026-08-24, a cabinet published half a metre from itself.
-2. **The vote — COLMAP's fusion rule** (`cloud.fusion_rule: colmap`). Witnesses: the walk neighbours (±3/6/12), the
+1. **Bend**: each keyframe's VGGT-Ω depth × k(u,v) = c0 + c1·ũ + c2·ṽ fitted to F5's landmarks (Huber IRLS; c0
+   verified on held-out rows; landmark rows within the range).
+2. **PointDiT detail at the edges only** (`mono_detail`): within 1.807° of a discontinuity (12 px at the calibration
+   focal), within τ; surfaces stay VGGT-Ω's.
+3. **The vote — COLMAP's fusion rule** (`cloud.fusion_rule: colmap`). Witnesses: the walk neighbours (±3/6/12), the
    turn and interval frames, and every keyframe that sees any part of the view. A witness confirms when the
    forward-backward reprojection is within 0.301° (`fusion_max_reproj_deg`), the depths within the session's measured
    τ, the triangulation angle in [1.5°, 30°] (`fusion_tri_min_deg` 1.5 since 2026-11-09) and the point within the range
    of it. **Kept**: born within the range, ≥ 5 confirmations (`min_support_views`), more confirm than see through it
    (`fusion_majority`), not hidden behind a better-supported surface (`fusion_occlusion_veto`).
-3. **In place** (`fusion_in_place`, 2026-11-09): a pixel not kept whose in-range witnesses' surfaces agree (≥ 5 within
+4. **In place** (`fusion_in_place`, 2026-11-09): a pixel not kept whose in-range witnesses' surfaces agree (≥ 5 within
    τ of their median) with its OWN depth within τ is published where it is — never moved. **No repair**
    (`fusion_repair: false`: moved pixels painted their birth colour elsewhere).
-4. The cloud's `confidence` column is the support (confirmations, or the agreeing witnesses for in place).
-5. **The cleaner** (`reconstruction/stream_clean.py`, by pieces, byte-identical to the in-memory path): voxel 5 mm
+5. The cloud's `confidence` column is the support (confirmations, or the agreeing witnesses for in place).
+6. **The cleaner** (`reconstruction/stream_clean.py`, by pieces, byte-identical to the in-memory path): voxel 5 mm
    (nearest real point to each cell centre) + SOR (8 neighbours, σ 3, no neighbour within 1.5 cm → out); published as
    an epoch with its Potree octree (deterministic for any thread count).
 

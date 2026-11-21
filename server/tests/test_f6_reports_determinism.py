@@ -1,5 +1,6 @@
-"""docs/plan_determinismo.md points 50, 56, 63 on the F6 side: the chunk check's floor plane is
-a seeded numpy RANSAC (the same plane every run, Open3D untouched), the correction id of a published cloud is derived from
+"""docs/plan_determinismo.md points 50, 54, 56, 63 on the F6 side: the chunk check's floor plane is
+a seeded numpy RANSAC (the same plane every run, Open3D untouched), PointDiT runs under the
+deterministic torch context and records it, the correction id of a published cloud is derived from
 the cloud (not drawn), no report of the chain carries a clock (timing sidecars do) and every report
 names the reconstruction it was measured on. CPU, synthetic."""
 import json
@@ -66,6 +67,43 @@ def test_chunk_check_measures_the_same_plane_twice_without_a_clock_in_its_report
     assert "measured_at" in cmt and "seconds" in cmt
 
 
+# ── point 54: PointDiT under the deterministic context ────────────────────
+
+def test_pointdit_inference_runs_under_deterministic_torch_and_records_it():
+    import torch
+    from precision import pointdit_runner as PR
+    from precision.config import load_precision_config
+    cfg = load_precision_config().mono_detail
+    seen = {}
+
+    def generate(x):
+        seen["deterministic"] = torch.are_deterministic_algorithms_enabled()
+        seen["warn_only"] = torch.is_deterministic_algorithms_warn_only_enabled()
+        seen["benchmark"] = torch.backends.cudnn.benchmark
+        seen["tf32"] = (torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32)
+        g = x[:, 1:2]
+        return torch.cat([torch.zeros_like(g), torch.zeros_like(g), g - g.mean()], 1)
+    r = PR.PointDiTRunner(cfg, log=QUIET, device="cpu", generate=generate)
+    img = (np.random.default_rng(0).random((48, 64, 3)) * 255).astype(np.uint8)
+    z1, _ = r.depth(img)
+    assert seen == {"deterministic": True, "warn_only": False, "benchmark": False, "tf32": (False, False)}
+    fp = r.footprint()
+    assert fp["seed"] == cfg.seed and fp["card"] is None and fp["autocast_dtype"] is None
+    assert fp["numerics"]["deterministic_algorithms"] is True and fp["numerics"]["seed"] == cfg.seed
+    assert fp["numerics"]["cudnn_benchmark"] is False and fp["numerics"]["matmul_allow_tf32"] is False
+    assert "vram_peak_gb" not in fp and r.timing() == {}
+    z2, _ = r.depth(img)
+    assert np.array_equal(z1, z2)
+    # the stage's report keeps the footprint and moves the clocks to the timing sidecar
+    from precision import depth_on_f5 as D
+    from precision.mono_detail import StageReport
+    rep = StageReport(params={"footprint": fp, "timing": {"vram_peak_gb": 1.0}, "bars": {}},
+                      seconds_pointdit=3.0, seconds_total=5.0)
+    doc = D.mono_report(rep, cfg)
+    assert "seconds_pointdit" not in doc and "timing" not in doc["params"] and doc["params"]["footprint"] == fp
+    assert D.mono_timing(rep) == {"seconds_pointdit": 3.0, "seconds_total": 5.0, "vram_peak_gb": 1.0}
+
+
 # ── points 56 / 63: the published cloud's id, meta and report ─────────────
 
 def _publish(tmp_path: Path, monkeypatch, n: int = 30) -> tuple:
@@ -125,7 +163,8 @@ def test_timing_sidecars_live_next_to_their_reports(tmp_path):
 
 # ── the config keys the points added fail the load when missing ──────────
 
-@pytest.mark.parametrize("section,key", [("bend", "seed"), ("bend", "irls_iterations"), ("bend", "min_depth_m")])
+@pytest.mark.parametrize("section,key", [("bend", "heldout_confidence"), ("bend", "bootstrap"), ("bend", "seed"),
+                                         ("mono_detail", "seed")])
 def test_a_missing_judge_key_fails_the_load_naming_it(section, key):
     import copy
     from config import cfg as raw_cfg
@@ -135,4 +174,4 @@ def test_a_missing_judge_key_fails_the_load_naming_it(section, key):
     with pytest.raises(PrecisionConfigError, match=f"{section}.{key}"):
         load_precision_config(bad)
     good = load_precision_config()
-    assert good.bend.seed == 0 and good.bend.irls_iterations >= 1 and good.bend.min_depth_m >= 0
+    assert good.bend.heldout_confidence == 0.95 and good.bend.bootstrap >= 1 and good.mono_detail.seed == 0

@@ -1,5 +1,12 @@
 # The pipeline checklist — the single list
 
+> **2026-11-20, night — THE RECONSTRUCTION WENT BACK TO ITS STATE OF 2026-11-19, ON HIS ORDER** (*"volve a la
+> reconstruccion que teniamos cuando hicimos las versiones que estan publicadas … solo la parte de reconstruccion
+> tenes que traer"*). Lines 1 – 4 below, marked DONE, are **no longer in the code**: their commits stay in the history
+> (9a13f32, 074cc6e, 1852390, 71c870f) and the unclosed work on lines 5 – 7 is a git stash. This list stays as the
+> document of the audit's 36 conclusions; none of it is in force in the pipeline until he takes it up again.
+> The check of the restore: `bash scripts/checklist/check_reconstruction_restored.sh`. Record: CLAUDE.md §7.
+
 USER 2026-11-20: *"hay que armar una lista en la que este volcado esto, con las conclusiones de lo que esta bien, lo que
 hay que corregir, corregir es eliminar, o hacer bien, etc"* / *"guardalo y es lo que vas actualizando, en la medida que
 vas avanzando"* / *"la lista no debe ser una ensalada de pendientes, debe ser exactamente la hoja de ruta de lo que se

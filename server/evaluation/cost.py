@@ -217,3 +217,29 @@ class StageMonitor:
         rep["gpu_hours"] = gpu_hours
         rep["cost_usd"] = rep["totals"]["cost_usd"]
         return rep
+
+
+def torch_peaks_reported(session_dir: Path) -> Dict[str, Any]:
+    """The torch peak memories the chain's own timing files report (declared, in GB)."""
+    out: Dict[str, Any] = {}
+    o = Path(session_dir) / "output"
+    for rel, keys in (("precision/depth_on_f5.timing.json", ("mono_detail", "vram_peak_gb")),):
+        p = o / rel
+        if not p.exists():
+            continue
+        try:
+            doc = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        node: Any = doc
+        for k in keys:
+            node = node.get(k) if isinstance(node, dict) else None
+        if node is not None:
+            out[rel] = node
+    return out
+
+
+def attach_torch_peaks(rec: Dict[str, Any]) -> None:
+    sd = rec.get("session_dir")
+    if sd and isinstance(rec.get("cost"), dict):
+        rec["cost"]["torch_peaks_reported"] = torch_peaks_reported(Path(sd))

@@ -166,6 +166,7 @@ Storage follows one rule: a session keeps what the next reader needs. The aligne
 | `vendor/VGGT-Long` | the VGGT-Ω cube run, seams, revisit bridges, the Sim(3) graph, the decision rule | fork, branch `gpu-main` |
 | `vendor/AMB3R-SLAM` | the whole-video first pass and its light map | fork, branch `stac` (third party: never pushed upstream) |
 | `vendor/depth-anything-3` | DA3 | pinned |
+| `vendor/pointdit` | PointDiT-H/16 (edge detail) | pinned, sha256-verified weights |
 | `vendor/GenRecon` | the scene mesh | pinned commit + `server/tools/genrecon/genrecon_stac.patch` |
 | `vendor/PotreeConverter` | the octree, with the canonical chunk order | patched |
 | `vendor/mvs-texturing` | texrecon, kept | — |

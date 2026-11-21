@@ -387,6 +387,8 @@ def run_variant(scene: SceneSpec, spec: VariantSpec, scene_dir: Path, cfg: Evalu
         if monitor is not None:
             try:
                 rec["cost"] = monitor.stop()
+                from evaluation.cost import attach_torch_peaks
+                attach_torch_peaks(rec)
             except Exception as e:  # noqa: BLE001
                 rec["cost"] = {"error": f"{type(e).__name__}: {e}"}
             _record(out_dir, rec)

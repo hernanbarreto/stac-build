@@ -36,6 +36,7 @@ def test_overrides_set_leaves_and_refuse_unknown_sections():
         V.apply_overrides(raw, {"reconstruction.nope.key": 1})
     # a variant whose overrides restate the defaults is the reference's configuration exactly
     defaults = V.apply_overrides(raw, {"reconstruction.precision.bend.enabled": True,
+                                       "reconstruction.precision.mono_detail.enabled": True,
                                        "reconstruction.precision.refine.enabled": True})
     assert defaults == raw
 

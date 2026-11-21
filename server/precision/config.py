@@ -194,9 +194,6 @@ class CameraConfig:
 GAUGE_INSTRUMENTS = ("da3_windows", "da3_mono", "vio", "stray", "known_dims")
 
 
-GAUGE_PROFILES = ("along_walk", "constant")
-
-
 @dataclass(frozen=True)
 class GaugeConfig:
     window_frames: int          # BOUND: keyframes per DA3 multi-view window (one joint inference)
@@ -224,13 +221,6 @@ class GaugeConfig:
     device: str = "numpy"           # 2026-11-01: numpy (the path of record) | cpu | cuda — where the per-frame
                                     #   Huber gains of the I3 windows run (precision/gauge_torch.py: a window's
                                     #   frames at once; 178 s of F2 on pccr on numpy)
-    profile: str = "along_walk"     # WHAT IS APPLIED: along_walk (THE RECORD) = the scale s(c) fitted along the
-                                    #   chainage, every step of the walk rescaled by it and the walk chained again
-                                    #   from the first camera; constant = ONE scale for the whole session (the
-                                    #   weighted fit of one value to the same rows): the walk keeps the shape the
-                                    #   cube graph closed. A test variant (2026-11-20, pccr 2026-08-24's copy:
-                                    #   along_walk moved cameras up to 2.3 m AFTER the graph had closed the
-                                    #   revisits) — which one the pipeline uses is THE USER'S decision
 
 
 # ── F4: native-pixel tracks ───────────────────────────────────────────────
@@ -259,23 +249,11 @@ class TracksConfig:
     dense_matcher: str          # none | roma (optional, off)
     tracker_weights_url: str    # the tracker checkpoint at a PINNED revision (never 'main')
     tracker_weights_sha256: str     # its content: a file that does not hash to this is refused
-    npz_threads: int = 0        # how tracks.npz is WRITTEN AND READ: 0 = THE RECORD (numpy's own writer and
-                                # reader, one member after another on one core: 9.2 min of idle card on pccr
-                                # 2026-08-24); N > 0 = its members deflated / inflated on N threads
-                                # (precision/npz_threads.py) — the same arrays. NO parameter of the tracks: a
-                                # session frozen before the key existed loads as the record (absent = 0)
 
 
 # ── F5: joint refinement + witness localisation ─────────────────────────
 
-
-
-def _keep_gb(tb: dict, key: str) -> float:
-    v = tb.get(key, 0.0)
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= float(v) < float("inf"):
-        raise ValueError(f"precision.refine.torch_ba.{key} {v!r}: GB of the card kept between LM trials, >= 0 "
-                         f"(0 = the record: nothing kept)")
-    return float(v)
+SOLVERS = ("ceres", "torch")
 
 
 @dataclass(frozen=True)
@@ -290,11 +268,6 @@ class TorchBAConfig:
     lambda_init: float              # the first LM damping (Ceres' initial_trust_region_radius 1e4 ↔ λ 1e-4)
     lm_diag_min: float              # Ceres' min_lm_diagonal / max_lm_diagonal: the damping's diagonal clamp
     lm_diag_max: float
-    keep_pair_plans_gb: float = 0.0     # BOUNDS (the card's memory), never decisions (USER 2026-11-20: "todo lo que no
-    keep_jacobians_gb: float = 0.0      # cambie el resultado debe programarse mas rapido"): a problem solved in chunks
-                                        # keeps, up to these GB, each chunk's pair plan between LM trials and its
-                                        # Jacobians between a linearisation and its trials — 0 = the record: made
-                                        # again at every trial. The same bits either way.
 
 
 @dataclass(frozen=True)
@@ -306,12 +279,15 @@ class RefineConfig:
                                 # default reproduces the chain exactly)
     min_tri_deg: float          # BOUND: a landmark's rays must span at least this (degrees)
     huber_px: float             # BOUND: Huber scale of the reprojection loss (native px)
-    max_iterations: int         # BOUND: Levenberg-Marquardt iterations per rung
+    max_iterations: int         # BOUND: Ceres iterations per rung (reconstruction.colmap_ba)
+    ceres_threads: int          # must stay 1 for bit-identical results (validated at load)
     heldout_confidence: float   # declared confidence of the held-out comparisons
     permutations: int           # BOUND: permutation / bootstrap resamples of the tests
     seed: int                   # their fixed seed
     min_witness_corr: int       # BOUND: 2D-3D correspondences a witness needs for PnP
-    torch_ba: TorchBAConfig     # the solver's stopping rules and damping (precision/ba_torch.py)
+    solver: str                 # 2026-11-01: ceres (pycolmap, one CPU thread) | torch (precision/ba_torch.py: the same
+                                #   problem on the GPU, deterministic by sorted reductions)
+    torch_ba: TorchBAConfig     # the torch solver's stopping rules and damping (used when solver is torch)
     triangulation_device: str   # 2026-11-01: numpy (the path of record, LAPACK per track) | cpu | cuda — where the
                                 #   batched multi-view DLTs of F5 / F6 run (refine._dlt_stack_t); the same
                                 #   landmarks to 1e-9 (tests/test_triangulate_torch.py)
@@ -436,39 +412,30 @@ class CloudConfig:
     no_birth_without_parallax: bool   # USER 2026-11-08: a keyframe I1 made by ROTATION (no parallax) votes as a
                                       # witness but gives birth to no point — COLMAP registers such an image by
                                       # PnP and triangulates nothing from it
-    vote_batch: int = 0         # USER 2026-11-20 ("todo lo que no cambie el resultado debe programarse mas rapido"):
-                                # 0 = THE RECORD (one witness at a time, its maps uploaded at every pair); N ≥ 1 = the
-                                # session's maps resident on the device, the witnesses N at a time — the same bits
 
 
 # ── depth on F5 (USER 2026-10-01: the epoch-7 recipe, precision/depth_on_f5.py) ──
 
 @dataclass(frozen=True)
 class BendConfig:
-    enabled: bool               # false = Omega's depth stands as it is on F5's poses (the evaluation battery's
-                                # variant "sin refinamiento de profundidad F6"); the vote and the cleaner still run
+    enabled: bool               # false = NO per-keyframe bend: Omega's depth stands (k = 1) on F5's
+                                # poses; the vote and the cleaner still run — the evaluation battery's
+                                # variant "sin refinamiento de profundidad F6" (rule 4: default = the
+                                # validated recipe bit for bit)
+    windows: Tuple[int, ...]    # BOUND (search): smoothing windows (± keyframes) the held-out chooses among
     neighbors: Tuple[int, ...]  # keyframe offsets that vote on a pixel
     tau_quantile: float         # agreement tolerance = this percentile of the session's OWN neighbour
                                 # disagreement (measured every run, never a fixed number)
-    irls_iterations: int        # Huber IRLS steps of the session's depth factor
-    min_depth_m: float          # landmark rows on Omega depth under this are not used
-    seed: int                   # the fixed seed of F6's process (nothing in it is drawn at random)
-
-
-# ── the coherence measure and the decision by zone (USER 2026-11-20) ───────
-
-@dataclass(frozen=True)
-class CoherenceConfig:
-    device: str                 # cpu | cuda — where the measure's arrays live (precision/coherence.py)
-    pixel_stride: int           # BOUND (cost): every n-th pixel of a keyframe (rows and columns) is carried
-    search_px: int              # BOUND (search): half-width of the window of shifts searched across the ray
-    blur_sigma_px: float        # the grey images are smoothed by this before they are compared
-    min_pixels: int             # fewest pixels on a common surface for a pair to be measured at all
-    same_surface_sigmas: float  # a carried pixel is on the SAME surface as the pixel it lands on when their depths
-                                # differ by at most this many robust sigmas of the pair's own differences
-    heldout_confidence: float   # declared confidence of the rule by zone (as everywhere else)
-    bootstrap: int              # BOUND (cost): resamples of the rule's interval
+    irls_iterations: int        # Huber IRLS steps (pccr epoch 7's fit, USER 2026-10-01)
+    min_rows: int               # fewer landmark rows in the window → k = 1 (epoch 7)
+    min_depth_m: float          # landmark rows on Omega depth under this are not used (epoch 7)
+    heldout_confidence: float   # declared confidence of the per-keyframe c0 verification and of the
+                                # window choice's error bar (docs/plan_determinismo.md points 48 / 49)
+    bootstrap: int              # BOUND (cost): resamples of those bootstraps
     seed: int                   # their fixed seed
+    device: str                 # 2026-11-01: numpy (the path of record) | cpu | cuda — where the bend's IRLS fits
+                                #   (every keyframe of a window at once, precision/bend_torch.py) and its bootstrap
+                                #   medians (precision/judge_torch.py: the fork's rule, the same draws) run
 
 
 # ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
@@ -485,6 +452,39 @@ class FlyersConfig:
     specular_gray: float        # BOUND (sensor): mean gray at or above this = saturated highlight
     sample_points: int          # BOUND (cost): points sampled for the session percentiles
     seed: int
+
+
+# ── mono detail: PointDiT refines the bent depth (claude_stac.txt 2026-10-04) ─────
+
+@dataclass(frozen=True)
+class MonoDetailConfig:
+    enabled: bool               # feature flag — false keeps the baseline (pccr epoch 8) reproducible
+    model: str                  # "H" (PointDiT-H/16 + DINOv3 ViT-H+/16, default) | "L"
+    steps: int                  # Euler steps of the ODE from zeros (deterministic)
+    repo_dir: str               # the vendored PointDiT checkout (relative to the repo root)
+    weights_dir: str            # the released checkpoints
+    dinov3_dir: str             # the gated DINOv3 encoder weights
+    norm_max: float             # output norm above this = invalid pixel (the paper's sky dome sits at 3.0)
+    verify_sha256: bool         # check every checkpoint against the prefix in its name (once per file)
+    seed: int                   # the torch seed of repro.deterministic_torch around every inference
+                                # (point 54; the ODE draws nothing — the record is complete)
+    tile_px: int                # BOUND (model): the native tile side PointDiT runs at (512 = its training size)
+    tile_overlap_frac: float    # share of a tile its neighbour repeats (feathered)
+    context_scale: float        # 1.0 = native tile; 2.0 = a window twice as large downscaled to the tile
+    fit_space: str              # 'depth' (z_cal ≈ s·z_mono + b) | 'inverse' (1/z_cal ≈ s·z_mono + b)
+    irls_iterations: int        # Huber IRLS steps of the per-tile affine fit (epoch 7's construction)
+    min_support_frac: float     # a tile with less support than this share of its pixels is rejected
+    tile_residual_quantile: float  # a tile whose residual is above this percentile of the session's tiles is rejected
+    lowpass_patch_fraction: float  # lowpass sigma = Omega's patch on the camera grid × this
+    detail_scope: str           # 'edges' (detail only near discontinuities, within tau) | 'surfaces' (everywhere)
+    detail_zone_deg: float      # BOUND: how far from a discontinuity the detail reaches ('edges') — an ANGLE
+                                # (USER 2026-11-09), px = round(fx · tan θ) on F6's grid
+    side_reach_deg: float       # BOUND: how far past the band the front/back surfaces are read — an ANGLE
+    overlays: bool              # per-keyframe PNG overlays (bent | aligned | detail | band + status) for the eye
+    ab_edge_gradient_quantile: float  # the A/B's edge band: image gradient energy above this percentile of the
+                                      # session's pixels, or a step of the CALIBRATED depth — never PointDiT's
+    tile_batch: int             # tiles of a keyframe per PointDiT forward pass (0 = all of them at once — USER
+                                # 2026-10-08: speed; part of the run's config, so the batch's bits repeat)
 
 
 # ── cloud metrics of every run (floor + edges; pending A "run checks", 2026-10-04) ──
@@ -557,7 +557,7 @@ class PrecisionConfig:
     cloud: CloudConfig
     bend: BendConfig
     flyers: FlyersConfig
-    coherence: CoherenceConfig
+    mono_detail: MonoDetailConfig
     cloud_metrics: CloudMetricsConfig
     chunk_check: ChunkCheckConfig
     runner: RunnerConfig
@@ -706,11 +706,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
         delete_windows_after_chain=_bool(g, "delete_windows_after_chain", "gauge"),
         device=_enum(g, "device", "gauge", ("numpy", "cpu", "cuda")),
-        profile=g.get("profile", "along_walk"),     # absent (a session frozen before the key) = the record
     )
-    if gauge.profile not in GAUGE_PROFILES:
-        raise PrecisionConfigError(
-            f"'{SECTION}.gauge.profile' {gauge.profile!r}: one of {list(GAUGE_PROFILES)}")
     if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:
         raise PrecisionConfigError(
             f"'{SECTION}.gauge.window_overlap_frac' and '.heldout_confidence' must be below 1")
@@ -742,12 +738,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         dense_matcher=_enum(tk, "dense_matcher", "tracks", DENSE_MATCHERS),
         tracker_weights_url=_str(tk, "tracker_weights_url", "tracks"),
         tracker_weights_sha256=_str(tk, "tracker_weights_sha256", "tracks").lower(),
-        npz_threads=tk.get("npz_threads", 0),
     )
-    if isinstance(tracks.npz_threads, bool) or not isinstance(tracks.npz_threads, int) or tracks.npz_threads < 0:
-        raise PrecisionConfigError(
-            f"'{SECTION}.tracks.npz_threads' {tracks.npz_threads!r}: 0 (the record: numpy's own writer and reader) "
-            f"or the number of threads tracks.npz is deflated and read on")
     if len(tracks.tracker_weights_sha256) != 64 or \
             any(c not in "0123456789abcdef" for c in tracks.tracker_weights_sha256):
         raise PrecisionConfigError(
@@ -769,11 +760,13 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         min_tri_deg=_num(rf, "min_tri_deg", "refine", lo=0.0, lo_excl=True),
         huber_px=_num(rf, "huber_px", "refine", lo=0.0, lo_excl=True),
         max_iterations=_num(rf, "max_iterations", "refine", lo=1, integer=True),
+        ceres_threads=_num(rf, "ceres_threads", "refine", lo=1, integer=True),
         heldout_confidence=_num(rf, "heldout_confidence", "refine", lo=0.0, hi=1.0, lo_excl=True),
         permutations=_num(rf, "permutations", "refine", lo=1, integer=True),
         seed=_num(rf, "seed", "refine", lo=0, integer=True),
         # PnP needs four points (P3P + one to choose)
         min_witness_corr=_num(rf, "min_witness_corr", "refine", lo=4, integer=True),
+        solver=_enum(rf, "solver", "refine", SOLVERS),
         triangulation_device=_enum(rf, "triangulation_device", "refine", ("numpy", "cpu", "cuda")),
         torch_ba=TorchBAConfig(function_tolerance=_num(tb, "function_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
                                parameter_tolerance=_num(tb, "parameter_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
@@ -781,12 +774,15 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                                min_relative_decrease=_num(tb, "min_relative_decrease", "refine.torch_ba", lo=0.0, hi=1.0),
                                lambda_init=_num(tb, "lambda_init", "refine.torch_ba", lo=0.0, lo_excl=True),
                                lm_diag_min=_num(tb, "lm_diag_min", "refine.torch_ba", lo=0.0, lo_excl=True),
-                               lm_diag_max=_num(tb, "lm_diag_max", "refine.torch_ba", lo=0.0, lo_excl=True),
-                               keep_pair_plans_gb=_keep_gb(tb, "keep_pair_plans_gb"),
-                               keep_jacobians_gb=_keep_gb(tb, "keep_jacobians_gb")),
+                               lm_diag_max=_num(tb, "lm_diag_max", "refine.torch_ba", lo=0.0, lo_excl=True)),
     )
     if refine.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.refine.heldout_confidence' must be below 1")
+    if refine.ceres_threads != 1:
+        raise PrecisionConfigError(
+            f"'{SECTION}.refine.ceres_threads' = {refine.ceres_threads}: it must stay 1 — Ceres' "
+            f"multi-threaded evaluation and Schur accumulation sum in a run-dependent order, so "
+            f"the refined poses, camera and landmarks would not be bit-identical run to run")
 
     dp = _sub(sec, "depth", "")
     cm = _sub(dp, "colmap", "depth")
@@ -893,11 +889,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                         fusion_occlusion_veto=bool(cl.get("fusion_occlusion_veto", False)),
                         fusion_majority=bool(cl.get("fusion_majority", False)),
                         fusion_in_place=bool(cl.get("fusion_in_place", False)),
-                        no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)),
-                        vote_batch=cl.get("vote_batch", 0))
-    if isinstance(cloud.vote_batch, bool) or not isinstance(cloud.vote_batch, int) or cloud.vote_batch < 0:
-        raise ValueError(f"precision.cloud.vote_batch {cloud.vote_batch!r}: 0 (the record: one witness at a time) or "
-                         f"the number of witnesses voted at a time with the session's maps resident on the device")
+                        no_birth_without_parallax=bool(cl.get("no_birth_without_parallax", True)))
     if cloud.fusion_rule not in ("colmap", "tau", "adjust"):
         raise ValueError(f"precision.cloud.fusion_rule {cloud.fusion_rule!r}: 'colmap' | 'tau' | 'adjust'")
     _gone(cl, "fusion_witness_max_m", "cloud", "USER 2026-11-09: ONE range for every stage — reconstruction.view_range_m")
@@ -916,27 +908,23 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         seed=_num(cc, "seed", "chunk_check", lo=0, integer=True),
     )
     bd = _sub(sec, "bend", "")
+    windows = tuple(int(x) for x in _require(bd, "windows", "bend"))
     neighbors = tuple(int(x) for x in _require(bd, "neighbors", "bend"))
-    if not neighbors or any(n == 0 for n in neighbors):
+    if not windows or min(windows) < 0:
+        raise PrecisionConfigError(f"'{SECTION}.bend.windows' must be non-negative keyframe counts, got {windows}")
+    if not neighbors or 0 in neighbors:
         raise PrecisionConfigError(f"'{SECTION}.bend.neighbors' must be non-zero keyframe offsets, got {neighbors}")
-    bend = BendConfig(enabled=_bool(bd, "enabled", "bend"), neighbors=neighbors,
+    bend = BendConfig(enabled=_bool(bd, "enabled", "bend"), windows=windows, neighbors=neighbors,
                       tau_quantile=_num(bd, "tau_quantile", "bend", lo=0.0, hi=100.0, lo_excl=True),
                       irls_iterations=_num(bd, "irls_iterations", "bend", lo=1, integer=True),
+                      min_rows=_num(bd, "min_rows", "bend", lo=3, integer=True),
                       min_depth_m=_num(bd, "min_depth_m", "bend", lo=0.0),
-                      seed=_num(bd, "seed", "bend", lo=0, integer=True))
-    co = _sub(sec, "coherence", "")
-    coherence = CoherenceConfig(device=_enum(co, "device", "coherence", ("cpu", "cuda")),
-                                pixel_stride=_num(co, "pixel_stride", "coherence", lo=1, integer=True),
-                                search_px=_num(co, "search_px", "coherence", lo=1, integer=True),
-                                blur_sigma_px=_num(co, "blur_sigma_px", "coherence", lo=0.0),
-                                min_pixels=_num(co, "min_pixels", "coherence", lo=2, integer=True),
-                                same_surface_sigmas=_num(co, "same_surface_sigmas", "coherence", lo=0.0, lo_excl=True),
-                                heldout_confidence=_num(co, "heldout_confidence", "coherence", lo=0.0, hi=1.0,
-                                                        lo_excl=True),
-                                bootstrap=_num(co, "bootstrap", "coherence", lo=1, integer=True),
-                                seed=_num(co, "seed", "coherence", lo=0, integer=True))
-    if coherence.heldout_confidence >= 1.0:
-        raise PrecisionConfigError(f"'{SECTION}.coherence.heldout_confidence' must be below 1")
+                      heldout_confidence=_num(bd, "heldout_confidence", "bend", lo=0.0, hi=1.0, lo_excl=True),
+                      bootstrap=_num(bd, "bootstrap", "bend", lo=1, integer=True),
+                      seed=_num(bd, "seed", "bend", lo=0, integer=True),
+                      device=_enum(bd, "device", "bend", ("numpy", "cpu", "cuda")))
+    if bend.heldout_confidence >= 1.0:
+        raise PrecisionConfigError(f"'{SECTION}.bend.heldout_confidence' must be below 1")
     fl = _sub(sec, "flyers", "")
     flyers = FlyersConfig(knn_k=_num(fl, "knn_k", "flyers", lo=1, integer=True),
                           isolated_quantile=_num(fl, "isolated_quantile", "flyers", lo=0.0, hi=100.0, lo_excl=True),
@@ -948,6 +936,40 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                           specular_gray=_num(fl, "specular_gray", "flyers", lo=0.0, hi=255.0),
                           sample_points=_num(fl, "sample_points", "flyers", lo=1, integer=True),
                           seed=_num(fl, "seed", "flyers", lo=0, integer=True))
+    md = _sub(sec, "mono_detail", "")
+    model = str(_require(md, "model", "mono_detail"))
+    if model not in ("H", "L"):
+        raise PrecisionConfigError(f"'{SECTION}.mono_detail.model' must be 'H' or 'L', got {model!r}")
+    fit_space = str(_require(md, "fit_space", "mono_detail"))
+    detail_scope = str(_require(md, "detail_scope", "mono_detail"))
+    if detail_scope not in ("edges", "surfaces"):
+        raise PrecisionConfigError(f"'{SECTION}.mono_detail.detail_scope' must be 'edges' or 'surfaces', got {detail_scope!r}")
+    if fit_space not in ("depth", "inverse"):
+        raise PrecisionConfigError(f"'{SECTION}.mono_detail.fit_space' must be 'depth' or 'inverse', got {fit_space!r}")
+    mono_detail = MonoDetailConfig(enabled=_bool(md, "enabled", "mono_detail"), model=model,
+                                   steps=_num(md, "steps", "mono_detail", lo=1, integer=True),
+                                   repo_dir=str(_require(md, "repo_dir", "mono_detail")),
+                                   weights_dir=str(_require(md, "weights_dir", "mono_detail")),
+                                   dinov3_dir=str(_require(md, "dinov3_dir", "mono_detail")),
+                                   norm_max=_num(md, "norm_max", "mono_detail", lo=0.0, lo_excl=True),
+                                   verify_sha256=_bool(md, "verify_sha256", "mono_detail"),
+                                   seed=_num(md, "seed", "mono_detail", lo=0, integer=True),
+                                   tile_px=_num(md, "tile_px", "mono_detail", lo=16, integer=True),
+                                   tile_overlap_frac=_num(md, "tile_overlap_frac", "mono_detail", lo=0.0, hi=0.95),
+                                   context_scale=_num(md, "context_scale", "mono_detail", lo=1.0),
+                                   fit_space=fit_space,
+                                   irls_iterations=_num(md, "irls_iterations", "mono_detail", lo=1, integer=True),
+                                   min_support_frac=_num(md, "min_support_frac", "mono_detail", lo=0.0, hi=1.0),
+                                   tile_residual_quantile=_num(md, "tile_residual_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
+                                   lowpass_patch_fraction=_num(md, "lowpass_patch_fraction", "mono_detail", lo=0.0, lo_excl=True),
+                                   detail_scope=detail_scope,
+                                   detail_zone_deg=_num(md, "detail_zone_deg", "mono_detail", lo=0.0, hi=90.0,
+                                                        lo_excl=True),
+                                   side_reach_deg=_num(md, "side_reach_deg", "mono_detail", lo=0.0, hi=90.0,
+                                                       lo_excl=True),
+                                   overlays=_bool(md, "overlays", "mono_detail"),
+                                   ab_edge_gradient_quantile=_num(md, "ab_edge_gradient_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
+                                   tile_batch=_num(md, "tile_batch", "mono_detail", lo=0, integer=True))
     cm = _sub(sec, "cloud_metrics", "")
     cloud_metrics = CloudMetricsConfig(
         ransac_iterations=_num(cm, "ransac_iterations", "cloud_metrics", lo=1, integer=True),
@@ -973,7 +995,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
           "(edge_max_objects x edge_max_points_per_object), never by a wall clock")
     return PrecisionConfig(enabled=enabled, camera=camera, gauge=gauge,
                            tracks=tracks, refine=refine, depth=depth, fuse=fuse,
-                           cloud=cloud, bend=bend, flyers=flyers, coherence=coherence,
+                           cloud=cloud, bend=bend, flyers=flyers, mono_detail=mono_detail,
                            cloud_metrics=cloud_metrics, chunk_check=chunk_check, runner=runner,
                            view_range_m=_view_range(raw),
                            raw=(raw if isinstance(raw, dict) else None))

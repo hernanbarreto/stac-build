@@ -6,8 +6,8 @@
     python3 inventory.py summary [FILE]           the classes, their files and bytes
 
 USER 2026-11-18: "debe quedar exactamente como está ahora … cada cosa que avancemos debemos
-actualizarlo para que siempre quede actualizado a la perfección".
-A list of things to restore can forget one; this cannot: it starts from what IS on the
+actualizarlo para que siempre quede actualizado a la perfección … Revisa pointdit r3d etc etc son
+muchos". A list of things to restore can forget one; this cannot: it starts from what IS on the
 volume and every file must fall in a class that names how it comes back —
 
   git        tracked by a git repository (the repo itself, a vendor clone, a submodule): its commit
@@ -145,8 +145,8 @@ def git(repo: Path, *args: str) -> str:
 
 
 def known_repo_dirs():
-    """The work trees the rebuild itself clones: the repo, its submodules, steps_vendors.sh's clones
-    — each with its own submodules. A git clone that some BUILD made (mvs-texturing's
+    """The work trees the rebuild itself clones: the repo, its submodules, steps_vendors.sh's clones,
+    PointDiT's hub code — each with its own submodules. A git clone that some BUILD made (mvs-texturing's
     elibs) is not one of them: its files are archived as they are."""
     dirs = [REPO]
     for line in git(REPO, "config", "--file", ".gitmodules", "--get-regexp", "path").splitlines():
@@ -154,6 +154,7 @@ def known_repo_dirs():
     import re
     for name in re.findall(r'^\s*"([A-Za-z0-9._-]+)\|https://', (HERE / "steps_vendors.sh").read_text(), re.M):
         dirs.append(REPO / "vendor" / name)
+    dirs.append(REPO / "vendor" / "pointdit" / "third_party" / "dinov3")
     out = []
     for d in dirs:
         if not (d / ".git").exists():

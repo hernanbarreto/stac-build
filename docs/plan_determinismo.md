@@ -59,13 +59,13 @@ PENDIENTE, corre mientras el usuario prueba reconstrucciones y no toca archivos 
 ## F5 y F6
 46. F5 elige la cámara solo por significancia. DECIDIDO: un modelo más complejo entra solo si: significativo con remuestreo por keyframe (no por track), ≥ 5 jueces y mejora ≥ 2 × el error del solucionador (punto 59); si no, queda el más simple. R2 arranca de la solución de R1 (punto 61).
 47. Camino de F6 con lente: refutado como punto aparte (consecuencia del 46). Sin acción propia.
-48. Ajuste de profundidad de F6 por keyframe sin control. DECIDIDO: c1 y c2 solo entran si |c| ≥ 2 × su error medido del ajuste; c0 se verifica con filas reservadas de ese keyframe (≥ 5) con la regla del punto 1; si no se verifica, se usa el ajuste agrupado de sus vecinos. (El ajuste por keyframe fue eliminado el 2026-11-20 por decisión del usuario: F6 usa un solo factor de profundidad para toda la sesión; este punto ya no aplica.)
-49. Ventana de ese ajuste entre valores casi empatados. DECIDIDO: se elige la ventana más suave cuyo error reservado esté dentro de 2 × el error medido de la mejor. (El ajuste por keyframe fue eliminado el 2026-11-20 por decisión del usuario: F6 usa un solo factor de profundidad para toda la sesión; este punto ya no aplica.)
+48. Ajuste de profundidad de F6 por keyframe sin control. DECIDIDO: c1 y c2 solo entran si |c| ≥ 2 × su error medido del ajuste; c0 se verifica con filas reservadas de ese keyframe (≥ 5) con la regla del punto 1; si no se verifica, se usa el ajuste agrupado de sus vecinos.
+49. Ventana de ese ajuste entre valores casi empatados. DECIDIDO: se elige la ventana más suave cuyo error reservado esté dentro de 2 × el error medido de la mejor.
 50. Plano del piso con Open3D sin semilla. Corrección: RANSAC con semilla y un hilo.
 51. F6 usa máscaras de una segmentación vieja. Corrección: no leerlas si no están selladas para esta reconstrucción.
-52. Piso de confianza por valores extremos (el modelo de detalle de bordes y sus pesos ya no existen: eliminado el 2026-11-20). DECIDIDO: se mantiene (es el piso único de confianza decidido por el usuario y compartido con el visor); es determinista con la misma entrada.
+52. Piso de confianza y pesos de PointDiT por valores extremos. DECIDIDO: se mantiene (es el piso único de confianza decidido por el usuario y compartido con el visor); es determinista con la misma entrada.
 53. Umbrales por percentil autorreferentes en F6. DECIDIDO: se mantienen (receta validada); los umbrales y sus márgenes se registran en el reporte.
-54. El modelo de detalle de bordes en bf16 sin modo determinista. Corrección: modo determinista y tarjeta registrada. (Ese modelo fue eliminado del pipeline el 2026-11-20 por decisión del usuario: este punto ya no aplica.)
+54. PointDiT en bf16 sin modo determinista. Corrección: modo determinista y tarjeta registrada.
 55. R3 parte de poses de R2 con puntos y priors viejos. Corrección: retriangular y usar los mismos priors que R0–R2.
 56. Identificadores aleatorios y fechas en las épocas de F5/F6. Corrección: la del punto 36.
 57. Octree con PotreeConverter multihilo. Corrección: comparar dos conversiones; si difieren, fijar los hilos.

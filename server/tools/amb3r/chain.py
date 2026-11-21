@@ -9,14 +9,14 @@ otro que usaba Ω … instalá AMB3R"; VGGT-SLAM and VidMap were dropped the sam
   4. the cloud stage's voxel + SOR (no witness filter: the map carries no per-point frame) and the octree; the session
      moved into server/projects/ whole
   5. --corrections (the run made with --stac_dump: one depth record per saved frame): F0 the camera, F4 the tracks, F5
-     the refinement, F6 the bend on the published session — F5/F6 publish their
+     the refinement, F6 the bend (PointDiT at the edges with --pointdit) on the published session — F5/F6 publish their
      own epochs, the cloud without corrections stays selectable as epoch 0 (USER 2026-11-03: "corré ambos completos,
      con F0 a F6"). MEASURED on station the same night: the corrections made every AMB3R variant WORSE (a standing pan
      gave F5 zero-baseline cameras and F6 bent 19 keyframes to ~0); AMB3R is kept for long walks, uncorrected
      (USER 2026-11-04: "amber lo dejamos … porque puede servir en recorridos largos más adelante")
 
   (env da3, from server/) python tools/amb3r/chain.py <source src_default> <new project> --model da3|omega
-        [--stride 2] [--reuse <AMB3R run dir>] [--align-to <metric run>] [--corrections]
+        [--stride 2] [--reuse <AMB3R run dir>] [--align-to <metric run>] [--corrections] [--pointdit]
         [--from-step 5] [--replace]
 """
 import argparse
@@ -132,7 +132,7 @@ def amb3r_run(src, run_dir, model, stride, loops_json=None):
 PRECISION_STEPS = ("f0_camera", "f4_tracks", "f5_refine", "f6_bend")
 
 
-def corrections(ses):
+def corrections(ses, pointdit):
     """F0, F4, F5, F6 on the session in place, this session's frozen configuration (the validated recipe)."""
     from config import cfg as raw_cfg
     from intake.run_config import freeze_run_config
@@ -140,10 +140,11 @@ def corrections(ses):
     from precision.runner import STEPS, run_chain
     from workers.base import stop_semantic_service_verified
     c = copy.deepcopy(raw_cfg)
+    c["reconstruction"]["precision"]["mono_detail"]["enabled"] = bool(pointdit)
     c["reconstruction"]["simple"]["conf_min_norm"] = 0.0
     freeze_run_config(ses, c, log=lambda m: log(f"   {m}"))
     steps = [s for s in STEPS if s.key in PRECISION_STEPS]
-    log(f"5. corrections: {[s.key for s in steps]}")
+    log(f"5. corrections: {[s.key for s in steps]} (PointDiT {'at the edges' if pointdit else 'off'})")
     run_chain(ses, load_precision_config(session_dir=ses), log=lambda m: log(f"   {m}"), steps=steps,
               before_gpu=lambda label: stop_semantic_service_verified(None, stage=f"precision {label}", log=print))
 
@@ -159,6 +160,7 @@ def main():
                                                   "candidates, verified by AMB3R's own gates (USER 2026-11-08)")
     ap.add_argument("--align-to", default=None, help="another AMB3R run (metric) to bring this one's frame and size to")
     ap.add_argument("--corrections", action="store_true")
+    ap.add_argument("--pointdit", action="store_true")
     ap.add_argument("--from-step", type=int, default=1, choices=(1, 5))
     ap.add_argument("--replace", action="store_true")
     a = ap.parse_args()
@@ -166,7 +168,7 @@ def main():
     final = PROJECTS / a.name
     fses = final / "scans" / src.parent.name / "src_default"
     if a.from_step == 5:
-        corrections(fses)
+        corrections(fses, a.pointdit)
         log(f"→ {final} corrected")
         return
     if final.exists() and not a.replace:
@@ -201,7 +203,7 @@ def main():
     shutil.move(str(STAGING / a.name), str(final))
     log(f"→ {final} without corrections ({(time.time() - t0) / 60:.1f} min); AMB3R's run kept in {run_dir}")
     if a.corrections:
-        corrections(fses)
+        corrections(fses, a.pointdit)
         log(f"→ {final} corrected ({(time.time() - t0) / 60:.1f} min)")
 
 

@@ -71,7 +71,7 @@ CLOUDFLARED_SHA256="fcfb02b575a52ca1af2e3267af4e1517bcdeb30ac48c834c69abaed3c057
 # conversion as on the pod; its result is checked against the manifest's sha256 by `models.py verify`)
 step_convert_dinov3() {
     local out="$VENDOR/GenRecon/weights/dinov3-vitl16-hf/model.safetensors"
-    local src="$VENDOR/GenRecon/weights/src/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    local src="$VENDOR/pointdit/pretrained/dinov3/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
     if [ -f "$out" ]; then echo "present: $out"; return 0; fi
     [ -f "$src" ] || { echo "Meta's ViT-L/16 checkpoint is missing ($src): DINOV3_URL in .env has expired — ask Meta for a new link, then run rebuild.sh again"; return 1; }
     ( cd "$STAC_ROOT/server/tools/genrecon" && "$(env_python genrecon)" convert_dinov3.py )

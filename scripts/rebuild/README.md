@@ -4,7 +4,7 @@ USER 2026-11-18 (RunPod announced a maintenance of the pod's server): *"Prepara 
 automáticamente los entornos se descarguen todos los modelos y se vuelva a armar en un nuevo volumen en cuestión
 de poco tiempo … de forma completa y sin errores"* — and, on the first version: *"debe quedar exactamente como
 está ahora … No decidas por mí … cada cosa que avancemos debemos actualizarlo para que siempre quede actualizado
-a la perfección"*.
+a la perfección … Revisa pointdit r3d etc etc son muchos"*.
 
 So this is not a list of things to install. It starts from **what is on the volume** — every file, classified
 (`inventory.py`) — and each class has the one thing that puts it back:
@@ -38,7 +38,7 @@ necesita"* / *"Nada es opcional todo debe quedar como está. De hecho colmap se 
   one archive cannot be opened; everything else still is restored;
 - `git/` — every local branch, stash, remote and worktree of every repository, and the commits that are on no
   remote (bundles);
-- `mirror.tsv` — the weights whose source may refuse (Meta's DINOv3 ViT-L/16 file, 1.2 GB — the source of GenRecon's encoder): kept as the assets of a
+- `mirror.tsv` — the weights whose source may refuse (Meta's two DINOv3 files, 4.6 GB): kept as the assets of a
   **draft** release of the repo (`backup.py publish-mirror`; a draft is seen only by who may push), fetched with
   `GIT_TOKEN`.
 

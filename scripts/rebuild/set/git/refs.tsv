@@ -1,5 +1,5 @@
 # repo	kind	name	commit	upstream | message | branch
-stac-build	head	main	baf896c56116082ddff3bb7117293e86d3a62faa	
+stac-build	head	main	1fb533667764f6698bd736d76ce66d3c72b020e9	
 stac-build	remote	origin	-	https://github.com/hernanbarreto/stac-build.git
 stac-build	branch	amb3r-probe	a376a3faf51e053fc51d8fd6e87fb94fb41b68bb	
 stac-build	branch	audit/precision-geometry-2026-10-23	2643294742867d185c22e353a724753a126f22a9	origin/audit/precision-geometry-2026-10-23
@@ -16,7 +16,7 @@ stac-build	branch	gpu-main	f3233a20a6271f48769398ce56e32fe7d328b414
 stac-build	branch	gpu-projection	2045900d8aaaf9ed60f49e473f1a6337bd7b0c39	
 stac-build	branch	gs-layer	69d2e13c9141b000ca630c917c7972ab396b6620	origin/gs-layer
 stac-build	branch	integ	ffa03c5b48efbed0a9ab55090177fa16951b16ed	
-stac-build	branch	main	baf896c56116082ddff3bb7117293e86d3a62faa	origin/main
+stac-build	branch	main	1fb533667764f6698bd736d76ce66d3c72b020e9	origin/main
 stac-build	branch	master	e811235522473e657caafb1300b0941b1cc262b6	
 stac-build	branch	merge/gpu-main-2026-11-02	1662e368fef3f3f66df19c7b35daaa933961cf29	
 stac-build	branch	obb-device-draws	d58d07aa88836f648055f246030670626e753633	
@@ -32,10 +32,10 @@ stac-build	branch	worktree-agent-a7ba1e660a9936451	c9e9796729ca0005ffc7dba551bd4
 stac-build	branch	worktree-wf_44315fd6-ad6-3	e817de2e19a274ddd7d0b46928ea6bb775cb1354	
 stac-build	stash	0	1c3db3035b907fe2c65ffef2a47344435f428697	On stac-main: stopped agents partial work 2026-10-01 (stage10, VLM captions, ShapeR button)
 stac-build	stash	1	1726e59c6dcb08a317bd8302a50b64ec9395e6a1	On stac-main: chunk 60/30 + max_walk fuera + scale advisory (2026-09-22) — SIN APLICAR, a la espera de su orden
-stac-build__vendor__VGGT-Long	head	gpu-main	bc93d569095cf92f54132b4ae0654bdefcb01b43	
+stac-build__vendor__VGGT-Long	head	gpu-main	bcdb0d94b8f4155d86ca734ff8ace47874fa323b	
 stac-build__vendor__VGGT-Long	remote	origin	-	https://github.com/hernanbarreto/VGGT-Long.git
 stac-build__vendor__VGGT-Long	branch	chunk-structure	86d8fecb749c6f1e45d751082a77699bbfa100ab	
-stac-build__vendor__VGGT-Long	branch	gpu-main	bc93d569095cf92f54132b4ae0654bdefcb01b43	
+stac-build__vendor__VGGT-Long	branch	gpu-main	bcdb0d94b8f4155d86ca734ff8ace47874fa323b	
 stac-build__vendor__VGGT-Long	branch	main	c47628355b0be319a08870b43102a66ecaad2c75	origin/main
 stac-build__vendor__VGGT-Long	branch	stac-metric-graph	f576cbf490144277ceca1151a9bb6cff86790ce3	origin/stac-metric-graph
 stac-build__vendor__VGGT-Long	branch	stac-slam2	ed362ab4b1f9eb7748efb3bb488c0ad57fdbc278	
@@ -51,6 +51,9 @@ stac-build__vendor__depth-anything-3	branch	stac-patches	5c32cef49014202b7562067
 stac-build__vendor__depth-anything-3__da3_streaming__loop_utils__salad	head	HEAD	6aede13a3f6c25750bf7fde10209c06cb73060bb	
 stac-build__vendor__depth-anything-3__da3_streaming__loop_utils__salad	remote	origin	-	https://github.com/serizba/salad.git
 stac-build__vendor__depth-anything-3__da3_streaming__loop_utils__salad	branch	main	6aede13a3f6c25750bf7fde10209c06cb73060bb	origin/main
+stac-build__vendor__pointdit	head	main	11f53a30aeb4d34d49d2beda655ee6f19b2ad7f8	
+stac-build__vendor__pointdit	remote	origin	-	https://github.com/google-research/pointdit.git
+stac-build__vendor__pointdit	branch	main	11f53a30aeb4d34d49d2beda655ee6f19b2ad7f8	origin/main
 stac-build__vendor__sam31	head	stac-determinism	a3c52e5c5228f47d74f88a1c09ecfe9a54943663	
 stac-build__vendor__sam31	remote	origin	-	https://github.com/facebookresearch/sam3.git
 stac-build__vendor__sam31	branch	main	5dd401d1c5c1d5c3eedff06d41b77af824517619	origin/main
@@ -81,3 +84,6 @@ stac-build__vendor__mvs-texturing	branch	master	f3374298ac959cb5afe47a14e4d35d2a
 stac-build__vendor__oneTBB-src	head	master	e9af1a1b38b858e8eb41a866e1eed32811e0fb4c	
 stac-build__vendor__oneTBB-src	remote	origin	-	https://github.com/uxlfoundation/oneTBB.git
 stac-build__vendor__oneTBB-src	branch	master	e9af1a1b38b858e8eb41a866e1eed32811e0fb4c	origin/master
+stac-build__vendor__pointdit__third_party__dinov3	head	main	6876159a11b4df116f30f667f8c9888617df0751	
+stac-build__vendor__pointdit__third_party__dinov3	remote	origin	-	https://github.com/facebookresearch/dinov3.git
+stac-build__vendor__pointdit__third_party__dinov3	branch	main	6876159a11b4df116f30f667f8c9888617df0751	origin/main

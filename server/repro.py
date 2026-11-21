@@ -605,7 +605,8 @@ def sha256_file(path: PathLike) -> str:
 def sha256_file_memo(path: PathLike, log=None) -> str:
     """The sha256 of an IMMUTABLE file read at every stage (model weights), computed once: the digest is kept
     beside the resolved file (``<file>.stac_sha256.json``) with the file's identity — device, inode, size,
-    mtime_ns — and reused while that identity holds. 2026-11-01: DA3's 6.8 GB of weights were hashed again by every stage process that
+    mtime_ns — and reused while that identity holds (the construction precision.pointdit_runner.verify_checkpoint
+    has used since 2026-10-04). 2026-11-01: DA3's 6.8 GB of weights were hashed again by every stage process that
     loads DA3 (7 s of CPU each, the card idle). A file rewritten in place changes its mtime or inode and is hashed
     again; an unwritable sidecar only means the next call hashes too."""
     p = Path(path).resolve()
