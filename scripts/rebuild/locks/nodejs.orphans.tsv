@@ -1,12 +1,12 @@
 bin/claude	60
 lib/node_modules/@anthropic-ai/claude-code/LICENSE.md	147
 lib/node_modules/@anthropic-ai/claude-code/README.md	2037
-lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe	377545232
+lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe	381121040
 lib/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs	10656
 lib/node_modules/@anthropic-ai/claude-code/install.cjs	14387
 lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/LICENSE.md	147
 lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/README.md	150
-lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude	377545232
+lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude	381121040
 lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/package.json	289
 lib/node_modules/@anthropic-ai/claude-code/package.json	1476
-lib/node_modules/@anthropic-ai/claude-code/sdk-tools.d.ts	180938
+lib/node_modules/@anthropic-ai/claude-code/sdk-tools.d.ts	181083
