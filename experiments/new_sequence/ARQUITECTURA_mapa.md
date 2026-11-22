@@ -61,7 +61,7 @@ Cada paso dice qué hace, qué lee y qué entrega. Lo que falta definir de cada 
      cuando al menos el 30 % de lo que ve cae en él; si lo ven más de 64 keyframes, el lugar se parte a la mitad hasta
      que cada parte la vean 64 como máximo. Lugares vecinos comparten los keyframes que ven los dos.
    Cada keyframe queda con una versión de pose y profundidad por cada cubo en el que está; cómo se reconcilian, sin
-   forzar una sobre la otra, es el punto 5 por definir.
+   forzar una sobre la otra, es el punto 2 de lo que queda ("qué se corrige de un grupo en F6, y contra quién").
    Entrega: los dos juegos de cubos.
 7. **DA3 por cubo**, a resolución 504, sobre los mismos cubos.
    Entrega: la profundidad DA3 de cada keyframe.
@@ -190,15 +190,18 @@ como las profundidades porque deberian ser las mismas … hay que corregirlas to
 
 ## Por definir
 
-1. ~~Paso 1 — la regla de frame malo~~ → cerrado, ver "Perillas".
-2. ~~Paso 5 — los dos ángulos~~ → cerrado, ver "Perillas".
-3. ~~Paso 6 — los cubos por lugar~~ → cerrado, ver "Perillas".
-4. **Paso 12 — el emparejado entre visitas.** Cómo se busca alrededor del lugar que predice la geometría, y qué pares
-   de keyframes se intentan.
-5. **Paso 14 — el análisis por grupos.** Qué se corrige del grupo (un factor de profundidad, una pose), contra quién
-   (quién ve mejor: más cerca, mejor ángulo), y cuándo no se corrige.
-6. **Paso 14 — el voto.** El porcentaje, el mínimo absoluto, y qué vistas cuentan como "podrían verlo".
-7. **PointDiT.** Probarlo prendido aparte (solo F6) para ver bordes y puntos volando.
+Cerrados: el paso 1 (frames buenos), el paso 5 (selección de keyframes) y el paso 6 (cubos) — ver "Perillas".
+
+Lo que queda, con SU numeración (USER 2026-11-22):
+
+1. **Cómo se empareja entre visitas en F4** (paso 12). Cómo se busca alrededor del lugar que predice la geometría, y
+   qué pares de keyframes se intentan.
+2. **Qué se corrige de un grupo en F6, y contra quién** (paso 14). Qué se corrige del grupo (un factor de
+   profundidad, una pose), contra quién (quién ve mejor: más cerca, mejor ángulo), y cuándo no se corrige. Incluye
+   cómo se reconcilian las dos versiones de pose y profundidad de un keyframe que está en un cubo por continuidad y
+   en uno por posición.
+3. **El porcentaje del voto y su mínimo** (paso 14). Y qué vistas cuentan como "podrían verlo".
+4. **Probar PointDiT prendido aparte** (solo F6), para ver bordes y puntos volando.
 
 ## Lo que respalda este diseño
 
