@@ -21,8 +21,15 @@ Cómo se trabaja (sus reglas):
       3589–3593 de pccr 08-24, por detalle; ninguno más. 28 s de placa para los 20.279 frames. Encontrado en la primera
       corrida y corregido: dividido por un número de Python, PyTorch en placa multiplica por el inverso (un bit de
       diferencia a veces); se divide por un tensor en la placa.
-- [ ] **2. Paso 3 — sonda DA3 sobre 16 keyframes propios de AMB3R.**
+- [x] **2. Paso 3 — sonda DA3 sobre 16 keyframes propios de AMB3R.**
       *Cierre:* el metro de AMB3R y la cámara de las tres sesiones de prueba, junto al metro y la cámara que tienen hoy.
+      ✓ 2026-11-22 — `scripts/checklist/check_arq_2_probe.sh` → CLOSED. `arq3_probe.py`: los 16 frames son keyframes
+      propios de AMB3R que son frames buenos, repartidos sobre su lista; sobre ellos, las funciones de hoy sin cambios
+      (la sonda focal: DA3 en una pasada, la mediana de K; el metro: la profundidad DA3 contra la de AMB3R en la banda
+      cercana). Metro de AMB3R (m por unidad), hoy → nuevo: bufferStop 2,3632 → 2,3510 (−0,5 %), pccr 08-31 2,6381 →
+      2,8017 (+6,2 %), pccr 08-24 1,5594 → 1,5298 (−1,9 %). Cámara, fx / fy hoy → nuevo: bufferStop 877,8 / 913,3 →
+      890,7 / 918,1; pccr 08-31 387,5 / 399,0 → 373,4 / 379,9; pccr 08-24 394,8 / 408,6 → 389,9 / 402,7; cx y cy
+      iguales. 8 min de placa para las tres.
 - [ ] **3. Paso 4 — el mapa.** Sectores, visibilidad por rayos con la tolerancia de la sesión.
       *Cierre:* el mapa de las tres sesiones, con su tamaño de sector y su tolerancia medidos, y en planta, para su
       ojo, qué keyframes ven una muestra de lugares (incluido uno tapado por una columna).
