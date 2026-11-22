@@ -22,9 +22,13 @@ Background: `CHECKLIST_arquitectura.md` (the test of 2026-11-21 on three session
 
 Cada paso dice qué hace, qué lee y qué entrega. Lo que falta definir de cada uno está en "Por definir".
 
-1. **Frames buenos.** Se descartan los frames malos por desenfoque y por exposición, comparando cada frame con sus
-   vecinos. Nunca deja un tramo del recorrido sin frames. En placa.
-   Entrega: la lista de frames buenos. Un frame malo no puede ser keyframe ni testigo.
+1. **Frames buenos.** ✓ CERRADO (2026-11-22). Un frame se descarta cuando:
+   - su brillo medio pasa del máximo (quemado);
+   - la parte de sus píxeles quemados (≥ 250) pasa del máximo (saturado);
+   - su detalle es menos de la mitad del de sus vecinos (15 frames de cada lado): falta de nitidez o de textura.
+   La oscuridad no descarta: un tramo oscuro se queda. Las perillas y sus valores, en "Perillas".
+   Entrega: la lista de frames buenos. Un frame malo no puede ser keyframe ni testigo de F4. AMB3R sigue leyendo todos
+   los frames (sigue la cámara frame a frame).
 2. **AMB3R sobre todos los frames** (con Omega como modelo, como hoy).
    Entrega: las poses de AMB3R de todos los frames, la profundidad de AMB3R de uno de cada cuatro, y sus keyframes
    propios.
@@ -94,9 +98,40 @@ Cada paso dice qué hace, qué lee y qué entrega. Lo que falta definir de cada 
   que falle la reconstruccion, lo indica en pantalla"*.
 - F2 no vuelve: nada de lo medido apunta a que falte.
 
+## Perillas
+
+Cada perilla de la reconstrucción, con su valor para la prueba y de dónde sale. Se completa a medida que se cierra cada
+punto (USER 2026-11-22: *"vamos anotando todas las perillas que vamos teniendo para entender como se configura por
+completo luego la reconstruccion"*).
+
+### Paso 1 — frames buenos (CERRADO 2026-11-22, su "ok")
+
+| Perilla | Antes | Valor | De dónde sale |
+|---|---|---|---|
+| Oscuridad: brillo medio mínimo | 40 | 0 (apagada) | En bufferStop, pccr 08-31, zaragoza y observatorio no sacaba nada. En pccr 08-24 sacaba los 144 frames de los dos tramos oscuros y abría el hueco de 130 frames del giro (cubos adivinados, el piso 36 cm abajo). Sin ella, la copia del 2026-11-19 reconstruyó el giro bien (0,93 m donde AMB3R mide 0,87). |
+| Saturación: parte de píxeles quemados | 25 %, contando los ≤ 5 y los ≥ 250 | 25 %, contando solo los ≥ 250 | Los 62 frames que sacaba eran todos oscuros: contaba los casi negros, que son la oscuridad. Contando solo los quemados no saca ninguno en las cinco sesiones. |
+| Quemados: brillo medio máximo | 220 | 220 | Ningún frame de las cinco sesiones pasa de 157. No saca nada en ellas; queda como guarda para un video a contraluz. |
+| Nitidez: detalle frente a la mediana de sus vecinos | no existía | menos de 0,5 → se descarta | El detalle es la medida de I0 (energía de alta frecuencia). En cuatro sesiones no saca nada. En pccr 08-24 saca 12 frames: 2484–2490 y 3589–3593, los dos cruces de puerta con una superficie lisa frente a la lente (brillo 121–132, no son oscuros) — los eslabones más débiles del recorrido en el estudio del 2026-11-19. |
+| Nitidez: vecinos de cada lado | — | 15 frames | Elegido para la prueba. |
+
+Efecto: en bufferStop, pccr 08-31, zaragoza y observatorio no cambia ningún frame; en pccr 08-24 entran los frames
+oscuros y salen los 12 de las puertas.
+
+### Ya decididas en los pasos
+
+| Paso | Perilla | Valor | De dónde sale |
+|---|---|---|---|
+| 3 | Sonda DA3: keyframes de AMB3R | 16, repartidos a lo largo del video | Su decisión, 2026-11-21. |
+| 4, 9 | Alcance de cada vista | 15 m | Su regla (`reconstruction.view_range_m`). |
+| 5 | Solape con el último keyframe | franja de 92 a 96 % | Su decisión, 2026-11-21. |
+| 6 | Cubo | 64 keyframes compartiendo 32 | Su regla. |
+| 6 | Sesión mínima | 48 keyframes; menos falla y lo dice en pantalla | Su decisión, 2026-11-21. |
+| 7 | DA3 por cubo | resolución 504 | Su decisión, 2026-11-21. |
+| 14 | PointDiT | apagado, no eliminado | Su decisión, 2026-11-21. |
+
 ## Por definir
 
-1. **Paso 1 — la regla de frame malo.** Qué medida de desenfoque y de exposición, y contra cuántos vecinos.
+1. ~~Paso 1 — la regla de frame malo~~ → cerrado, ver "Perillas".
 2. **Paso 5 — los dos ángulos.** El de desplazamiento y el de rotación. (I1 usaba 1,77° y 10,59°, medidos en las
    imágenes; acá salen de las poses y la profundidad de AMB3R.)
 3. **Paso 6 — el orden "por lugar".** En un pasillo es directo; en una sala con cruces hace falta una regla general.
