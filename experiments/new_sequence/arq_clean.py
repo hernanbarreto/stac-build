@@ -61,7 +61,11 @@ def main() -> int:
                     shutil.rmtree(target)
             else:
                 shutil.rmtree(p)
-    files = [out / f for f in FILES] + [f for g in GLOBS for f in sorted(out.glob(g))]
+    keep = out / "precision" / "KEEP_TRACKS"           # F4's tracks stay while this file exists (its text says why)
+    files = [out / f for f in FILES if not (f == "precision/tracks.npz" and keep.exists())] \
+        + [f for g in GLOBS for f in sorted(out.glob(g))]
+    if keep.exists():
+        print(f"kept precision/tracks.npz ({keep.name}: {keep.read_text().strip()[:160]})")
     for p in files:
         if p.is_file():
             n = p.stat().st_size

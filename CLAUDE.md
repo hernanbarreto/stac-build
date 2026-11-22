@@ -995,9 +995,19 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     `arq_select.py`, `arq_omega.py`, `arq_session.py`, `arq_clean.py`, `arq_queue.py`, `arq_watch.py`. No file of
     server/ or of the fork is edited. Commits 90213b5, 64b8422 and the one after them; nothing pushed.
   · THE SESSIONS: `bufferStop_prueba` and `pccr3108_prueba` published, their intermediates removed.
-    `pccr2408_prueba` RUNNING since 2026-11-21 13:27 UTC, attended by the queue (`arq_queue.py`, started with
-    `v2_launch.py`; logs in /workspace/tmp/new_sequence/arq/logs/: queue.log, pccr2408_prueba.log): when its cloud is
-    published the queue removes what the run left behind. The checklist's line 5 is ticked then, with its numbers.
+    `pccr2408_prueba` PUBLISHED 2026-11-22 07:28 UTC (the queue `arq_queue.py`; logs in
+    /workspace/tmp/new_sequence/arq/logs/), 18.0 h with AMB3R's pass reused: F5 held-out 0.6131 / 0.6301 px, vote
+    coverage 51.5 / 55.07 % (under the support of 5 views 26.5 / 21.78 %, contradicted 20.6 / 16.73 %), 109,832,685 /
+    114,451,841 points, F0 to F6 814.1 / 687.6 min (F4 +56, F5 +148, F6 −67 min). Its intermediates removed but F4's
+    tracks (5.5 GB, `output/precision/KEEP_TRACKS`), kept on his word ("Si déjalo sin bórralo") while the vote's
+    requirement is open. HIS EYE ON IT: pending (the rack, the floor at the dark turn).
+  · OPEN, HIS (2026-11-22): the vote asks for 5 confirming views and only keyframes vote now (the voting views
+    were 312 / 853 / 4819 in the originals — keyframes, turn frames, F6's witnesses — and are 209 / 450 / 3024); the
+    pixels left under the support rose 18.5 → 23.7 % (bufferStop), 20.8 → 23.8 % (pccr 08-31), 21.78 → 26.5 %
+    (pccr 08-24). His question: "conviene bajar la exigencia o agregar testigos?" — answered: not the old witnesses
+    (their pose passed through no correction); proposed to him: F6 again on bufferStop with 4 and with 3, his eye on
+    the three clouds (bufferStop and pccr 08-31 need F4 again: their tracks went with the intermediates). NOT RUN:
+    no order yet.
   · WHAT THE RUNS TAKE AS GIVEN, his to decide: each video's stored AMB3R pass is in metres since the original
     intake (its 16-frame DA3) and the selection's 15 m range needs that metre — on a NEW video this architecture has
     no source for it; what each keyframe sees of every other is measured once, with the cube plan, on AMB3R's poses

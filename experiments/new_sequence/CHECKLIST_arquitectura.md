@@ -122,9 +122,10 @@ Not run with this architecture: zaragoza and observatorio.
   - the intermediates removed (the queue's log): da3_cubes 1,467 MB, da3_run 425 MB, tracks.npz 476 MB, sky masks,
     after the worker's own end removed 2,332 MB. The scan holds: Omega's records 1,175 MB, the octree 874 MB, origins
     649 MB, the cloud 501 MB (and its raw copy 501 MB), frames 243 MB, intake 76 MB.
-- [ ] **5. Crear `pccr2408_prueba`, correrla y dejar la nube publicada.** RUNNING since 2026-11-21 13:27 UTC (the
-      queue, `arq_queue.py`). Log: `/workspace/tmp/new_sequence/arq/logs/pccr2408_prueba.log`. So far, against the
-      validated pccr 2026-08-24 (in brackets):
+- [x] **5. Crear `pccr2408_prueba`, correrla y dejar la nube publicada.** Published 2026-11-22 07:28 UTC (the queue,
+      `arq_queue.py`); the whole run 1080.4 min (18.0 h) with AMB3R's pass reused. Log:
+      `/workspace/tmp/new_sequence/arq/logs/pccr2408_prueba.log`. Against the validated pccr 2026-08-24 (in
+      brackets):
   - step 2 — 3024 keyframes of 13,692 frames (2765); overlap between consecutive keyframes 0.870 / 0.941 / 0.969
     (2 under 92 %, 18 over 96 %: the 30 keyframes taken where the overlap jumped over the band); frames between
     keyframes: median 4, max 80; F4's witnesses: the 10,668 frames between keyframes; 2302 revisits; the selection
@@ -137,7 +138,20 @@ Not run with this architecture: zaragoza and observatorio.
   - step 7 — the scale: x1.0266 over the 3024 keyframes (MAD 4.8 %, spread 0.588 – 2.056); the cameras' walk
     103.4 m.
   - step 8, so far — F5's anchor tolerance 1.03 % (seams 0.37 – 7.20 %); F4: 5508 windows (251 keyframe,
-    2302 revisit, 2955 witness), started 17:56 UTC.
+    2302 revisit, 2955 witness), 277,698,589 observations, 44,216,568 tracks, 406.8 min (the validated run: 4741
+    windows, 350.9 min); F5: held-out R0 0.6571, R1 0.6258, R2 0.6131 px, applied (the validated run: R0 0.6558,
+    applied R1 0.6301); cameras moved at most 17.1 cm; 297.4 min (149.2 min).
+  - step 9 — F6: the bend's held-out 3.17 % (3.325 %); every keyframe hears a median of 267 keyframes; vote coverage
+    51.5 % (kept 43.1 %, contradicted 20.6 %, in place 9.9 %, under the support 26.5 %) (55.07 %: 48.07 / 16.73 /
+    9.23 / 21.78); raw 601,788,059 → published 109,832,685 points (587.8 M → 114,451,841), epoch 2; 106.0 min
+    (173.1 min, with PointDiT).
+  - time — F0 to F6 814.1 min (the validated run's precision core: 687.6 min): F4 +56 min, F5 +148 min, F6 −67 min.
+  - the intermediates removed (the queue's log): da3_cubes 10,162 MB, da3_run 2,840 MB, sky masks, after the worker's
+    own end removed 15,069 MB. KEPT on his word (2026-11-22: "Si déjalo sin bórralo"): `output/precision/tracks.npz`,
+    5.5 GB — F6 again needs it and F4 again is almost 7 h (the marker `output/precision/KEEP_TRACKS`). The scan
+    holds: Omega's records 7,847 MB, precision 5,499 MB, the octree 5,166 MB, origins 3,844 MB, the cloud 2,965 MB
+    (and its raw copy 2,965 MB), frames 1,080 MB, intake 366 MB.
+  - HIS EYE ON IT: pending (the rack; the floor at the dark turn).
 
 ## His eye (USER 2026-11-21, with `bufferStop_prueba` and `pccr3108_prueba` published)
 
