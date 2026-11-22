@@ -38,12 +38,17 @@ Cada paso dice qué hace, qué lee y qué entrega. Lo que falta definir de cada 
    desde qué distancia y dirección, y en cuántas visitas del recorrido. Es la vista en planta: superficies, cámaras y
    campos de visión.
    Entrega: el mapa. Todos los pasos siguientes lo leen.
-5. **Selección de keyframes**, sobre el mapa, solo entre frames buenos. Entra un keyframe nuevo cuando, respecto del
-   último elegido, pasa alguna de estas tres cosas:
-   - el solape de la vista baja de la franja de 92 a 96 %;
-   - el desplazamiento de la cámara supera un ángulo;
-   - la rotación de la cámara supera un ángulo.
-   De los candidatos se elige el más nítido. No hay tope temporal ni relleno.
+5. **Selección de keyframes.** ✓ CERRADO (2026-11-22). Se recorre el video desde el primer frame bueno; solo los
+   frames buenos del paso 1 pueden ser keyframes. Para cada frame se miden tres cosas respecto del último keyframe,
+   con las poses y la profundidad de AMB3R:
+   - **solape** de la vista (lo que AMB3R ve a menos de 15 m), banda de 92 a 96 %; cierra cuando baja de 92 %;
+   - **desplazamiento**: el ángulo con que cada punto se ve desde las dos cámaras, cuantil 0,9 de los puntos que ve
+     el último keyframe y caen en la imagen del candidato; umbral 1,77°, banda ±25 %; cierra cuando pasa de la banda;
+   - **rotación**: el giro entre las orientaciones de las dos cámaras, sobre cualquier eje; umbral 0,7 × campo
+     horizontal / 4, banda ±25 %; cierra cuando pasa de la banda.
+   Un frame es candidato cuando cualquiera de las tres está dentro de su banda; la ventana se cierra cuando cualquiera
+   se pasa de su banda, y el keyframe es el candidato más nítido. Si una medida salta toda su banda entre dos frames
+   seguidos, se toman los dos. No hay tope temporal ni relleno.
    Entrega: los keyframes, y los testigos de F4, que son los frames buenos que quedan entre keyframes.
 6. **Cubos de Omega, por lugar.** Los keyframes se ordenan por el lugar que miran, no por el momento en que se
    tomaron, y se cortan en cubos de 64 keyframes compartiendo 32. Un lugar recorrido una vez da los cubos de hoy. Un
@@ -117,6 +122,21 @@ completo luego la reconstruccion"*).
 Efecto: en bufferStop, pccr 08-31, zaragoza y observatorio no cambia ningún frame; en pccr 08-24 entran los frames
 oscuros y salen los 12 de las puertas.
 
+### Paso 5 — selección de keyframes (CERRADO 2026-11-22, "si, me cierra")
+
+| Perilla | Valor | De dónde sale |
+|---|---|---|
+| Solape con el último keyframe | banda 92–96 %; cierra bajo 92 % | Su decisión, 2026-11-21: medido en la corrida validada de bufferStop, sus keyframes consecutivos comparten una mediana de 93,7 %. |
+| Desplazamiento: umbral | 1,77° | El de I1 (`intake.parallax.parallax_quantum_deg`): 12 px en pccr 08-31 con focal 387,5 px, el valor de todas las corridas validadas. I1 medía en la imagen el movimiento de un punto descontado el giro, que es este mismo ángulo. |
+| Desplazamiento: cuantil | 0,9 | El de I1 (`parallax_quantile`). |
+| Rotación: umbral | 0,7 × campo horizontal / 4 (10,8° en pccr) | El de I1 (`rotation_quantum`), su elección del 2026-10-07: con 21,6° quedaban huecos en los giros, con 7° keyframes encimados. El campo sale de la cámara que mide la sonda DA3. |
+| Banda de desplazamiento y de rotación | ±25 % del umbral | El de I1 (`keyframe_band_frac`). |
+| Elección dentro de la banda | el más nítido: detalle de I0 sobre el frame con la luz igualada | La selección de la prueba del 2026-11-21. |
+| Salto de una banda entre dos frames seguidos | se toman los dos | La selección de la prueba del 2026-11-21. |
+
+No se movió la banda de solape: donde faltaron keyframes (el principio de pccr 08-24) la cámara se desplazaba viendo
+lo mismo — lo que agrega el ángulo de desplazamiento —; cambiar las dos cosas juntas no diría cuál ayudó.
+
 ### Ya decididas en los pasos
 
 | Paso | Perilla | Valor | De dónde sale |
@@ -132,8 +152,7 @@ oscuros y salen los 12 de las puertas.
 ## Por definir
 
 1. ~~Paso 1 — la regla de frame malo~~ → cerrado, ver "Perillas".
-2. **Paso 5 — los dos ángulos.** El de desplazamiento y el de rotación. (I1 usaba 1,77° y 10,59°, medidos en las
-   imágenes; acá salen de las poses y la profundidad de AMB3R.)
+2. ~~Paso 5 — los dos ángulos~~ → cerrado, ver "Perillas".
 3. **Paso 6 — el orden "por lugar".** En un pasillo es directo; en una sala con cruces hace falta una regla general.
    Y el límite de distancia y dirección para poner dos visitas en el mismo cubo.
 4. **Paso 12 — el emparejado entre visitas.** Cómo se busca alrededor del lugar que predice la geometría, y qué pares
