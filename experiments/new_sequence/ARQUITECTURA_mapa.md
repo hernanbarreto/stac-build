@@ -1,224 +1,218 @@
-# Architecture guided by AMB3R's map — WORKING DRAFT (not coded, not run)
+# Arquitectura de reconstrucción guiada por el mapa de AMB3R — CERRADA (2026-11-22)
 
-Working document of the design conversation of 2026-11-22 (USER: *"anda volcando todos los pasos de la arquitectura a
-un documento para que lo actualicemos y cuando quede listo lo codificamos y probamos"*). The design text below is in
-Spanish, as it is worked out with him; it is edited here as the conversation goes on. Nothing of it is coded: it is
-coded and tested only when he says it is ready.
+Documento de diseño, trabajado con él punto por punto el 2026-11-22 y cerrado con su OK (*"ok, y armamos checklist
+para la implementacion"*). No está programado. La implementación sigue `CHECKLIST_implementacion.md`. Las versiones
+anteriores de este documento están en la historia de git.
 
-Background: `CHECKLIST_arquitectura.md` (the test of 2026-11-21 on three sessions, its numbers and his verdicts).
+Antecedente: `CHECKLIST_arquitectura.md` (la prueba del 2026-11-21 en tres sesiones, sus números y sus veredictos).
 
 ---
 
 ## El principio
 
 - *"prefiero mantenerlo como lo tenemos ahora, con pasada amber y pasada omega, pero de forma mucho mas inteligente
-  … sacarle todo el jugo a lo que ya tenemos de la pasada amber, para todas las etapas, seleccion de kf, seleccion de
-  revisitas, seleccion de correspondencias con coherencia, atado … lo mismo el voto de f6 … todo debe estar
-  respaldado por la nube y poses y campos de vision iniciales"*.
-- *"no estamos ciegos, no hay que inventar nada, ya lo tenemos"*: la pasada de AMB3R ya dice qué frames miran qué
-  cosa, dónde hay revisita y cómo está la cobertura de cada sector.
+  … sacarle todo el jugo a lo que ya tenemos de la pasada amber, para todas las etapas … todo debe estar respaldado
+  por la nube y poses y campos de vision iniciales"*.
+- *"no estamos ciegos, no hay que inventar nada, ya lo tenemos"*.
+- De cada keyframe sale de la etapa de corrección **una sola pose y un solo mapa de profundidad**: *"cuando salimos a
+  los pasos F0 a F6 cada kf debe tener una unica pose un unico mapa"*.
 
-## Los pasos
+---
 
-Cada paso dice qué hace, qué lee y qué entrega. Lo que falta definir de cada uno está en "Por definir".
+## Fase I · Estructura global
 
-1. **Frames buenos.** ✓ CERRADO (2026-11-22). Un frame se descarta cuando:
-   - su brillo medio pasa del máximo (quemado);
-   - la parte de sus píxeles quemados (≥ 250) pasa del máximo (saturado);
-   - su detalle es menos de la mitad del de sus vecinos (15 frames de cada lado): falta de nitidez o de textura.
-   La oscuridad no descarta: un tramo oscuro se queda. Las perillas y sus valores, en "Perillas".
-   Entrega: la lista de frames buenos. Un frame malo no puede ser keyframe ni testigo de F4. AMB3R sigue leyendo todos
-   los frames (sigue la cámara frame a frame).
-2. **AMB3R sobre todos los frames** (con Omega como modelo, como hoy).
-   Entrega: las poses de AMB3R de todos los frames, la profundidad de AMB3R de uno de cada cuatro, y sus keyframes
-   propios.
-3. **Sonda DA3** sobre 16 keyframes propios de AMB3R, repartidos a lo largo del video.
-   Entrega: el metro de AMB3R.
-4. **El mapa.** Con las poses y la profundidad de AMB3R en metros, hasta 15 m: para cada zona, qué frames la ven,
-   desde qué distancia y dirección, y en cuántas visitas del recorrido. Es la vista en planta: superficies, cámaras y
-   campos de visión.
-   Entrega: el mapa. Todos los pasos siguientes lo leen.
-5. **Selección de keyframes.** ✓ CERRADO (2026-11-22). Se recorre el video desde el primer frame bueno; solo los
-   frames buenos del paso 1 pueden ser keyframes. Para cada frame se miden tres cosas respecto del último keyframe,
-   con las poses y la profundidad de AMB3R:
-   - **solape** de la vista (lo que AMB3R ve a menos de 15 m), banda de 92 a 96 %; cierra cuando baja de 92 %;
-   - **desplazamiento**: lo que queda del movimiento de cada punto después de descontar el giro que mejor explica la
-     vista (la medida de I1, sobre los puntos de AMB3R que ve el último keyframe y caen en la imagen del candidato),
-     cuantil 0,9; umbral 1,26°, banda ±25 %; cierra cuando pasa de la banda;
-   - **rotación**: el giro entre las orientaciones de las dos cámaras, sobre cualquier eje; umbral 0,7 × campo
-     horizontal / 4, banda ±25 %; cierra cuando pasa de la banda.
-   Un frame es candidato cuando cualquiera de las tres está dentro de su banda; la ventana se cierra cuando cualquiera
-   se pasa de su banda, y el keyframe es el candidato más nítido. Si una medida salta toda su banda entre dos frames
-   seguidos, se toman los dos. No hay tope temporal ni relleno.
-   Entrega: los keyframes, y los testigos de F4, que son los frames buenos que quedan entre keyframes.
-6. **Cubos de Omega: dos juegos.** ✓ CERRADO (2026-11-22).
-   - **Por continuidad, como hoy:** los keyframes en orden de tiempo, de a 64 compartiendo 32. Siempre dos cubos como
-     mínimo; con menos de 48 keyframes la reconstrucción falla y lo dice en pantalla.
-   - **Por posición:** un cubo por cada lugar revisitado, con los keyframes de todos los momentos que lo ven. Dos
-     keyframes ven el mismo lugar en otra visita cuando están a más de 32 keyframes en el recorrido, sus cámaras están
-     a menos de 3 m y comparten una parte de lo que ven, probado con los rayos sobre la nube de AMB3R (lo tapado no
-     cuenta, lo visible sí). El lugar arranca en celdas de 5 m del espacio; un keyframe entra al cubo de un lugar
-     cuando al menos el 30 % de lo que ve cae en él; si lo ven más de 64 keyframes, el lugar se parte a la mitad hasta
-     que cada parte la vean 64 como máximo. Lugares vecinos comparten los keyframes que ven los dos.
-   Cada keyframe queda con una versión de pose y profundidad por cada cubo en el que está; cómo se reconcilian, sin
-   forzar una sobre la otra, es el punto 5 por definir.
-   Entrega: los dos juegos de cubos.
-7. **DA3 por cubo**, a resolución 504, sobre los mismos cubos.
-   Entrega: la profundidad DA3 de cada keyframe.
-8. **Omega por cubo**, una pasada por cubo, de los dos juegos.
-   Entrega: las poses y la profundidad de Omega. Las visitas de un mismo lugar quedan reconstruidas juntas en su cubo
-   por posición.
-9. **Atada.** Un solo grafo con todos los cubos, de los dos juegos. Las costuras son los keyframes que comparten dos
-   cubos, sean del tipo que sean, y cada costura pesa según su propio error. Los 15 m se miden con el tamaño de cada
-   cubo, que sale de la profundidad DA3 de ese cubo. No hay puentes: los reemplazan los cubos por posición.
-   Entrega: los cubos en su lugar.
-10. **Escala.** Un número, de comparar la profundidad DA3 con la profundidad de Omega ya atada.
-11. **F0.** La cámara inicial, de las focales de Omega.
-12. **F4.** Dos mecanismos:
-    - dentro de una visita: seguir puntos por los keyframes y los testigos de F4, como hoy;
-    - entre visitas de un mismo lugar: emparejar puntos guiado por la geometría del cubo, que ya dice dónde cae cada
-      punto de una visita en la imagen de la otra.
-    Entrega: las correspondencias, incluidas las que unen dos visitas.
-13. **F5.** Ajuste de cámaras con esas correspondencias. La tolerancia sale de las costuras.
-14. **F6.**
-    - factor por keyframe;
-    - análisis por grupos: dentro de cada lugar, cuánto está corrido el grupo de keyframes de una visita respecto de
-      los demás, y corrección del grupo entero;
-    - voto: un punto se publica cuando lo confirma un porcentaje de las vistas que podrían verlo, con un mínimo
-      absoluto chico;
-    - limpiador y publicación.
+### 1. Frames buenos
+Un frame se descarta cuando su brillo medio pasa de 220 (quemado), cuando más del 25 % de sus píxeles están quemados
+(≥ 250) (saturado), o cuando su detalle es menos de la mitad de la mediana del de sus vecinos (15 frames de cada
+lado). La oscuridad no descarta: un tramo oscuro se queda.
+- Entra: todos los frames del video.
+- Sale: la lista de frames buenos. Solo un frame bueno puede ser keyframe o testigo. AMB3R lee igual todos los
+  frames: sigue la cámara frame a frame.
 
-## Decisiones tomadas (con sus palabras)
+### 2. AMB3R sobre todos los frames
+AMB3R-SLAM sobre el video completo, con Omega como modelo.
+- Entra: todos los frames.
+- Sale: la pose de todos los frames, la profundidad de uno de cada cuatro y sus keyframes propios.
 
-- Dos pasadas, AMB3R y Omega (2026-11-22): *"prefiero mantenerlo como lo tenemos ahora, con pasada amber y pasada
-  omega … no quiero comparar amber contra omega"*.
-- Frames buenos (2026-11-22): *"primero limpiar los frames con blur etc, es decir dejar solo los buenos de calidad, es
-  el primer paso necesario e ineludible, hay que incorporarlo"*; y *"el tema que hablamos de la obscuridad"*.
-- Más keyframes por análisis espacial (2026-11-22): *"no me cierra rellenar asi porque si con separacion minima de 8
-  … es temporal y nosotros tenemos analisis espacial"*; *"darle mayor cobertura … tanto al desplazamiento como al
-  angulo de rotacion"*. (Reemplaza lo del 2026-11-21 sobre el hueco 425–450 de bufferStop, *"lo dejamos asi como
-  esta"*: con la regla de desplazamiento ese tramo recibe keyframes.)
-- Cubos por posición (2026-11-22): *"podriamos armar el cubo incluyendo kf que estan en la zona no necesariamente de
-  consistencia temporal, pero si de consistencia posicional … de esa manera inevitablemente queda cerrado"*.
-- El voto en porcentaje (2026-11-22): *"no es igual pedirle en f6 3 vistas a uno que tiene 5 que 4 vistas a uno que
-  tiene 100, debe ser porcentual"*.
-- El análisis de F6 (2026-11-22): *"necesitamos saber cuando una superficie queda mal posicionada, por que queda mal,
-  y corregir el kf al ser una superficie evidentemente no es solo 1, hay varios"*.
-- F4 (2026-11-22): *"hay que solucionar el tema de f4 … es importante"*.
-- Sonda DA3 (2026-11-21): *"corremos el da3 sobre los 16 kf como hasta ahora al principio"*; *"puede tomar 16 kf
-  distribuidos de los que haya selecionado amb3r"*. AMB3R sigue con Omega como modelo.
-- PointDiT (2026-11-21): *"de momento queda afuera, no eliminado, pero si apagado"*.
-- Sesión corta (2026-11-21): *"siempre 2 cubos como minimo y listo, y con minimo de 48 KF, si detecta menos de eso,
-  que falle la reconstruccion, lo indica en pantalla"*.
-- F2 no vuelve: nada de lo medido apunta a que falte.
+### 3. Sonda DA3
+DA3 sobre 16 keyframes propios de AMB3R, repartidos a lo largo del video.
+- Sale: el metro de AMB3R (para los 15 m del mapa y de la selección) y la cámara de la sesión (su campo de visión
+  fija el umbral de rotación del paso 5). No es el metro de la nube: ese es el paso 11.
+
+---
+
+## Fase II · Mapa y organización
+
+### 4. El mapa
+La nube de AMB3R en metros, hasta 15 m, dividida en sectores. Cada frame, desde su propia pose, ve un sector solo si
+es la primera superficie que encuentran sus rayos, dentro de la tolerancia de la sesión: lo tapado no cuenta, lo
+visible sí, aunque sea en parte.
+- Sale: para cada sector, qué frames lo ven, desde qué distancia y desde qué dirección. Todo lo que sigue lo lee: la
+  selección, los pares de correspondencias y las vistas que cuentan en el voto.
+
+### 5. Selección de keyframes
+Se recorre el video desde el primer frame bueno. Para cada frame se miden tres cosas respecto del último keyframe:
+- **solape** de la vista: banda de 92 a 96 %, cierra cuando baja de 92 %;
+- **desplazamiento**: lo que queda del movimiento de cada punto después de descontar el giro que mejor explica la
+  vista (la medida de I1, sobre los puntos de AMB3R), cuantil 0,9; umbral 1,26°, banda ±25 %;
+- **rotación**: el giro entre las orientaciones de las dos cámaras; umbral 0,7 × campo horizontal / 4, banda ±25 %.
+
+Un frame es candidato cuando cualquiera de las tres está dentro de su banda; la ventana se cierra cuando cualquiera se
+pasa de su banda; el keyframe es el candidato bueno más nítido. Si una medida salta toda su banda entre dos frames
+seguidos, se toman los dos. No hay tope temporal ni relleno.
+- Sale: los keyframes, y los testigos: los frames buenos que quedan entre keyframes.
+
+### 6. Cubos por continuidad
+Los keyframes en orden de tiempo, de a 64, compartiendo 32 con el cubo siguiente. Siempre dos cubos como mínimo: con
+menos de 48 keyframes la reconstrucción falla y lo dice en pantalla (información insuficiente, no se puede reconstruir
+con este método).
+- Sale: los cubos.
+- Los cubos por posición quedan como alternativa (ver "Alternativa"), si el ajuste del paso 10 no cierra bien las
+  visitas.
+
+---
+
+## Fase III · Observaciones
+
+### 7. DA3 por cubo
+DA3 sobre los keyframes de cada cubo juntos, a resolución 504.
+- Sale: la profundidad DA3 de cada keyframe. Sirve para el tamaño de cada cubo (los 15 m en el paso 10) y para el
+  metro (paso 11). DA3 no entra como restricción del ajuste: *"da3 metro nada mas"*.
+
+### 8. Omega por cubo
+Una pasada de Omega por cubo, con sus keyframes.
+- Sale: para cada keyframe y cada cubo donde está, una versión de su pose y de su profundidad, con la confianza de ese
+  cubo.
+
+### 9. Correspondencias
+1. **Pares**, del mapa: cada keyframe con todos los que ven lo mismo, sean del mismo cubo, de cubos vecinos o de otra
+   visita; y cada testigo con sus keyframes vecinos. No se descarta ninguno.
+2. **MASt3R** sobre cada par: qué píxel de una imagen corresponde a qué píxel de la otra, con su confianza.
+3. **Verificación contra el mapa:** una correspondencia tiene que caer donde el mapa la predice, dentro de la
+   tolerancia de la sesión.
+4. **Ajuste fino:** la etapa fina del rastreador de F4 lleva cada correspondencia a la resolución nativa.
+5. **Trazas:** las correspondencias se juntan en trazas de varias vistas.
+- Sale: las trazas, cada observación con su confianza y su procedencia.
+
+---
+
+## Fase IV · Ajuste conjunto
+
+### 10. Ajuste conjunto
+Reemplaza a la atada, a F5 y al factor por keyframe de F6.
+- **Entra:** las versiones de Omega de cada keyframe (paso 8), cada una pesada por la confianza de su cubo; las
+  trazas (paso 9); las poses de AMB3R, como punto de partida; el tamaño de cada cubo por DA3 (los 15 m).
+- **Incógnitas:** la posición y la escala de cada cubo; la pose de cada keyframe; la pose de cada testigo que aporta
+  trazas; una cámara para toda la sesión (focal y distorsión); y la corrección de profundidad de cada keyframe: anclas
+  cada 8 píxeles, en profundidad inversa o logarítmica, sobre su forma base.
+- **Forma base de la profundidad de un keyframe:** sus versiones; las que coinciden dentro de la tolerancia de la
+  sesión se combinan (es ruido); donde no coinciden, se queda la de más confianza. Nunca se promedian versiones que no
+  coinciden, ni se fuerza una sobre otra.
+- **Primera etapa:** alineación en 3D de los puntos que se corresponden, pesada por confianza.
+- **Segunda etapa:** reproyección en la imagen, con pérdida robusta; mueve poses, cámara y anclas.
+- **Sistema de referencia:** la pose del primer keyframe fija; la vertical, la del paso de orientación; la escala la
+  fija el paso 11.
+- **Sale:** una pose y un mapa de profundidad por keyframe; la cámara; la pose de los testigos; el residuo de cada
+  observación.
+
+### 11. Escala
+Un número: la profundidad DA3 (paso 7) contra la profundidad ajustada, en la banda cercana y hasta 15 m. Se aplica a
+las poses y a las profundidades. Es el metro de la nube, no una validación.
+
+---
+
+## Fase V · Publicación
+
+### 12. F6
+- **PointDiT prendido:** el detalle en los bordes.
+- **Voto:** un punto se publica cuando lo confirma al menos el 60 % de las vistas que, según el mapa, pueden verlo, con
+  un mínimo de 3 confirmaciones. Una vista que tiene algo adelante no cuenta. El veto por oclusión sigue como hoy.
+- **Limpiador y publicación,** como hoy.
+
+---
 
 ## Perillas
 
-Cada perilla de la reconstrucción, con su valor para la prueba y de dónde sale. Se completa a medida que se cierra cada
-punto (USER 2026-11-22: *"vamos anotando todas las perillas que vamos teniendo para entender como se configura por
-completo luego la reconstruccion"*).
-
-### Paso 1 — frames buenos (CERRADO 2026-11-22, su "ok")
-
-| Perilla | Antes | Valor | De dónde sale |
-|---|---|---|---|
-| Oscuridad: brillo medio mínimo | 40 | 0 (apagada) | En bufferStop, pccr 08-31, zaragoza y observatorio no sacaba nada. En pccr 08-24 sacaba los 144 frames de los dos tramos oscuros y abría el hueco de 130 frames del giro (cubos adivinados, el piso 36 cm abajo). Sin ella, la copia del 2026-11-19 reconstruyó el giro bien (0,93 m donde AMB3R mide 0,87). |
-| Saturación: parte de píxeles quemados | 25 %, contando los ≤ 5 y los ≥ 250 | 25 %, contando solo los ≥ 250 | Los 62 frames que sacaba eran todos oscuros: contaba los casi negros, que son la oscuridad. Contando solo los quemados no saca ninguno en las cinco sesiones. |
-| Quemados: brillo medio máximo | 220 | 220 | Ningún frame de las cinco sesiones pasa de 157. No saca nada en ellas; queda como guarda para un video a contraluz. |
-| Nitidez: detalle frente a la mediana de sus vecinos | no existía | menos de 0,5 → se descarta | El detalle es la medida de I0 (energía de alta frecuencia). En cuatro sesiones no saca nada. En pccr 08-24 saca 12 frames: 2484–2490 y 3589–3593, los dos cruces de puerta con una superficie lisa frente a la lente (brillo 121–132, no son oscuros) — los eslabones más débiles del recorrido en el estudio del 2026-11-19. |
-| Nitidez: vecinos de cada lado | — | 15 frames | Elegido para la prueba. |
-
-Efecto: en bufferStop, pccr 08-31, zaragoza y observatorio no cambia ningún frame; en pccr 08-24 entran los frames
-oscuros y salen los 12 de las puertas.
-
-### Paso 5 — selección de keyframes (CERRADO 2026-11-22, "si, me cierra")
-
-| Perilla | Valor | De dónde sale |
-|---|---|---|
-| Solape con el último keyframe | banda 92–96 %; cierra bajo 92 % | Su decisión, 2026-11-21: medido en la corrida validada de bufferStop, sus keyframes consecutivos comparten una mediana de 93,7 %. |
-| Desplazamiento: medida | lo que queda después del mejor giro, sobre los puntos de AMB3R | Su OK, 2026-11-22. El ángulo con que cada punto se ve desde las dos cámaras NO sirve: en las corridas validadas da entre 1,0 y 2,4 veces la lectura de I1 según la escena (bufferStop 2,36; pccr 08-31 1,24; pccr 08-24 1,01). |
-| Desplazamiento: umbral | 1,26° | Su OK, 2026-11-22. La mediana de esta medida en las ventanas que I1 cerró por desplazamiento, en las tres corridas validadas: bufferStop 1,40°, pccr 08-31 1,23°, pccr 08-24 1,26° (I1 leía en esas mismas ventanas 1,67°, 1,75° y 1,78°). |
-| Desplazamiento: cuantil | 0,9 | El de I1 (`parallax_quantile`). |
-| Rotación: umbral | 0,7 × campo horizontal / 4 (10,8° en pccr) | El de I1 (`rotation_quantum`), su elección del 2026-10-07: con 21,6° quedaban huecos en los giros, con 7° keyframes encimados. El campo sale de la cámara que mide la sonda DA3. Medida sobre las poses de AMB3R coincide con I1 en las ventanas que cerró por rotación: bufferStop 11,3° / 11,3°, pccr 08-31 9,3° / 11,8°, pccr 08-24 9,1° / 9,9°. |
-| Banda de desplazamiento y de rotación | ±25 % del umbral | El de I1 (`keyframe_band_frac`). |
-| Elección dentro de la banda | el más nítido: detalle de I0 sobre el frame con la luz igualada | La selección de la prueba del 2026-11-21. |
-| Salto de una banda entre dos frames seguidos | se toman los dos | La selección de la prueba del 2026-11-21. |
-
-No se movió la banda de solape: donde faltaron keyframes (el principio de pccr 08-24) la cámara se desplazaba viendo
-lo mismo — lo que agrega el ángulo de desplazamiento —; cambiar las dos cosas juntas no diría cuál ayudó.
-
-### Paso 4 — el mapa (2026-11-22)
-
-| Perilla | Valor | De dónde sale |
-|---|---|---|
-| Sector del mapa | tolerancia de la sesión × distancia típica a la que mira (≈ 5 cm en bufferStop) | Medido en cada sesión. |
-| Tolerancia de visibilidad | la de la sesión (2,4 % en bufferStop) | Lo que AMB3R coincide consigo mismo entre keyframes seguidos sobre una superficie, medido en cada sesión. |
-| Visibilidad | un frame ve un sector solo si es la primera superficie que encuentran sus rayos, desde su propia pose | Su regla: *"hay que analizar los rayos de las camaras y cruzar con la nube amber"*; *"si en parte si la ve … comparten, y debe contarse"*. |
-
-### Paso 6 — cubos (CERRADO 2026-11-22)
-
-| Perilla | Valor | De dónde sale |
-|---|---|---|
-| Cubo por continuidad | 64 keyframes compartiendo 32, en orden de tiempo | Su regla. |
-| Sesión mínima | 48 keyframes, dos cubos | Su decisión, 2026-11-21. |
-| Otra visita | más de 32 keyframes en el recorrido | Su OK: *"32kf esta bien porque perteneceria a otro cubo"*. |
-| Distancia máxima entre cámaras | 3 m | Su OK. Los puentes del 2026-11-19 (Omega con dos visitas): coincidían con el grafo el 76–79 % hasta 3 m, 66 % entre 3 y 4, 55 % entre 4 y 5, 40 % entre 5 y 6, 16 % más allá. |
-| Mismo lugar | comparten una parte de lo que ven, con los rayos sobre AMB3R | Su regla. |
-| Lugar: tamaño inicial | celdas de 5 m del espacio | Su medida de cubo (`structure.cube_m`), la de los cubos de espacio del 2026-11-06. |
-| Lugar: tope | 64 keyframes; si lo ven más, se parte a la mitad | Su regla de 64; los cubos de espacio del 2026-11-06 (costuras de 0,1 cm en pccr 08-31). |
-| Entrar al cubo de un lugar | al menos el 30 % de lo que ve el keyframe cae en el lugar | Su OK: *"no tiene sustento el 30% que deberia ser una perilla, pero sirve"*. El valor de los cubos de espacio del 2026-11-06. |
-
-Por qué dos juegos (USER 2026-11-22, pensando en voz alta y después su OK *"para probar si, total son mas pasadas de
-omega nada mas, si no sirve usamos una u otra"*): los cubos por continuidad mantienen el recorrido unido; los cubos
-por posición ubican las visitas de un lugar juntas. Un cubo por posición junta todas las visitas del lugar: *"lo que
-queremos es que el cubo tenga todas las vistas posibles de diferentes instantes"*. Las poses y las profundidades de
-las dos versiones de un keyframe se usan para corregir las dos: *"deberia usarse para ajustar tanto las posiciones
-como las profundidades porque deberian ser las mismas … hay que corregirlas todas"* — sin forzar una sobre la otra
-(el 2026-11-20 forzarlas rompió los cubos en cadena; el grafo de profundidad dio "no aplicar" en las seis sesiones).
-
-### Ya decididas en los pasos
-
 | Paso | Perilla | Valor | De dónde sale |
 |---|---|---|---|
-| 3 | Sonda DA3: keyframes de AMB3R | 16, repartidos a lo largo del video | Su decisión, 2026-11-21. |
-| 4, 9 | Alcance de cada vista | 15 m | Su regla (`reconstruction.view_range_m`). |
-| 5 | Solape con el último keyframe | franja de 92 a 96 % | Su decisión, 2026-11-21. |
+| 1 | Oscuridad: brillo medio mínimo | 0 (apagada) | Medido: en pccr 08-24 sacaba los 144 frames de los dos tramos oscuros y abría el hueco del giro; en las otras cuatro sesiones no sacaba nada. |
+| 1 | Saturación: parte de píxeles quemados | 25 %, contando solo los ≥ 250 | Los 62 frames que sacaba eran todos oscuros (contaba los casi negros). Contando solo los quemados no saca ninguno en las cinco sesiones. |
+| 1 | Quemados: brillo medio máximo | 220 | Ningún frame de las cinco sesiones pasa de 157; queda como guarda. |
+| 1 | Nitidez: detalle frente a la mediana de los vecinos | menos de 0,5 → se descarta | En cuatro sesiones no saca nada; en pccr 08-24 saca los 12 frames de los dos cruces de puerta (2484–2490, 3589–3593). |
+| 1 | Nitidez: vecinos de cada lado | 15 frames | Elegido para la prueba. |
+| 3 | Sonda DA3 | 16 keyframes propios de AMB3R, repartidos | Su decisión, 2026-11-21. |
+| 4, 5, 9, 12 | Alcance de cada vista | 15 m | Su regla. |
+| 4 | Sector del mapa | tolerancia de la sesión × distancia típica (≈ 5 cm en bufferStop) | Medido en cada sesión. |
+| 4 | Tolerancia de visibilidad | la de la sesión (2,4 % en bufferStop) | Lo que AMB3R coincide consigo mismo entre keyframes seguidos, medido en cada sesión. |
+| 5 | Solape | banda 92–96 %; cierra bajo 92 % | Medido en la corrida validada de bufferStop: mediana 93,7 % entre keyframes seguidos. |
+| 5 | Desplazamiento | 1,26°, cuantil 0,9 | Medido: la mediana de esta medida en las ventanas que I1 cerró por desplazamiento, en las tres corridas validadas (bufferStop 1,40°, pccr 08-31 1,23°, pccr 08-24 1,26°). Su OK. |
+| 5 | Rotación | 0,7 × campo horizontal / 4 (10,8° en pccr) | El de I1, su elección del 2026-10-07. Medida sobre las poses de AMB3R coincide con I1 (11,3° / 11,3°; 9,3° / 11,8°; 9,1° / 9,9°). |
+| 5 | Banda de desplazamiento y de rotación | ±25 % | El de I1. |
 | 6 | Cubo | 64 keyframes compartiendo 32 | Su regla. |
-| 6 | Sesión mínima | 48 keyframes; menos falla y lo dice en pantalla | Su decisión, 2026-11-21. |
+| 6 | Sesión mínima | 48 keyframes, dos cubos | Su decisión, 2026-11-21. |
 | 7 | DA3 por cubo | resolución 504 | Su decisión, 2026-11-21. |
-| 14 | PointDiT | apagado, no eliminado | Su decisión, 2026-11-21. |
+| 9 | Pares de MASt3R | todos los que el mapa diga que ven lo mismo | Su decisión: *"todos los necesarios, no se descarta nada"*. |
+| 10 | Corrección de profundidad | anclas cada 8 píxeles | Su decisión (MASt3R-SfM). |
+| 12 | Voto | 60 % de las vistas que pueden ver el punto | Su decisión. Medido: publica 0,99 (bufferStop) y 0,98 (pccr 08-31) de lo que se publica hoy. |
+| 12 | Voto: mínimo | 3 confirmaciones | Su decisión. |
+| 12 | PointDiT | prendido | Su decisión: *"si que se incluye en el pipeline"*. |
 
-## Por definir
+---
 
-1. ~~Paso 1 — la regla de frame malo~~ → cerrado, ver "Perillas".
-2. ~~Paso 5 — los dos ángulos~~ → cerrado, ver "Perillas".
-3. ~~Paso 6 — los cubos por lugar~~ → cerrado, ver "Perillas".
-4. **Paso 12 — el emparejado entre visitas.** Cómo se busca alrededor del lugar que predice la geometría, y qué pares
-   de keyframes se intentan.
-5. **Paso 14 — el análisis por grupos.** Qué se corrige del grupo (un factor de profundidad, una pose), contra quién
-   (quién ve mejor: más cerca, mejor ángulo), y cuándo no se corrige.
-6. **Paso 14 — el voto.** El porcentaje, el mínimo absoluto, y qué vistas cuentan como "podrían verlo".
-7. **PointDiT.** Probarlo prendido aparte (solo F6) para ver bordes y puntos volando.
+## Lo que se tomó de las propuestas de GPT y de Gemini (2026-11-22)
+
+De GPT: escribirlo por fases, con lo que entra y sale de cada paso; una sola escala para toda la nube; un solo ajuste
+para todo, aunque por memoria se resuelva por bloques; cada observación guarda su procedencia, su confianza y su
+residuo, porque con eso se pesa; los testigos se ajustan sin pasar a ser keyframes.
+
+De Gemini: juntar las correspondencias en trazas de varias vistas; verificar cada correspondencia contra el mapa; las
+anclas en profundidad inversa o logarítmica; una sola cámara para la sesión; fijar el sistema de referencia.
+
+Lo que no se tomó, y por qué:
+- **Menos keyframes (solape de 70–85 %):** medido al revés; con menos keyframes la nube salió peor, y el principio de
+  pccr 08-24 falló justo donde había menos.
+- **Descartar frames estáticos antes de AMB3R:** AMB3R necesita todos los frames; los estáticos ya los saltea la
+  selección.
+- **DA3 una vez por keyframe:** medido, frame por frame dio la nube 7,5 % más chica y más ruidosa.
+- **DA3 como restricción del ajuste, o la corrección a·D + b:** su regla (DA3 solo da el metro); medido, las
+  restricciones de DA3 por cubo rompieron costuras de 16 a 33 cm; la corrección es con anclas cada 8 píxeles.
+- **Una escala solo como indicador:** un cálculo que no corrige nada (su regla); el paso 11 es el metro y se aplica.
+- **TSDF:** promedia superficies.
+- **Criterios sin definir** (calidad por regiones, "continuidad espacial", filtros de correspondencias sin umbral,
+  "consolidación de sectores"): no tienen medida ni valor.
+
+---
+
+## Alternativa: cubos por posición
+
+Si el ajuste del paso 10 no cierra bien las visitas, se agregan cubos por posición, que Omega reconstruye junto con los
+de continuidad, todos en el mismo ajuste:
+- un cubo por cada lugar revisitado, con los keyframes de todos los momentos que lo ven;
+- dos keyframes ven el mismo lugar en otra visita cuando están a más de 32 keyframes en el recorrido, sus cámaras están
+  a menos de 3 m y comparten una parte de lo que ven (con los rayos del mapa);
+- el lugar arranca en celdas de 5 m y se parte a la mitad mientras lo vean más de 64 keyframes; un keyframe entra al
+  cubo de un lugar cuando al menos el 30 % de lo que ve cae en él.
+
+De dónde salen esos valores: los 3 m, de los puentes del 2026-11-19 (Omega con dos visitas coincidía con el grafo el
+76–79 % hasta 3 m, y caía después); los 5 m y el tope de 64, de los cubos de espacio del 2026-11-06 (costuras de 0,1 cm
+en pccr 08-31); el 30 %, de esos mismos cubos (*"no tiene sustento el 30% que deberia ser una perilla, pero sirve"*).
+
+---
 
 ## Lo que respalda este diseño
 
-Medido el 2026-11-22 sobre `pccr2408_prueba` y la corrida original, con el mismo método (sin placa):
+Medido el 2026-11-22 sobre `pccr2408_prueba` y la corrida original, con el mismo método:
+- En los primeros 2000 frames la prueba tenía entre 25 y 38 % menos keyframes que la original, y hasta 80 frames sin
+  keyframe; ahí él vio los defectos (capas duplicadas, superficies dobladas, puntos volando).
+- En los lugares que marcó, la ida y la vuelta publican la misma superficie separadas entre 5 y 7 cm; dentro de una
+  pasada todo coincide a 4–5 mm.
 
-- En los primeros 2000 frames del video la prueba tiene entre 25 y 38 % menos keyframes que la original, y deja hasta
-  80 frames sin keyframe. De ahí en adelante tiene igual o más. Es la zona donde él ve los defectos.
-- En los tres lugares que marcó hay entre 23 y 41 % menos puntos que en la original.
-- En esos lugares la ida y la vuelta publican la misma superficie separadas entre 5 y 7 cm; dentro de una misma
-  pasada todo coincide a 4 o 5 mm. Esa separación da igual en la original (medida por punto más cercano; falta la
-  medida estricta, mismo píxel y profundidad contra profundidad).
-- El factor por keyframe de F6 va de 0,69 a 1,41 en la prueba y de 0,10 a 2,31 en la original.
-
-Del registro del proyecto:
-
-- 2026-11-06: los cubos de espacio, por lo que ve cada keyframe, con tope de 64: costuras de 0,1 cm después del grafo
-  en pccr 3108. Lo que falló el 2026-11-07 fueron los cubos sin tope de vistas (94 a 358 keyframes).
-- 2026-11-08 / 09: mover el píxel que pierde el voto hasta la posición ganadora se programó y se sacó: el píxel
-  conservaba su color y aparecía pintado sobre otro objeto.
+Del registro y de la bibliografía:
 - 2026-11-20 (auditoría): solo el 1,9 % de las correspondencias de F4 unía dos visitas; tres de cada cuatro ventanas
-  de revisita no daban ninguna.
-- 2026-11-19: los puentes entre vistas a menos de 3 m coincidían con el grafo el 77 %; a más de 6 m, el 16 % o menos.
-- 2026-11-04: la nube propia de AMB3R como reconstrucción final no le ganó al pipeline.
+  de revisita no daban ninguna. MASt3R encuentra correspondencias entre vistas muy distintas.
+- 2026-11-20: forzar a coincidir las versiones de un keyframe en cadena rompió los cubos (la escala se fue 30 % en
+  cinco cubos); de ahí la regla de no forzar ni promediar.
+- MASt3R-SfM (NAVER, 2024): ajuste en dos etapas (3D y reproyección), profundidad con anclas cada 8 píxeles, una pose
+  y una profundidad por imagen; escenas de más de 1000 imágenes.
+- AMB3R contra MASt3R-SfM (paper de AMB3R, CVPR 2026): mejores poses en ETH3D y Tanks & Temples; la profundidad en
+  metros de MASt3R tiene 57–64 % de error contra 5–9 % de AMB3R: el metro de MASt3R no sirve.
