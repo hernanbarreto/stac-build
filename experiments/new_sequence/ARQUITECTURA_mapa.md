@@ -51,18 +51,26 @@ Cada paso dice qué hace, qué lee y qué entrega. Lo que falta definir de cada 
    se pasa de su banda, y el keyframe es el candidato más nítido. Si una medida salta toda su banda entre dos frames
    seguidos, se toman los dos. No hay tope temporal ni relleno.
    Entrega: los keyframes, y los testigos de F4, que son los frames buenos que quedan entre keyframes.
-6. **Cubos de Omega, por lugar.** Los keyframes se ordenan por el lugar que miran, no por el momento en que se
-   tomaron, y se cortan en cubos de 64 keyframes compartiendo 32. Un lugar recorrido una vez da los cubos de hoy. Un
-   lugar recorrido más de una vez tiene sus visitas dentro del mismo cubo, cuando el mapa dice que miran la misma
-   superficie desde distancia y dirección compatibles. Siempre dos cubos como mínimo; con menos de 48 keyframes la
-   reconstrucción falla y lo dice en pantalla.
-   Entrega: los cubos, y para cada cubo qué visitas contiene.
+6. **Cubos de Omega: dos juegos.** ✓ CERRADO (2026-11-22).
+   - **Por continuidad, como hoy:** los keyframes en orden de tiempo, de a 64 compartiendo 32. Siempre dos cubos como
+     mínimo; con menos de 48 keyframes la reconstrucción falla y lo dice en pantalla.
+   - **Por posición:** un cubo por cada lugar revisitado, con los keyframes de todos los momentos que lo ven. Dos
+     keyframes ven el mismo lugar en otra visita cuando están a más de 32 keyframes en el recorrido, sus cámaras están
+     a menos de 3 m y comparten una parte de lo que ven, probado con los rayos sobre la nube de AMB3R (lo tapado no
+     cuenta, lo visible sí). El lugar arranca en celdas de 5 m del espacio; un keyframe entra al cubo de un lugar
+     cuando al menos el 30 % de lo que ve cae en él; si lo ven más de 64 keyframes, el lugar se parte a la mitad hasta
+     que cada parte la vean 64 como máximo. Lugares vecinos comparten los keyframes que ven los dos.
+   Cada keyframe queda con una versión de pose y profundidad por cada cubo en el que está; cómo se reconcilian, sin
+   forzar una sobre la otra, es el punto 5 por definir.
+   Entrega: los dos juegos de cubos.
 7. **DA3 por cubo**, a resolución 504, sobre los mismos cubos.
    Entrega: la profundidad DA3 de cada keyframe.
-8. **Omega por cubo**, una pasada por cubo.
-   Entrega: las poses y la profundidad de Omega. Las visitas de un mismo lugar quedan reconstruidas juntas.
-9. **Atada.** Costuras entre los cubos que comparten keyframes, y grafo. Los 15 m se miden con el tamaño de cada
-   cubo, que sale de la profundidad DA3 de ese cubo. No hay puentes: el cierre lo dan los cubos por lugar.
+8. **Omega por cubo**, una pasada por cubo, de los dos juegos.
+   Entrega: las poses y la profundidad de Omega. Las visitas de un mismo lugar quedan reconstruidas juntas en su cubo
+   por posición.
+9. **Atada.** Un solo grafo con todos los cubos, de los dos juegos. Las costuras son los keyframes que comparten dos
+   cubos, sean del tipo que sean, y cada costura pesa según su propio error. Los 15 m se miden con el tamaño de cada
+   cubo, que sale de la profundidad DA3 de ese cubo. No hay puentes: los reemplazan los cubos por posición.
    Entrega: los cubos en su lugar.
 10. **Escala.** Un número, de comparar la profundidad DA3 con la profundidad de Omega ya atada.
 11. **F0.** La cámara inicial, de las focales de Omega.
@@ -139,6 +147,35 @@ oscuros y salen los 12 de las puertas.
 No se movió la banda de solape: donde faltaron keyframes (el principio de pccr 08-24) la cámara se desplazaba viendo
 lo mismo — lo que agrega el ángulo de desplazamiento —; cambiar las dos cosas juntas no diría cuál ayudó.
 
+### Paso 4 — el mapa (2026-11-22)
+
+| Perilla | Valor | De dónde sale |
+|---|---|---|
+| Sector del mapa | tolerancia de la sesión × distancia típica a la que mira (≈ 5 cm en bufferStop) | Medido en cada sesión. |
+| Tolerancia de visibilidad | la de la sesión (2,4 % en bufferStop) | Lo que AMB3R coincide consigo mismo entre keyframes seguidos sobre una superficie, medido en cada sesión. |
+| Visibilidad | un frame ve un sector solo si es la primera superficie que encuentran sus rayos, desde su propia pose | Su regla: *"hay que analizar los rayos de las camaras y cruzar con la nube amber"*; *"si en parte si la ve … comparten, y debe contarse"*. |
+
+### Paso 6 — cubos (CERRADO 2026-11-22)
+
+| Perilla | Valor | De dónde sale |
+|---|---|---|
+| Cubo por continuidad | 64 keyframes compartiendo 32, en orden de tiempo | Su regla. |
+| Sesión mínima | 48 keyframes, dos cubos | Su decisión, 2026-11-21. |
+| Otra visita | más de 32 keyframes en el recorrido | Su OK: *"32kf esta bien porque perteneceria a otro cubo"*. |
+| Distancia máxima entre cámaras | 3 m | Su OK. Los puentes del 2026-11-19 (Omega con dos visitas): coincidían con el grafo el 76–79 % hasta 3 m, 66 % entre 3 y 4, 55 % entre 4 y 5, 40 % entre 5 y 6, 16 % más allá. |
+| Mismo lugar | comparten una parte de lo que ven, con los rayos sobre AMB3R | Su regla. |
+| Lugar: tamaño inicial | celdas de 5 m del espacio | Su medida de cubo (`structure.cube_m`), la de los cubos de espacio del 2026-11-06. |
+| Lugar: tope | 64 keyframes; si lo ven más, se parte a la mitad | Su regla de 64; los cubos de espacio del 2026-11-06 (costuras de 0,1 cm en pccr 08-31). |
+| Entrar al cubo de un lugar | al menos el 30 % de lo que ve el keyframe cae en el lugar | Su OK: *"no tiene sustento el 30% que deberia ser una perilla, pero sirve"*. El valor de los cubos de espacio del 2026-11-06. |
+
+Por qué dos juegos (USER 2026-11-22, pensando en voz alta y después su OK *"para probar si, total son mas pasadas de
+omega nada mas, si no sirve usamos una u otra"*): los cubos por continuidad mantienen el recorrido unido; los cubos
+por posición ubican las visitas de un lugar juntas. Un cubo por posición junta todas las visitas del lugar: *"lo que
+queremos es que el cubo tenga todas las vistas posibles de diferentes instantes"*. Las poses y las profundidades de
+las dos versiones de un keyframe se usan para corregir las dos: *"deberia usarse para ajustar tanto las posiciones
+como las profundidades porque deberian ser las mismas … hay que corregirlas todas"* — sin forzar una sobre la otra
+(el 2026-11-20 forzarlas rompió los cubos en cadena; el grafo de profundidad dio "no aplicar" en las seis sesiones).
+
 ### Ya decididas en los pasos
 
 | Paso | Perilla | Valor | De dónde sale |
@@ -155,8 +192,7 @@ lo mismo — lo que agrega el ángulo de desplazamiento —; cambiar las dos cos
 
 1. ~~Paso 1 — la regla de frame malo~~ → cerrado, ver "Perillas".
 2. ~~Paso 5 — los dos ángulos~~ → cerrado, ver "Perillas".
-3. **Paso 6 — el orden "por lugar".** En un pasillo es directo; en una sala con cruces hace falta una regla general.
-   Y el límite de distancia y dirección para poner dos visitas en el mismo cubo.
+3. ~~Paso 6 — los cubos por lugar~~ → cerrado, ver "Perillas".
 4. **Paso 12 — el emparejado entre visitas.** Cómo se busca alrededor del lugar que predice la geometría, y qué pares
    de keyframes se intentan.
 5. **Paso 14 — el análisis por grupos.** Qué se corrige del grupo (un factor de profundidad, una pose), contra quién
