@@ -11,9 +11,16 @@ Cómo se trabaja (sus reglas):
 
 ---
 
-- [ ] **1. Paso 1 — frames buenos.** Las cuatro reglas (quemados, saturados contando solo los ≥ 250, nitidez frente a
+- [x] **1. Paso 1 — frames buenos.** Las cuatro reglas (quemados, saturados contando solo los ≥ 250, nitidez frente a
       15 + 15 vecinos; sin oscuridad).
       *Cierre:* en las cinco sesiones, los frames descartados son los 12 de las puertas de pccr 08-24 y ningún otro.
+      ✓ 2026-11-22 — `scripts/checklist/check_arq_1_frames.sh` → CLOSED. `arq3_frames.py` en placa (el Y del JPEG por
+      nvJPEG, brillo y quemados como cuentas enteras, la reducción INTER_AREA de OpenCV en su mismo orden, la FFT en
+      float64) contra las funciones de I0, en los 20.279 frames de las cinco sesiones: las mismas decisiones, brillo y
+      quemados idénticos, las imágenes reducidas idénticas bit a bit, la nitidez a 1e-15. Descartados: 2484–2490 y
+      3589–3593 de pccr 08-24, por detalle; ninguno más. 28 s de placa para los 20.279 frames. Encontrado en la primera
+      corrida y corregido: dividido por un número de Python, PyTorch en placa multiplica por el inverso (un bit de
+      diferencia a veces); se divide por un tensor en la placa.
 - [ ] **2. Paso 3 — sonda DA3 sobre 16 keyframes propios de AMB3R.**
       *Cierre:* el metro de AMB3R y la cámara de las tres sesiones de prueba, junto al metro y la cámara que tienen hoy.
 - [ ] **3. Paso 4 — el mapa.** Sectores, visibilidad por rayos con la tolerancia de la sesión.
