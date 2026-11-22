@@ -42,8 +42,9 @@ Cada paso dice qué hace, qué lee y qué entrega. Lo que falta definir de cada 
    frames buenos del paso 1 pueden ser keyframes. Para cada frame se miden tres cosas respecto del último keyframe,
    con las poses y la profundidad de AMB3R:
    - **solape** de la vista (lo que AMB3R ve a menos de 15 m), banda de 92 a 96 %; cierra cuando baja de 92 %;
-   - **desplazamiento**: el ángulo con que cada punto se ve desde las dos cámaras, cuantil 0,9 de los puntos que ve
-     el último keyframe y caen en la imagen del candidato; umbral 1,77°, banda ±25 %; cierra cuando pasa de la banda;
+   - **desplazamiento**: lo que queda del movimiento de cada punto después de descontar el giro que mejor explica la
+     vista (la medida de I1, sobre los puntos de AMB3R que ve el último keyframe y caen en la imagen del candidato),
+     cuantil 0,9; umbral 1,26° (propuesto, falta su OK), banda ±25 %; cierra cuando pasa de la banda;
    - **rotación**: el giro entre las orientaciones de las dos cámaras, sobre cualquier eje; umbral 0,7 × campo
      horizontal / 4, banda ±25 %; cierra cuando pasa de la banda.
    Un frame es candidato cuando cualquiera de las tres está dentro de su banda; la ventana se cierra cuando cualquiera
@@ -127,9 +128,10 @@ oscuros y salen los 12 de las puertas.
 | Perilla | Valor | De dónde sale |
 |---|---|---|
 | Solape con el último keyframe | banda 92–96 %; cierra bajo 92 % | Su decisión, 2026-11-21: medido en la corrida validada de bufferStop, sus keyframes consecutivos comparten una mediana de 93,7 %. |
-| Desplazamiento: umbral | 1,77° | El de I1 (`intake.parallax.parallax_quantum_deg`): 12 px en pccr 08-31 con focal 387,5 px, el valor de todas las corridas validadas. I1 medía en la imagen el movimiento de un punto descontado el giro, que es este mismo ángulo. |
+| Desplazamiento: medida | lo que queda después del mejor giro, sobre los puntos de AMB3R | Su OK, 2026-11-22. El ángulo con que cada punto se ve desde las dos cámaras NO sirve: en las corridas validadas da entre 1,0 y 2,4 veces la lectura de I1 según la escena (bufferStop 2,36; pccr 08-31 1,24; pccr 08-24 1,01). |
+| Desplazamiento: umbral | 1,26° — PROPUESTO, falta su OK | La mediana de esta medida en las ventanas que I1 cerró por desplazamiento, en las tres corridas validadas: bufferStop 1,40°, pccr 08-31 1,23°, pccr 08-24 1,26° (I1 leía en esas mismas ventanas 1,67°, 1,75° y 1,78°). |
 | Desplazamiento: cuantil | 0,9 | El de I1 (`parallax_quantile`). |
-| Rotación: umbral | 0,7 × campo horizontal / 4 (10,8° en pccr) | El de I1 (`rotation_quantum`), su elección del 2026-10-07: con 21,6° quedaban huecos en los giros, con 7° keyframes encimados. El campo sale de la cámara que mide la sonda DA3. |
+| Rotación: umbral | 0,7 × campo horizontal / 4 (10,8° en pccr) | El de I1 (`rotation_quantum`), su elección del 2026-10-07: con 21,6° quedaban huecos en los giros, con 7° keyframes encimados. El campo sale de la cámara que mide la sonda DA3. Medida sobre las poses de AMB3R coincide con I1 en las ventanas que cerró por rotación: bufferStop 11,3° / 11,3°, pccr 08-31 9,3° / 11,8°, pccr 08-24 9,1° / 9,9°. |
 | Banda de desplazamiento y de rotación | ±25 % del umbral | El de I1 (`keyframe_band_frac`). |
 | Elección dentro de la banda | el más nítido: detalle de I0 sobre el frame con la luz igualada | La selección de la prueba del 2026-11-21. |
 | Salto de una banda entre dos frames seguidos | se toman los dos | La selección de la prueba del 2026-11-21. |
