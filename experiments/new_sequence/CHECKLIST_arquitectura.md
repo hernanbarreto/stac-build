@@ -151,7 +151,11 @@ Not run with this architecture: zaragoza and observatorio.
     5.5 GB — F6 again needs it and F4 again is almost 7 h (the marker `output/precision/KEEP_TRACKS`). The scan
     holds: Omega's records 7,847 MB, precision 5,499 MB, the octree 5,166 MB, origins 3,844 MB, the cloud 2,965 MB
     (and its raw copy 2,965 MB), frames 1,080 MB, intake 366 MB.
-  - HIS EYE ON IT: pending (the rack; the floor at the dark turn).
+  - HIS EYE ON IT (USER 2026-11-22): *"el tema es que mejora en varios aspectos pero empeora en otros, aparecen
+    algunas capas duplicadas que antes no habia, el rack se acerca mas pero esta algo desplazado lateralmente, pero
+    hay superficies algo rotas o dobladas que antes no habia, si se ve que hay algo mas de huecos, pero ese no es el
+    problema, pero creo que mejora unos aspectos y empeora otros"*. NOT VALIDATED: the port to the main line does not
+    start. Nothing traced: no cause is known.
 
 ## His eye (USER 2026-11-21, with `bufferStop_prueba` and `pccr3108_prueba` published)
 

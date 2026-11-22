@@ -1000,7 +1000,14 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     coverage 51.5 / 55.07 % (under the support of 5 views 26.5 / 21.78 %, contradicted 20.6 / 16.73 %), 109,832,685 /
     114,451,841 points, F0 to F6 814.1 / 687.6 min (F4 +56, F5 +148, F6 −67 min). Its intermediates removed but F4's
     tracks (5.5 GB, `output/precision/KEEP_TRACKS`), kept on his word ("Si déjalo sin bórralo") while the vote's
-    requirement is open. HIS EYE ON IT: pending (the rack, the floor at the dark turn).
+    requirement is open. HIS EYE ON IT (USER 2026-11-22): "el tema es que mejora en varios aspectos pero empeora en
+    otros, aparecen algunas capas duplicadas que antes no habia, el rack se acerca mas pero esta algo desplazado
+    lateralmente, pero hay superficies algo rotas o dobladas que antes no habia, si se ve que hay algo mas de huecos,
+    pero ese no es el problema, pero creo que mejora unos aspectos y empeora otros" — pccr 2026-08-24 is NOT
+    VALIDATED under this architecture, so the port to the main line does not start (his condition of 2026-11-21:
+    "si ademas de mejorar las metricas, los tiempos logro corregir el tema que teniamos de los racks abiertos,
+    entonces no se habla mas, pasamos a implementar este nuevo pipeline"). Nothing was traced: no cause is known;
+    offered to him: which keyframes and cubes publish the duplicated layers, on his order and his screenshots.
   · OPEN, HIS (2026-11-22): the vote asks for 5 confirming views and only keyframes vote now (the voting views
     were 312 / 853 / 4819 in the originals — keyframes, turn frames, F6's witnesses — and are 209 / 450 / 3024); the
     pixels left under the support rose 18.5 → 23.7 % (bufferStop), 20.8 → 23.8 % (pccr 08-31), 21.78 → 26.5 %
