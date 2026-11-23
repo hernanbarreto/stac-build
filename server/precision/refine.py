@@ -67,6 +67,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import time
 import os
 import sys
@@ -85,6 +86,7 @@ REFINE_VERSION = 3            # 2 (2026-10-07): the judge of points 46 / 59 / 60
                               # 3 (2026-11-10): R3, the rolling-shutter and prior-depth reports removed
 PROVENANCE = "tool_measured"
 LOG_TAG = "[refine]"
+MAD_TO_SIGMA = 1.0 / 0.6744897501960817          # 1.4826: σ of a normal from its MAD (as F6's)
 # the ladder of nested camera models, simplest first (point 62: one camera for every keyframe)
 LADDER = ("R0", "R1", "R2")
 
@@ -547,13 +549,109 @@ class RungResult:
                                             # residual blocks for every rung of the ladder)
     iterations: int = 0                     # Ceres steps taken (successful + unsuccessful)
     seconds: float = 0.0                    # the solve's wall clock — refine.timing.json only
+    anchor_state: Optional[dict] = None     # the metric anchor at the solution (USER 2026-11-22): the cubes'
+                                            # log-scales and the measured σ_px / σ_log; None without the anchor
+
+
+def build_metric_anchor(fit_g, X0: Dict[int, np.ndarray], w2c0: np.ndarray, params0: Sequence[float],
+                        depth_of: Callable[[int], Tuple[np.ndarray, Any]], min_depth_m: float, min_rows: int,
+                        log: Callable = print) -> Optional[dict]:
+    """THE METRIC ANCHOR (USER 2026-11-22, MetricTrail's concept — "usamos el concepto"): one depth row per fit
+    landmark, at its NEAREST keyframe observation (the smallest start depth: Omega's depth is most precise there),
+    the prior being Omega's depth at that pixel (the keyframe's own record, nearest record pixel) × the keyframe's
+    scale k_i = the median over its rows of (start depth / Omega depth) — the start state's own scale, so the anchor
+    holds each keyframe where the start put it unless the tracks say otherwise. The weight is MEASURED on the start:
+    kappa = σ_px / σ_log, σ_px the robust σ (1.4826·MAD) of the start reprojection residuals' components, σ_log
+    that of log(start depth / prior) — both kinds of row then enter the robust loss in the same units.
+    ``depth_of(i)`` = (Omega's record depth of keyframe i, its record grid); rows under ``min_depth_m`` of Omega
+    depth, off the record grid, or of a keyframe with fewer than ``min_rows`` rows are left out."""
+    from precision.camera import native_to_grid
+    tracks = np.asarray(fit_g.tracks, np.int64)
+    counts = np.asarray(fit_g.counts, np.int64)
+    ii = np.asarray(fit_g.ii, np.int64)
+    uv = np.asarray(fit_g.uv, np.float64).reshape(-1, 2)
+    if not len(X0) or not len(tracks):
+        return None
+    keys = np.fromiter(X0.keys(), np.int64, len(X0))
+    vals = np.asarray([X0[int(t)] for t in keys.tolist()], np.float64).reshape(-1, 3)
+    ko = np.argsort(keys, kind="stable")
+    ks, vs = keys[ko], vals[ko]
+    rep_t = np.repeat(tracks, counts)
+    pos = np.minimum(np.searchsorted(ks, rep_t), len(ks) - 1)
+    has = ks[pos] == rep_t
+    t_o, i_o, uv_o, X_o = rep_t[has], ii[has], uv[has], vs[pos[has]]
+    w2c0 = np.asarray(w2c0, np.float64)
+    Xc = np.einsum("mij,mj->mi", w2c0[i_o, :3, :3], X_o) + w2c0[i_o, :3, 3]
+    z = Xc[:, 2]
+    # the start's reprojection residuals of these fit observations (σ_px)
+    r_px = project_obs(X_o, w2c0[i_o], np.asarray(params0, np.float64)) - uv_o
+    comp = r_px[np.isfinite(r_px).all(1)].ravel()
+    sigma_px = float(MAD_TO_SIGMA * np.median(np.abs(comp - np.median(comp)))) if len(comp) else float("nan")
+    front = z > 0
+    t_f, i_f, uv_f, z_f = t_o[front], i_o[front], uv_o[front], z[front]
+    order = np.lexsort((z_f, t_f))                   # by track, nearest first
+    first = order[np.r_[True, t_f[order][1:] != t_f[order][:-1]]] if len(order) else order
+    a_t, a_i, a_uv, a_z = t_f[first], i_f[first], uv_f[first], z_f[first]
+    # every keyframe's record read once: its depth at the rows' pixels, and its CUBE (the record's chunk — the
+    # unit its depth is in)
+    n_kf = len(w2c0)
+    d_rec = np.full(len(a_t), np.nan)
+    chunk_of = np.full(n_kf, -1, np.int64)
+    for i in range(n_kf):
+        rec, g, chunk = depth_of(int(i))
+        chunk_of[i] = int(chunk)
+        m = a_i == i
+        if not m.any():
+            continue
+        gu = native_to_grid(a_uv[m], g)
+        col = np.rint(gu[:, 0]).astype(np.int64)
+        row = np.rint(gu[:, 1]).astype(np.int64)
+        inside = (col >= 0) & (col < rec.shape[1]) & (row >= 0) & (row < rec.shape[0])
+        d = np.full(int(m.sum()), np.nan)
+        d[inside] = rec[row[inside], col[inside]]
+        d_rec[m] = d
+    cubes = np.unique(chunk_of)
+    cube_of_cam = np.searchsorted(cubes, chunk_of)                     # keyframe → 0..C−1
+    ok = np.isfinite(d_rec) & (d_rec > float(min_depth_m))
+    # USER 2026-11-22 ("si, pisa nomas"): the scale is the CUBE's and an unknown of the solve; its start
+    # value = the median over the cube's rows of log(start depth / record depth); a cube with fewer than
+    # min_rows rows ties nothing
+    a_cube = cube_of_cam[a_i]
+    s0 = np.zeros(len(cubes))
+    live = np.zeros(len(cubes), bool)
+    for c in range(len(cubes)):
+        m = ok & (a_cube == c)
+        if int(m.sum()) >= int(min_rows):
+            s0[c] = float(np.median(np.log(a_z[m]) - np.log(d_rec[m])))
+            live[c] = True
+    ok &= live[a_cube]
+    if not ok.any():
+        log(f"{LOG_TAG} metric anchor: no landmark row on Omega's depth — none built")
+        return None
+    log_d = np.log(d_rec[ok])
+    dev = np.log(a_z[ok]) - log_d - s0[a_cube[ok]]
+    sigma_log = float(MAD_TO_SIGMA * np.median(np.abs(dev - np.median(dev))))
+    if not (np.isfinite(sigma_px) and sigma_px > 0 and np.isfinite(sigma_log) and sigma_log > 0):
+        raise RefineError(f"metric anchor: the start's measured σ_px {sigma_px!r} / σ_log {sigma_log!r} give no weight")
+    kappa = sigma_px / sigma_log
+    sc = np.exp(s0[live])
+    rep = {"rows": int(ok.sum()), "landmarks": int(len(a_t)), "cubes": int(live.sum()),
+           "keyframes": int(len(np.unique(a_i[ok]))), "sigma_px": sigma_px, "sigma_log": sigma_log, "kappa": kappa,
+           "reference": "nearest keyframe observation", "scale": "one unknown per Omega cube (log), solved with F5",
+           "cube_scale_start": [float(x) for x in sc]}
+    log(f"{LOG_TAG} metric anchor: {rep['rows']:,} landmarks of {rep['landmarks']:,} tied to Omega's depth in "
+        f"{rep['keyframes']} keyframes of {rep['cubes']} cubes (each cube's scale an unknown, start "
+        f"{', '.join(f'{x:.4f}' for x in sc)}); start σ_px {sigma_px:.3f} px, σ_log {sigma_log:.4f} → weight "
+        f"kappa {kappa:.3f}")
+    return {"track": a_t[ok], "i_ref": a_i[ok], "uv": a_uv[ok], "log_d": log_d, "kappa": kappa,
+            "cube_of_cam": cube_of_cam, "s0": s0, "report": rep}
 
 
 def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh: Tuple[int, int],
              fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: np.ndarray,
              cfg, block_of: Optional[np.ndarray] = None,
              params_by_block0: Optional[List[List[float]]] = None,
-             prior_w2c: Optional[np.ndarray] = None) -> RungResult:
+             prior_w2c: Optional[np.ndarray] = None, anchor: Optional[dict] = None) -> RungResult:
     """One pose-prior bundle adjustment. ``w2c_start`` / ``params_start`` / ``X_start``: where the
     solve STARTS (the gauge for R0; the rung it contains for R1, R2 and the continuation solves —
     point 61). ``prior_w2c``: the poses whose centres hold the gauge priors — the GAUGE poses for
@@ -562,7 +660,9 @@ def run_rung(name: str, w2c_start: np.ndarray, params_start: Sequence[float], wh
     if str(getattr(cfg, "solver", "ceres")) == "torch":
         from precision.ba_torch import run_rung_torch
         return run_rung_torch(name, w2c_start, params_start, wh, fit_groups, X_start, sigmas, cfg, block_of=block_of,
-                              params_by_block0=params_by_block0, prior_w2c=prior_w2c)
+                              params_by_block0=params_by_block0, prior_w2c=prior_w2c, anchor=anchor)
+    if anchor is not None:
+        raise RefineError(f"{name}: the metric anchor is built for the torch solver only (refine.solver: torch)")
     import pycolmap
     _vendor_path()
     from reconstruction.colmap_ba import _rigid, _tune_ceres, _solve_checked
@@ -850,7 +950,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
                 track: np.ndarray, frame: np.ndarray, uv: np.ndarray, split: np.ndarray,
                 kf_frames: Sequence[int], sigma_rel: float, cfg, solver: dict, *,
                 error_factor: float, log: Callable = print, solve: bool = True,
-                range_m: float = 0.0) -> Dict[str, Any]:
+                range_m: float = 0.0, anchor_src: Optional[tuple] = None) -> Dict[str, Any]:
     """The ladder over the keyframes. ``split`` per OBSERVATION (its track's split).
     ``error_factor``: ``correction_graph.graph.improvement_error_factor`` (the user's 2).
     ``solve=False`` (``refine.enabled: false``, the evaluation battery): no rung is solved — the
@@ -875,6 +975,48 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         raise RefineError(f"{len(X0)} fit track(s) triangulate at ≥ {cfg.min_tri_deg:g}° — "
                           f"nothing to refine against")
     clusters = track_clusters(held_g)
+    anchor = None
+    if anchor_src is not None and solve:
+        depth_of, a_min_depth, a_min_rows = anchor_src
+        anchor = build_metric_anchor(fit_g, X0, w2c0, params0, depth_of, a_min_depth, a_min_rows, log)
+        if anchor is not None:
+            # THE WEIGHT MEASURED AT THE SOLUTION, UNTIL IT IS STABLE (USER 2026-11-22: "ajustalo para que de vueltas
+            # hasta que se estabilice, pero ojo que tiene que encontrar una salida si no ocurre"): R0 solved with the
+            # current weight, the two dispersions measured there, the weight σ_px / σ_log recomputed and the cubes'
+            # scales carried; it is STABLE when it moved less than error_factor × its own bootstrap standard error
+            # (the pipeline's rule). THE WAY OUT: refine.metric_anchor_reweights rounds at most (a BOUND of cost) —
+            # then the last weight is used and the record says it did not stabilize; a weight that is not a finite
+            # positive number stops F5 with an error. The ladder then runs with the weight the loop ended on.
+            hist = [float(anchor["kappa"])]
+            ses: List[float] = []
+            stable = False
+            for k in range(int(getattr(cfg, "metric_anchor_reweights", 0))):
+                r0 = run_rung("R0", w2c0, list(params0), wh, fit_g, X0, prior_sigmas(
+                    np.array([-T[:3, :3].T @ T[:3, 3] for T in w2c0]), sigma_rel), cfg, prior_w2c=w2c0,
+                    anchor=anchor)
+                st = r0.anchor_state or {}
+                sp, sl = float(st.get("sigma_px", float("nan"))), float(st.get("sigma_log", float("nan")))
+                se = float(st.get("kappa_se", float("nan")))
+                if not (np.isfinite(sp) and sp > 0 and np.isfinite(sl) and sl > 0):
+                    raise RefineError(f"metric anchor: round {k + 1} measured σ_px {sp!r} / σ_log {sl!r} — no weight")
+                anchor = dict(anchor, kappa=sp / sl, s0=np.asarray(st["s"], np.float64))
+                hist.append(sp / sl)
+                ses.append(se)
+                moved = abs(hist[-1] - hist[-2])
+                stable = bool(np.isfinite(se) and moved <= fac * se)
+                log(f"{LOG_TAG} metric anchor: round {k + 1}: at R0's solution σ_px {sp:.3f} px, σ_log {sl:.4f} → "
+                    f"kappa {sp / sl:.3f} (moved {moved:.3f}, bar {fac:g} x se {se:.3f} = {fac * se:.3f}: "
+                    f"{'STABLE' if stable else 'not yet'}); cubes' scale "
+                    + ", ".join(f"{math.exp(x):.4f}" for x in anchor["s0"]))
+                if stable:
+                    break
+            if hist[1:] and not stable:
+                log(f"{LOG_TAG} metric anchor: NOT stabilized after {len(hist) - 1} round(s) (refine."
+                    f"metric_anchor_reweights) — the ladder runs with the last weight {hist[-1]:.3f}")
+            anchor["report"] = dict(anchor["report"], kappa_history=hist, kappa_se_history=ses,
+                                    stabilized=stable, rounds=len(hist) - 1, kappa=float(anchor["kappa"]),
+                                    cube_scale_after_reweighting=[float(math.exp(x)) for x in anchor["s0"]])
+    anchor_kw = {} if anchor is None else {"anchor": anchor}
     sig = prior_sigmas(np.array([-T[:3, :3].T @ T[:3, 3] for T in w2c0]), sigma_rel)
     base = RungResult("init", w2c0, [list(params0)], np.zeros(len(w2c0), int), float("nan"), 0, "",
                       X=X0)
@@ -903,7 +1045,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
         # 2026-10-07: cost 0.587605 → 0.587605, the focal stayed at F0's 362.56)
         start = base if name in ("R0", "R1") else parent
         r, held_r, dropped, cont, err = _rung_and_continuation(
-            name, start, wh, fit_g, held_g, sig, cfg, solver, w2c0, log)
+            name, start, wh, fit_g, held_g, sig, cfg, solver, w2c0, log, **anchor_kw)
         held[name] = held_r
         errors[name] = err
         timing[name] = r.seconds
@@ -964,7 +1106,7 @@ def refine_core(w2c0: np.ndarray, params0: Sequence[float], wh: Tuple[int, int],
             "solver_errors": errors, "clusters": clusters, "ladder": list(ladder),
             "ladder_restricted_by": RUNGS_ENV if os.environ.get(RUNGS_ENV, "").strip() else None,
             "error_factor": fac, "dropped": {"fit_init": dropped_fit, "heldout_init": dropped_init},
-            "timing": timing}
+            "timing": timing, "metric_anchor": None if anchor is None else anchor["report"]}
 
 
 WITNESS_WORKERS = 8      # BOUND (cost): worker processes of the witnesses' PnP; the result does not depend on it
@@ -1245,9 +1387,22 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
     from precision.config import raw_of
     from reconstruction.loops.config import improvement_error_factor
     fac = float(improvement_error_factor(raw_of(pcfg)))   # the job's frozen configuration (point 69)
+    anchor_src = None
+    if bool(getattr(cfg, "metric_anchor", False)):
+        # the metric anchor (USER 2026-11-22): each keyframe's Omega record, read when its rows are built
+        from precision.depth_sweep import record_grid
+        records_dir = out / "omega_run" / "results_output"
+
+        def _depth_of(i: int):
+            with np.load(records_dir / f"frame_{kf[i]}.npz") as z:
+                rec = np.asarray(z["depth"], np.float32)
+                chunk = int(z["chunk"]) if "chunk" in z.files else 0      # the cube the record's depth is in
+            return rec, record_grid(cam, rec.shape), chunk
+        anchor_src = (_depth_of, float(pcfg.bend.min_depth_m), int(pcfg.bend.min_rows))
     core = refine_core(w2c0, cam.params, (cam.width, cam.height), tr["obs_track"], tr["obs_frame"],
                        tr["obs_uv_native"], split_obs, kf, sigma_rel, cfg, solver,
-                       error_factor=fac, log=log, solve=bool(cfg.enabled), range_m=float(pcfg.view_range_m))
+                       error_factor=fac, log=log, solve=bool(cfg.enabled), range_m=float(pcfg.view_range_m),
+                       anchor_src=anchor_src)
     best = core["best"]
     _t = time.perf_counter()
     bound = heldout_bound(heldout_leave_one_view_out(core["held_groups"], best, solver, cfg,
@@ -1286,7 +1441,7 @@ def run_refine(session_dir: Path, pcfg, *, apply: bool = True, log: Callable = p
                      "n_judge_keyframes": len(set(core["clusters"].values())),
                      "solver_errors": core["solver_errors"]},
            "ladder": core["ladder"], "ladder_restricted_by": core["ladder_restricted_by"],
-           "dropped": core["dropped"],
+           "dropped": core["dropped"], "metric_anchor": core.get("metric_anchor"),
            "gauge": {"sigma_rel": sigma_rel, "instrument": inst,
                      "prior_sigma_m": {"first": float(core["prior_sigma_m"][0]),
                                        "last": float(core["prior_sigma_m"][-1])}},

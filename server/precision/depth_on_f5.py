@@ -241,6 +241,119 @@ def heldout_metres(rows_B: Dict[int, tuple], final_coefs: Dict[int, np.ndarray],
     return {"median_m": float(np.median(e)), "range_m": float(np.median(z)), "rows": int(len(e))}
 
 
+# ── variant B (USER 2026-11-22): a smooth correction field on top of the bend ──
+
+def tent_weights(x: np.ndarray, n_px: int, G: int) -> np.ndarray:
+    """(len(x), G) bilinear tent weights of pixel coordinates ``x`` on G nodes spanning [0, n_px − 1]."""
+    t = np.clip(np.asarray(x, np.float64), 0.0, n_px - 1.0) * (G - 1) / max(n_px - 1.0, 1.0)
+    i0 = np.minimum(np.floor(t).astype(np.int64), G - 2)
+    a = t - i0
+    w = np.zeros((len(t), G))
+    r = np.arange(len(t))
+    w[r, i0] = 1.0 - a
+    w[r, i0 + 1] = a
+    return w
+
+
+def field_basis(u: np.ndarray, v: np.ndarray, W: int, H: int, G: int) -> np.ndarray:
+    """(n, G·G) the field's bilinear basis at (u, v): node (j, i) = row j of the v nodes, column i of the u
+    nodes, flattened row-major (f = Ty·C·Txᵀ on a whole map)."""
+    tx, ty = tent_weights(u, W, G), tent_weights(v, H, G)
+    return (ty[:, :, None] * tx[:, None, :]).reshape(len(u), G * G)
+
+
+def field_map(coef: np.ndarray, W: int, H: int, G: int) -> np.ndarray:
+    """The field on every pixel of an H x W map (H, W) — exactly field_basis(u, v) @ coef, separably."""
+    Tx = tent_weights(np.arange(W), W, G)
+    Ty = tent_weights(np.arange(H), H, G)
+    return Ty @ np.asarray(coef, np.float64).reshape(G, G) @ Tx.T
+
+
+def field_smoothness(G: int) -> np.ndarray:
+    """The second differences of the node grid along u and along v (rows) — zero on any plane."""
+    rows = []
+    for j in range(G):
+        for i in range(1, G - 1):
+            r = np.zeros(G * G); r[j * G + i - 1] = 1; r[j * G + i] = -2; r[j * G + i + 1] = 1
+            rows.append(r)
+    for j in range(1, G - 1):
+        for i in range(G):
+            r = np.zeros(G * G); r[(j - 1) * G + i] = 1; r[j * G + i] = -2; r[(j + 1) * G + i] = 1
+            rows.append(r)
+    return np.array(rows) if rows else np.zeros((0, G * G))
+
+
+def fit_field(B: np.ndarray, e: np.ndarray, D: np.ndarray, lam: float, k: float, iterations: int) -> np.ndarray:
+    """The field's node values: the bend's robust fit (Huber IRLS, weights at k·σ, σ = 1.4826·MAD of the
+    residual, ``iterations`` steps from the least-squares start) with the smoothness penalty
+    lam·s·|D c|², s the data's own scale (the mean diagonal of BᵀW²B)."""
+    w = np.ones(len(e))
+    c = np.zeros(B.shape[1])
+    DtD = D.T @ D
+    for _ in range(int(iterations)):
+        Bw = B * w[:, None]
+        N_ = Bw.T @ Bw
+        s = float(np.trace(N_)) / max(B.shape[1], 1)
+        c = np.linalg.solve(N_ + lam * s * DtD + 1e-12 * s * np.eye(B.shape[1]), Bw.T @ (e * w))
+        res = e - B @ c
+        sd = MAD_TO_SIGMA * np.median(np.abs(res)) + 1e-12
+        w = np.sqrt(np.minimum(1.0, k * sd / np.maximum(np.abs(res), 1e-12)))
+    return c
+
+
+def choose_field(rows: Dict[int, tuple], rows_A: Dict[int, tuple], coefs: Dict[int, np.ndarray], n: int,
+                 W: int, H: int, fcfg, min_rows: int, huber_k: float, iterations: int, error_factor: float,
+                 n_boot: int, seed: int, log: Callable = print) -> dict:
+    """Variant B's choice. Every candidate (G, λ) fits each keyframe's OWN fit rows (the bend's rows: the ratio
+    landmark / Omega, divided by the keyframe's plane k) and is scored on the held-out half A (pooled median of
+    |z_omega·k·(1 + f) − z_lm| / z_lm). The plane (no field) is a candidate too; the SIMPLEST candidate within
+    error_factor × the bootstrap se of the best is taken (the window's rule, point 49): smaller G first, then the
+    larger λ. Returns {"chosen": (G, λ) | None, "coef": {i: node values}, "report": …}."""
+    def plane_k(i, u, v):
+        return design(u, v, W, H) @ coefs[i]
+
+    own = {}
+    for i in range(n):
+        if i in rows and len(rows[i][1]) >= min_rows:
+            A, ratio = rows[i]
+            u = A[:, 1] * W + W / 2.0
+            v = A[:, 2] * H + H / 2.0
+            own[i] = (u, v, ratio / (A @ coefs[i]) - 1.0)
+    cands = [None] + [(int(G), float(lam)) for G in sorted(fcfg.grids) for lam in sorted(fcfg.lambdas, reverse=True)]
+    scores, errs, fits = {}, {}, {}
+    for cand in cands:
+        coef_i, per = {}, {}
+        for i in range(n):
+            u, v, zl, zo_ = rows_A[i]
+            if not len(u):
+                continue
+            k = plane_k(i, u, v)
+            if cand is not None and i in own:
+                G, lam = cand
+                c = fit_field(field_basis(own[i][0], own[i][1], W, H, G), own[i][2], field_smoothness(G), lam,
+                              huber_k, iterations)
+                coef_i[i] = c
+                k = k * (1.0 + field_basis(u, v, W, H, G) @ c)
+            per[i] = np.abs(zo_ * k - zl) / zl
+        if not per:
+            raise DepthOnF5Error("no held-out landmark row on Omega's depth — the field cannot be judged")
+        scores[cand] = float(np.median(np.concatenate(list(per.values()))))
+        errs[cand] = per
+        fits[cand] = coef_i
+    best = min(cands, key=lambda c: scores[c])
+    se = cluster_bootstrap_se(list(errs[best].values()), n_boot, seed)
+    bar = scores[best] + float(error_factor) * se
+    chosen = next(c for c in cands if scores[c] <= bar)
+    rep = {"candidates": {("plane" if c is None else f"G{c[0]} λ{c[1]:g}"): round(scores[c], 6) for c in cands},
+           "best": None if best is None else list(best), "best_se": se, "bar": bar,
+           "chosen": None if chosen is None else list(chosen), "keyframes_with_field": len(fits[chosen])}
+    log(f"{LOG_TAG} field (variant B): held-out half A plane {scores[None] * 100:.3f} %, best "
+        f"{'plane' if best is None else f'G{best[0]} λ{best[1]:g}'} {scores[best] * 100:.3f} % (se {se * 100:.3f} %, "
+        f"bar {bar * 100:.3f} %) → {'no field: the plane stands' if chosen is None else f'G{chosen[0]} λ{chosen[1]:g}'}"
+        + ("" if chosen is None else f" on {len(fits[chosen])} of {n} keyframes"))
+    return {"chosen": chosen, "coef": fits[chosen], "report": rep}
+
+
 def cluster_bootstrap_se(groups: Sequence[np.ndarray], n_boot: int, seed: int) -> float:
     """The standard error of the POOLED MEDIAN of ``groups`` (one array of errors per keyframe)
     under a bootstrap that resamples whole keyframes (rows of one keyframe share its pose and
@@ -972,16 +1085,66 @@ def preload_mono_detail(pcfg, log: Callable = print) -> None:
     if not md.enabled or "thread" in _PRELOAD:
         return
     import threading
-    from precision.pointdit_runner import PointDiTRunner
+    Runner = _mono_runner_class(md)
 
     def _load():
         try:
-            _PRELOAD["runner"] = PointDiTRunner(md, log=log).load()
+            _PRELOAD["runner"] = Runner(md, log=log).load()
         except BaseException as e:  # noqa: BLE001 — re-raised where the runner is needed
             _PRELOAD["error"] = e
     th = threading.Thread(target=_load, name="pointdit-preload", daemon=True)
     _PRELOAD["thread"] = th
     th.start()
+
+
+def moge3_depth_maps(frames, zo, inp, K, pcfg, log, _p) -> Dict[int, np.ndarray]:
+    """bend.depth_source: moge3 (USER 2026-11-22: "quiero probar los mapas de moge F6"): every keyframe's depth is
+    MoGe-3's on the undistorted native frame — F5's focal, the frame turned upright when stored sideways — in place of
+    Omega's record. Omega's confidence and sky stay (the confidence floor still holds): only the depth changes, and
+    where Omega's record does not cover the frame there is no depth either. The bend then fits MoGe-3's depth to F5's
+    landmarks exactly as it fits Omega's (plane, field), and the turn witnesses keep Omega's depth, scaled by the
+    keyframe's median as always."""
+    from precision import corrected_cloud as CC
+    from precision.moge3_runner import MoGe3Runner
+    from intake.frames_manifest import display_rotation
+    md = pcfg.mono_detail
+    if getattr(md, "moge3", None) is None:
+        raise DepthOnF5Error("bend.depth_source: moge3 needs mono_detail.moge3 (MoGe-3's code, weights and steps)")
+    runner = MoGe3Runner(md, log=log).load()
+    runner.set_focal(float(K[0, 0]), float(K[1, 1]))
+    runner.set_upright(display_rotation(inp.frames_dir.parent))
+    out: Dict[int, np.ndarray] = {}
+    t0 = time.time()
+    for n, f in enumerate(frames):
+        img = CC._rgb_undistorted(inp.frames_dir, f, inp.maps)
+        z, v = runner.depth(img)
+        if z.shape != zo[f].shape:
+            raise DepthOnF5Error(f"MoGe-3's depth of frame {f} is {z.shape[1]}x{z.shape[0]}, the grid "
+                                 f"{zo[f].shape[1]}x{zo[f].shape[0]}")
+        zz = np.where(v, z, np.nan).astype(np.float32)
+        zz[~np.isfinite(zo[f])] = np.nan
+        out[f] = zz
+        if n % 20 == 0 or n == len(frames) - 1:
+            _p(4 + 20 * (n + 1) / len(frames), f"MoGe-3 depth {n + 1}/{len(frames)} keyframes "
+                                               f"({(time.time() - t0) / (n + 1):.2f} s each)")
+    log(f"{LOG_TAG} depth source: MoGe-3 ({md.moge3.checkpoint}, {md.moge3.refine_steps} refinement steps) on "
+        f"{len(frames)} keyframes in {time.time() - t0:.0f} s — Omega's confidence and sky kept")
+    del runner
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 — no card: nothing to release
+        pass
+    return out
+
+
+def _mono_runner_class(md):
+    """The mono-detail model: PointDiT (the record) or MoGe-3 (mono_detail.runner, USER 2026-11-22)."""
+    if getattr(md, "runner", "pointdit") == "moge3":
+        from precision.moge3_runner import MoGe3Runner
+        return MoGe3Runner
+    from precision.pointdit_runner import PointDiTRunner
+    return PointDiTRunner
 
 
 def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out: Path, log, _p):
@@ -994,8 +1157,10 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
         return dep, valid, passed, None, None
     from precision import corrected_cloud as CC
     from precision.mono_detail import run_stage
-    from precision.pointdit_runner import PointDiTRunner
-    _p(42, f"mono detail: PointDiT-{md.model} refines the bent depth (tiles, affine per tile, detail, band)")
+    Runner = _mono_runner_class(md)
+    what = (f"MoGe-3 ({md.moge3.checkpoint}, {md.moge3.refine_steps} refinement steps)" if md.runner == "moge3"
+            else f"PointDiT-{md.model}")
+    _p(42, f"mono detail: {what} refines the bent depth (tiles, affine per tile, detail, band)")
     runner = _PRELOAD.pop("runner", None)
     th = _PRELOAD.pop("thread", None)
     if th is not None:
@@ -1004,7 +1169,11 @@ def apply_mono_detail(pcfg, frames, dep, valid, passed, weight, inp, K, c2w, out
         if err is not None:
             raise err
     if runner is None:
-        runner = PointDiTRunner(md, log=log)
+        runner = Runner(md, log=log)
+    if md.runner == "moge3":
+        runner.set_focal(float(K[0, 0]), float(K[1, 1]))     # MoGe-3 conditioned on F5's camera, not its guess
+        from intake.frames_manifest import display_rotation
+        runner.set_upright(display_rotation(inp.frames_dir.parent))   # sideways stored frames turned upright
     from precision.camera import depth_map_distance
     # THE RANGE (reconstruction.view_range_m): τ only where a pixel can enter the cloud
     inner = {f: interior(passed[f]) & (depth_map_distance(dep[f], K) <= float(pcfg.view_range_m)) for f in frames}
@@ -1253,6 +1422,8 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
                 d = CC.record_on_native(d, inp.cam, inp.maps)       # NaN where the record does not cover
                 cf = CC.record_on_native(cf, inp.cam, inp.maps)
             zo[f] = d; conf[f] = cf; chunk[f] = int(z["chunk"]) if "chunk" in z.files else 0
+    if str(getattr(bc, "depth_source", "omega")) == "moge3":
+        zo = moge3_depth_maps(frames, zo, inp, K, pcfg, log, _p)
     floor_norm = float(raw_cfg["reconstruction"]["simple"]["conf_min_norm"])
     thr, cmax = {}, {}
     for k in sorted(set(chunk.values())):
@@ -1304,6 +1475,23 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
     else:
         wb, window_rule, final_coefs, provenance = disabled_bend(N)
         log(f"{LOG_TAG} bend.enabled: false — Omega's depth stands (k = 1) on F5's poses for every keyframe")
+    # variant B (USER 2026-11-22): a smooth correction field on top of the verified plane, chosen on half A
+    field = None
+    if bc.enabled and getattr(bc, "field", None) is not None and bc.field.enabled:
+        field = choose_field(rows, rows_A, final_coefs, N, W, H, bc.field, bc.min_rows, gc.huber_k,
+                             bc.irls_iterations, fac, bc.bootstrap, bc.seed, log)
+        window_rule["field"] = field["report"]
+        if field["chosen"] is not None:
+            G = field["chosen"][0]
+            eB = []
+            for i in range(N):
+                u, v, zl, zo_ = rows_B[i]
+                if len(u):
+                    k = design(u, v, W, H) @ final_coefs[i]
+                    if i in field["coef"]:
+                        k = k * (1.0 + field_basis(u, v, W, H, G) @ field["coef"][i])
+                    eB.append(np.abs(zo_ * k - zl) / zl)
+            field["report"]["heldout_B"] = float(np.median(np.concatenate(eB))) if eB else None
     status_counts: Dict[str, int] = {}
     for p_ in provenance.values():
         status_counts[p_["status"]] = status_counts.get(p_["status"], 0) + 1
@@ -1336,8 +1524,11 @@ def compute(session_dir: Path, pcfg, log: Callable = print,
         if valid[f].any():
             zmed[f] = float(np.median(zo[f][valid[f]]))   # the turn witnesses' scale (record units)
         passed[f] = valid[f] & (conf[f] >= thr[chunk[f]])
-        # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit
-        bent = (zo[f] * (Dm @ final_coefs[i]).reshape(H, W)).astype(np.float32)
+        # the bent map in float32 first, then the mask — epoch 8's arithmetic, bit for bit (no field)
+        kmap = Dm @ final_coefs[i]
+        if field is not None and field["chosen"] is not None and i in field["coef"]:
+            kmap = kmap * (1.0 + field_map(field["coef"][i], W, H, field["chosen"][0]).ravel())
+        bent = (zo[f] * kmap.reshape(H, W)).astype(np.float32)
         dep[f] = np.where(valid[f], bent, 0).astype(np.float32)
         if md.enabled:
             # the session's calibrated confidence as a weight in 0..1 above its own floor (per chunk)

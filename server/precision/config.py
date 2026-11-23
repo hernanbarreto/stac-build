@@ -150,6 +150,44 @@ def _sub(section: Any, key: str, path: str) -> Dict[str, Any]:
     return v
 
 
+def _bend_field(bd: Dict[str, Any]) -> Optional["BendFieldConfig"]:
+    """bend.field: absent = no field, the record (a session frozen before the key loads as it ran)."""
+    if "field" not in bd:
+        return None
+    fd = _sub(bd, "field", "bend")
+    p = "bend.field"
+    grids = tuple(int(x) for x in _require(fd, "grids", p))
+    lambdas = tuple(float(x) for x in _require(fd, "lambdas", p))
+    if not grids or min(grids) < 2:
+        raise PrecisionConfigError(f"'{SECTION}.{p}.grids' must be node counts >= 2, got {grids}")
+    if not lambdas or min(lambdas) <= 0:
+        raise PrecisionConfigError(f"'{SECTION}.{p}.lambdas' must be positive, got {lambdas}")
+    return BendFieldConfig(enabled=_bool(fd, "enabled", p), grids=grids, lambdas=lambdas)
+
+
+def _mono_runner(md: Dict[str, Any]) -> str:
+    """mono_detail.runner: absent = 'pointdit', the record (a session frozen before the key loads as it ran)."""
+    runner = str(md.get("runner", "pointdit"))
+    if runner not in ("pointdit", "moge3"):
+        raise PrecisionConfigError(f"'{SECTION}.mono_detail.runner' must be 'pointdit' or 'moge3', got {runner!r}")
+    if runner == "moge3" and "moge3" not in md:
+        raise PrecisionConfigError(f"'{SECTION}.mono_detail.runner' is 'moge3' but '{SECTION}.mono_detail.moge3' "
+                                   f"is missing")
+    return runner
+
+
+def _moge3_config(md: Dict[str, Any]) -> Optional["MoGe3Config"]:
+    if "moge3" not in md:
+        return None
+    m = _sub(md, "moge3", "mono_detail")
+    p = "mono_detail.moge3"
+    return MoGe3Config(code_dir=str(_require(m, "code_dir", p)), site_dir=str(_require(m, "site_dir", p)),
+                       checkpoint=str(_require(m, "checkpoint", p)),
+                       refine_steps=_num(m, "refine_steps", p, lo=0, integer=True),
+                       resolution_level=_num(m, "resolution_level", p, lo=0, hi=9, integer=True),
+                       use_fp16=_bool(m, "use_fp16", p))
+
+
 def _view_range(raw) -> float:
     from view_range import view_range_m
     try:
@@ -221,6 +259,11 @@ class GaugeConfig:
     device: str = "numpy"           # 2026-11-01: numpy (the path of record) | cpu | cuda — where the per-frame
                                     #   Huber gains of the I3 windows run (precision/gauge_torch.py: a window's
                                     #   frames at once; 178 s of F2 on pccr on numpy)
+    enabled: bool = True            # false = NO F2 (USER 2026-11-22: "parala, y lanzala sin F2"): the chain runs
+                                    #   F0, F4, F5, F6; F5's one input from F2, the relative tolerance of its position
+                                    #   anchors, is the tie's own (precision/tie_tolerance.py: the median over the
+                                    #   seams of residual / the distance it was measured at — USER 2026-11-21 "ok, de
+                                    #   acuerdo"); absent = true, the record
 
 
 # ── F4: native-pixel tracks ───────────────────────────────────────────────
@@ -291,6 +334,11 @@ class RefineConfig:
     triangulation_device: str   # 2026-11-01: numpy (the path of record, LAPACK per track) | cpu | cuda — where the
                                 #   batched multi-view DLTs of F5 / F6 run (refine._dlt_stack_t); the same
                                 #   landmarks to 1e-9 (tests/test_triangulate_torch.py)
+    metric_anchor: bool = False  # USER 2026-11-22 (MetricTrail's concept, "usamos el concepto"): every fit landmark
+                                 #   tied, under the same robust loss, to Omega's depth in its nearest keyframe
+                                 #   (refine.build_metric_anchor); absent = false, the record
+    metric_anchor_reweights: int = 10  # BOUND (cost): the MOST R0 solves that re-measure the anchor's weight at the
+                                       #   solution; the loop stops earlier once it is stable (USER 2026-11-22)
 
 
 # ── F6: native-resolution depth ─────────────────────────────────────────
@@ -436,6 +484,23 @@ class BendConfig:
     device: str                 # 2026-11-01: numpy (the path of record) | cpu | cuda — where the bend's IRLS fits
                                 #   (every keyframe of a window at once, precision/bend_torch.py) and its bootstrap
                                 #   medians (precision/judge_torch.py: the fork's rule, the same draws) run
+    field: Optional["BendFieldConfig"] = None   # absent = no field (the record)
+    depth_source: str = "omega"  # omega (the record; absent = it) | moge3 — USER 2026-11-22 ("quiero probar los mapas
+                                 #   de moge F6"): the keyframes' depth is MoGe-3's (mono_detail.moge3's settings),
+                                 #   Omega's confidence and sky kept (depth_on_f5.moge3_depth_maps)
+
+
+@dataclass(frozen=True)
+class BendFieldConfig:
+    """Variant B of 2026-11-22 (USER: "B" — "cual es mas precisa para vos no importa el costo"): on top of the
+    bend (k = c0 + c1·u + c2·v, its window chosen and verified as before), a SMOOTH correction field per keyframe,
+    k·(1 + f(u, v)), f bilinear on a G x G node grid over the image, fitted robustly (the bend's Huber IRLS) to the
+    keyframe's OWN F5 landmark rows with a second-difference smoothness penalty; G and the penalty are chosen on the
+    held-out half A among the candidates, and a field enters only if it beats the plane beyond the session's own
+    error bar (the window's rule: error_factor x the bootstrap se of the best)."""
+    enabled: bool
+    grids: Tuple[int, ...]      # BOUND (search): nodes per side of the field (>= 2)
+    lambdas: Tuple[float, ...]  # BOUND (search): smoothness weight, × the data's own scale (mean diagonal)
 
 
 # ── flyer diagnosis (claude_stac.txt 2026-10-04, Phase 0) ──────────────────
@@ -485,6 +550,21 @@ class MonoDetailConfig:
                                       # session's pixels, or a step of the CALIBRATED depth — never PointDiT's
     tile_batch: int             # tiles of a keyframe per PointDiT forward pass (0 = all of them at once — USER
                                 # 2026-10-08: speed; part of the run's config, so the batch's bits repeat)
+    runner: str = "pointdit"    # 'pointdit' (the record; absent = it) | 'moge3' (USER 2026-11-22: "moge 3 como lo
+                                # tenemos seteado ahora en lugar de pointdit") — precision/moge3_runner.py
+    moge3: Optional["MoGe3Config"] = None
+
+
+@dataclass(frozen=True)
+class MoGe3Config:
+    """MoGe-3 as the mono-detail model (precision/moge3_runner.py) — the test of 2026-11-22, its code outside the
+    repo (USER: "moge 3 si sale bien lo pasamos al pod, no importa que este ahora en le disco")."""
+    code_dir: str               # a checkout of microsoft/MoGe (moge/model/v3.py)
+    site_dir: str               # utils3d_moge + flex_gemm (CUDA kernels) built for this python and torch
+    checkpoint: str             # HuggingFace repo of the weights (model.pt), e.g. Ruicheng/moge-3-vitg
+    refine_steps: int           # MoGe-3's sparse 3D refinement updates (USER 2026-11-22: 10)
+    resolution_level: int       # MoGe's 0..9 (9 = its most tokens)
+    use_fp16: bool              # autocast (the weights stay FP32)
 
 
 # ── cloud metrics of every run (floor + edges; pending A "run checks", 2026-10-04) ──
@@ -706,6 +786,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
         delete_windows_after_chain=_bool(g, "delete_windows_after_chain", "gauge"),
         device=_enum(g, "device", "gauge", ("numpy", "cpu", "cuda")),
+        enabled=(_bool(g, "enabled", "gauge") if "enabled" in g else True),
     )
     if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:
         raise PrecisionConfigError(
@@ -768,6 +849,9 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         min_witness_corr=_num(rf, "min_witness_corr", "refine", lo=4, integer=True),
         solver=_enum(rf, "solver", "refine", SOLVERS),
         triangulation_device=_enum(rf, "triangulation_device", "refine", ("numpy", "cpu", "cuda")),
+        metric_anchor=(_bool(rf, "metric_anchor", "refine") if "metric_anchor" in rf else False),
+        metric_anchor_reweights=(_num(rf, "metric_anchor_reweights", "refine", lo=0, integer=True)
+                                 if "metric_anchor_reweights" in rf else 10),
         torch_ba=TorchBAConfig(function_tolerance=_num(tb, "function_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
                                parameter_tolerance=_num(tb, "parameter_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
                                gradient_tolerance=_num(tb, "gradient_tolerance", "refine.torch_ba", lo=0.0, lo_excl=True),
@@ -922,7 +1006,10 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                       heldout_confidence=_num(bd, "heldout_confidence", "bend", lo=0.0, hi=1.0, lo_excl=True),
                       bootstrap=_num(bd, "bootstrap", "bend", lo=1, integer=True),
                       seed=_num(bd, "seed", "bend", lo=0, integer=True),
-                      device=_enum(bd, "device", "bend", ("numpy", "cpu", "cuda")))
+                      device=_enum(bd, "device", "bend", ("numpy", "cpu", "cuda")),
+                      field=_bend_field(bd),
+                      depth_source=(_enum(bd, "depth_source", "bend", ("omega", "moge3"))
+                                    if "depth_source" in bd else "omega"))
     if bend.heldout_confidence >= 1.0:
         raise PrecisionConfigError(f"'{SECTION}.bend.heldout_confidence' must be below 1")
     fl = _sub(sec, "flyers", "")
@@ -969,7 +1056,8 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
                                                        lo_excl=True),
                                    overlays=_bool(md, "overlays", "mono_detail"),
                                    ab_edge_gradient_quantile=_num(md, "ab_edge_gradient_quantile", "mono_detail", lo=0.0, hi=100.0, lo_excl=True),
-                                   tile_batch=_num(md, "tile_batch", "mono_detail", lo=0, integer=True))
+                                   tile_batch=_num(md, "tile_batch", "mono_detail", lo=0, integer=True),
+                                   runner=_mono_runner(md), moge3=_moge3_config(md))
     cm = _sub(sec, "cloud_metrics", "")
     cloud_metrics = CloudMetricsConfig(
         ransac_iterations=_num(cm, "ransac_iterations", "cloud_metrics", lo=1, integer=True),

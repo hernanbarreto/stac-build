@@ -216,10 +216,15 @@ class _Problem:
                  cam_idx: np.ndarray, pt_idx: np.ndarray, uv: np.ndarray, X0: np.ndarray, huber_px: float,
                  cam_free: Sequence[int], *, device, sigmas: Optional[np.ndarray] = None,
                  prior_centres: Optional[np.ndarray] = None, torch_ba=None, gauge: bool = True,
-                 lazy_cols: bool = False):
+                 lazy_cols: bool = False, depth: Optional[tuple] = None):
         """``gauge=False``: a CHUNK of a :class:`_ChunkedProblem` (its priors live in the whole problem, not here);
         ``lazy_cols``: the (M, 6 + nf) unknown columns of the observations are made when a step needs them, not
-        kept (the chunks' memory)."""
+        kept (the chunks' memory).
+        ``depth``: THE METRIC ANCHOR (refine.metric_anchor, USER 2026-11-22 — MetricTrail's concept: every point
+        tied, under the same robust loss, to the metric depth of its frame): (is_depth (M,) bool, log_prior (M,),
+        kappa) aligned with the observation arrays. A row flagged is NOT a reprojection: it is the landmark's depth
+        in that keyframe against the prior, r = (kappa·(log z − log_prior), 0), kappa = the measured σ_px / σ_log
+        (so the robust loss and the cost treat both kinds of row in the same units). None = the record."""
         torch = _torch()
         self.tb = torch_ba
         d = {"dtype": torch.float64, "device": device}
@@ -235,6 +240,24 @@ class _Problem:
         self.cam_idx = torch.as_tensor(cam_idx[order].astype(np.int64), device=device)
         self.pt_idx = torch.as_tensor(pt_idx[order].astype(np.int64), device=device)
         self.uv = torch.as_tensor(np.asarray(uv, np.float64)[order], **d)
+        self.is_depth = self.d_log = None
+        self.kappa = 0.0
+        self.C = 0                      # the anchor's unknown log-scales, one per Omega cube (0 = none)
+        self.s = None
+        self.cube_of_cam = None
+        if depth is not None:
+            is_d, d_log, kappa = depth[:3]
+            self.is_depth = torch.as_tensor(np.asarray(is_d, bool)[order], device=device)
+            self.d_log = torch.as_tensor(np.asarray(d_log, np.float64)[order], **d)
+            self.kappa = float(kappa)
+            if len(depth) > 3 and depth[3] is not None:
+                # USER 2026-11-22 ("si, pisa nomas"): the scale of every Omega cube an UNKNOWN of the solve — a
+                # depth row then reads kappa·(log z − log d_record − s_cube): the anchor holds the shape Omega saw
+                # inside each cube and the tracks decide each cube's scale
+                cube_of_cam, s0 = depth[3], depth[4]
+                self.cube_of_cam = torch.as_tensor(np.asarray(cube_of_cam, np.int64), device=device)
+                self.s = torch.as_tensor(np.asarray(s0, np.float64), **d).clone()
+                self.C = int(len(self.s))
         self.obs_block = self.block_of[self.cam_idx]
         self.huber = float(huber_px)
         self.cam_free = tuple(int(i) for i in cam_free)
@@ -249,8 +272,14 @@ class _Problem:
         self.prior_C = torch.as_tensor(np.asarray(prior_centres, np.float64), **d) if prior_centres is not None else None
         # unknown layout: poses first (6 each), then the free camera params per block (nf each)
         self.n_pose = 6 * self.N
-        self.n_c = self.n_pose + self.nf * self.B
+        self.n_c = self.n_pose + self.nf * self.B + self.C                 # … then the cubes' log-scales
+        self.scale_cols = (self.n_pose + self.nf * self.B + torch.arange(self.C, device=device)) if self.C else None
+        self.nco = 6 + self.nf + (1 if self.C else 0)                       # an observation's camera-side columns
         self.free = torch.ones(self.n_c, dtype=torch.bool, device=device)
+        if self.C:
+            # a cube with no depth row in this problem has no information on its scale: held, out of the system
+            n_rows = torch.bincount(self.cube_of_cam[self.cam_idx[self.is_depth]], minlength=self.C)
+            self.free[self.scale_cols[n_rows == 0]] = False
         if gauge and self.sigmas is None and self.nf == 0:
             raise BATorchError("a gauge is needed: priors or free camera parameters")
         # THE INDEX PLANS — every permutation and segment boundary the step needs, computed ONCE: the
@@ -258,7 +287,7 @@ class _Problem:
         # orders, the unknown columns of every observation, and (lazily, it is large) the landmark pair
         # list grouped by camera pair for the Schur complement. Measured 2026-11-01 on pccr's 2.69 M
         # tracks: sorting these inside every LM iteration was ~60 % of its 9 s.
-        nco = 6 + self.nf
+        nco = self.nco
         self.pt_ends = segment_ends(self.pt_idx)
         self.cam_order = torch.argsort(self.cam_idx, stable=True)
         self.ci_sorted = self.cam_idx[self.cam_order]
@@ -269,6 +298,12 @@ class _Problem:
             self.bb_sorted = self.obs_block[self.blk_order]
             self.blk_ends = segment_ends(self.bb_sorted)
             self.blk_uniq = self.bb_sorted[self.blk_ends]
+        if self.C:
+            self.obs_cube = self.cube_of_cam[self.cam_idx]
+            self.cube_order = torch.argsort(self.obs_cube, stable=True)
+            self.cb_sorted = self.obs_cube[self.cube_order]
+            self.cube_ends = segment_ends(self.cb_sorted)
+            self.cube_uniq = self.cb_sorted[self.cube_ends]
         self.cols = None if lazy_cols else self._cols_of_obs(nco)                           # (M,nco)
         self.pose_idx = (6 * torch.arange(self.N, device=device))[:, None] + torch.arange(6, device=device)[None, :]
         self.cam_cols = ((self.n_pose + self.nf * self.block_of)[:, None]
@@ -317,7 +352,7 @@ class _Problem:
         return plan
 
     # ── evaluation at the current (or a candidate) state ──
-    def residuals(self, R=None, t=None, cam=None, X=None, with_jac: bool = True):
+    def residuals(self, R=None, t=None, cam=None, X=None, with_jac: bool = True, s=None):
         torch = self.torch
         R = self.R if R is None else R; t = self.t if t is None else t
         cam = self.cam if cam is None else cam; X = self.X if X is None else X
@@ -327,6 +362,28 @@ class _Problem:
         cam_o = cam[self.obs_block]
         uv, J_X, J_cam, front = project_jac(Xc, cam_o, self.cam_free)
         r = uv - self.uv
+        if self.is_depth is not None:
+            # the metric anchor's rows: kappa·(log z − log_prior [− s_cube]) in the first component, 0 in the
+            # second; d/dXc = (0, 0, kappa / z), d/ds_cube = −kappa — the camera parameters do not enter a depth
+            dm = self.is_depth
+            z = Xc[:, 2]
+            zp = torch.where(z > 0, z, torch.ones_like(z))
+            off = self.d_log
+            if self.C:
+                s = self.s if s is None else s
+                off = off + s[self.cube_of_cam[self.cam_idx]]
+            rd = self.kappa * (torch.log(zp) - off)
+            r = torch.where(dm[:, None], torch.stack([rd, torch.zeros_like(rd)], -1), r)
+            front = torch.where(dm, z > 0, front)
+            if with_jac:
+                Jd = torch.zeros_like(J_X)
+                Jd[:, 0, 2] = self.kappa / zp
+                J_X = torch.where(dm[:, None, None], Jd, J_X)
+                J_cam = torch.where(dm[:, None, None], torch.zeros_like(J_cam), J_cam)
+                if self.C:
+                    Js = torch.zeros(J_cam.shape[0], 2, 1, dtype=J_cam.dtype, device=J_cam.device)
+                    Js[:, 0, 0] = torch.where(dm, torch.full_like(rd, -self.kappa), torch.zeros_like(rd))
+                    J_cam = torch.cat([J_cam, Js], -1)                         # (M, 2, nf + 1)
         if not with_jac:
             return r, front
         # d Xc / d(δω, δt) for the perturbation ``apply`` makes — R' = exp(δω) R, t' = t + δt, so
@@ -373,12 +430,12 @@ class _Problem:
                     torch.zeros(0, self.n_c, dtype=R.dtype, device=self.device))
         return torch.cat(rows), torch.cat(jacs)
 
-    def total_cost(self, R=None, t=None, cam=None, X=None) -> float:
+    def total_cost(self, R=None, t=None, cam=None, X=None, s=None) -> float:
         R = self.R if R is None else R; t = self.t if t is None else t
         cam = self.cam if cam is None else cam; X = self.X if X is None else X
-        r, front = self.residuals(R, t, cam, X, with_jac=False)
-        s = (r * r).sum(-1)
-        c = self.robust_cost(s, front)
+        r, front = self.residuals(R, t, cam, X, with_jac=False, s=s)
+        sq = (r * r).sum(-1)
+        c = self.robust_cost(sq, front)
         e, _ = self.prior_terms(R, t)
         return c + 0.5 * float((e * e).sum())
 
@@ -390,7 +447,7 @@ class _Problem:
         2026-11-01 it recomputed all of this (on pccr's tracks ~45 % of the steps were rejected)."""
         torch = self.torch
         r_w, J_c, J_pt, cost = self._weighted()
-        nco = 6 + self.nf
+        nco = self.nco
         Hpp = segment_sum(J_pt.transpose(1, 2) @ J_pt, self.pt_idx, self.P, self.pt_ends)         # (P,3,3)
         gp = segment_sum(torch.einsum("mai,ma->mi", J_pt, r_w), self.pt_idx, self.P, self.pt_ends)  # (P,3)
         H = torch.zeros(self.n_c, self.n_c, dtype=torch.float64, device=self.device)
@@ -428,7 +485,7 @@ class _Problem:
         L = self._lin if getattr(self, "_lin", None) is not None else self.linearize()
         r_w, J_c, J_pt, Hpp, gp, H, g, e_p, J_p, W, cost = (L[k] for k in (
             "r_w", "J_c", "J_pt", "Hpp", "gp", "H", "g", "e_p", "J_p", "W", "cost"))
-        nco = 6 + self.nf
+        nco = self.nco
         Dp = torch.diagonal(Hpp, dim1=1, dim2=2).clamp(self.tb.lm_diag_min, self.tb.lm_diag_max)
         Hpp_l = Hpp + lam * torch.diag_embed(Dp)
         Hpp_inv = torch.linalg.inv(Hpp_l)
@@ -490,26 +547,42 @@ class _Problem:
         H[idx[:, :, None], idx[:, None, :]] += HPP
         g[idx] += gP
         if nf:
-            Jk = Jc[:, :, 6:]
+            Jk = Jc[:, :, 6:6 + nf]
             HPK = segment_sum(Jp.transpose(1, 2) @ Jk, self.ci_sorted, N, self.cam_ends)      # (N,6,nf)
             cam_cols = self.cam_cols
             H[idx[:, :, None], cam_cols[:, None, :]] += HPK
             H[cam_cols[:, :, None], idx[:, None, :]] += HPK.transpose(1, 2)
-            Jk_b = J_c[self.blk_order][:, :, 6:]; rw_b = r_w[self.blk_order]
+            Jk_b = J_c[self.blk_order][:, :, 6:6 + nf]; rw_b = r_w[self.blk_order]
             HKK = segment_sum(Jk_b.transpose(1, 2) @ Jk_b, self.bb_sorted, B, self.blk_ends)  # (B,nf,nf)
             gK = segment_sum(torch.einsum("mai,ma->mi", Jk_b, rw_b), self.bb_sorted, B, self.blk_ends)
             bidx = self.blk_cols
             H[bidx[:, :, None], bidx[:, None, :]] += HKK
             g[bidx] += gK
+        if self.C:
+            # the cubes' log-scales: pose–scale per camera (a camera belongs to one cube: unique cells), scale–scale
+            # and the gradient per cube; no row carries both a camera parameter and a scale (cam–scale is 0 here)
+            Js = Jc[:, :, 6 + nf:]                                                              # (M,2,1)
+            HPS = segment_sum(Jp.transpose(1, 2) @ Js, self.ci_sorted, N, self.cam_ends)       # (N,6,1)
+            sc = self.scale_cols[self.cube_of_cam]                                              # (N,)
+            H[idx[:, :, None], sc[:, None, None]] += HPS
+            H[sc[:, None, None], idx[:, None, :]] += HPS.transpose(1, 2)
+            Js_c = J_c[self.cube_order][:, :, 6 + nf:]; rw_c = r_w[self.cube_order]
+            HSS = segment_sum(Js_c.transpose(1, 2) @ Js_c, self.cb_sorted, self.C, self.cube_ends)  # (C,1,1)
+            gS = segment_sum(torch.einsum("mai,ma->mi", Js_c, rw_c), self.cb_sorted, self.C, self.cube_ends)
+            H[self.scale_cols, self.scale_cols] += HSS[:, 0, 0]
+            g[self.scale_cols] += gS[:, 0]
 
     def _cols_of_obs(self, nco):
         """(M,nco) the unknown index of every column of an observation's camera Jacobian."""
         torch = self.torch
         pose_cols = (6 * self.cam_idx)[:, None] + torch.arange(6, device=self.device)[None, :]
+        parts = [pose_cols]
         if self.nf:
-            cam_cols = (self.n_pose + self.nf * self.obs_block)[:, None] + torch.arange(self.nf, device=self.device)[None, :]
-            return torch.cat([pose_cols, cam_cols], 1)
-        return pose_cols
+            parts.append((self.n_pose + self.nf * self.obs_block)[:, None] + torch.arange(self.nf, device=self.device)[None, :])
+        if getattr(self, "C", 0):
+            # the cube log-scale of the observation's keyframe (its Jacobian is 0 on a reprojection row)
+            parts.append(self.scale_cols[self.cube_of_cam[self.cam_idx]][:, None])
+        return torch.cat(parts, 1) if len(parts) > 1 else pose_cols
 
     def _reduce_vec(self, v_obs, nco):
         """Σ over observations of a per-observation camera vector (M,nco) into the dense (n_c,): the pose
@@ -519,8 +592,11 @@ class _Problem:
         v = v_obs[self.cam_order]
         out[self.pose_idx] += segment_sum(v[:, :6], self.ci_sorted, self.N, self.cam_ends)
         if self.nf:
-            vb = v_obs[self.blk_order][:, 6:]
+            vb = v_obs[self.blk_order][:, 6:6 + self.nf]
             out[self.blk_cols] += segment_sum(vb, self.bb_sorted, self.B, self.blk_ends)
+        if getattr(self, "C", 0):
+            vs = v_obs[self.cube_order][:, 6 + self.nf:]
+            out[self.scale_cols] += segment_sum(vs, self.cb_sorted, self.C, self.cube_ends)[:, 0]
         return out
 
     def _gather_cam_delta(self, dc, nco):
@@ -552,24 +628,54 @@ class _Problem:
             # reduced system was not the Schur complement (not even positive definite on a small scene),
             # the steps were bent — half rejected — and station's R3 ran out of its 500 iterations.
             # One block (R0–R2): the same groups in the same order, the same sums as before.
+            nf = self.nf
             ka = plan["g_a"] * self.B + self.block_of[plan["g_b"]]
             oa = torch.argsort(ka, stable=True)
-            pc = segment_sum(blocks[oa][:, :6, 6:], ka[oa], self.N * self.B, segment_ends(ka[oa]))   # (N·B,6,nf)
+            pc = segment_sum(blocks[oa][:, :6, 6:6 + nf], ka[oa], self.N * self.B, segment_ends(ka[oa]))   # (N·B,6,nf)
             S[self.pose_idx.repeat_interleave(self.B, 0)[:, :, None],
               self.blk_cols.repeat(self.N, 1)[:, None, :]] += pc
             # cam–pose(b): a's block's camera-parameter rows, b's pose columns — per (block of a, camera b)
             kb = self.block_of[plan["g_a"]] * self.N + plan["g_b"]
             ob = torch.argsort(kb, stable=True)
-            cp = segment_sum(blocks[ob][:, 6:, :6], kb[ob], self.B * self.N, segment_ends(kb[ob]))   # (B·N,nf,6)
+            cp = segment_sum(blocks[ob][:, 6:6 + nf, :6], kb[ob], self.B * self.N, segment_ends(kb[ob]))   # (B·N,nf,6)
             S[self.blk_cols.repeat_interleave(self.N, 0)[:, :, None],
               self.pose_idx.repeat(self.B, 1)[:, None, :]] += cp
             # cam-cam: every group, per (block of a, block of b)
             bk = self.block_of[plan["g_a"]] * self.B + self.block_of[plan["g_b"]]
             o = torch.argsort(bk, stable=True)
-            cc = segment_sum(blocks[o][:, 6:, 6:], bk[o], self.B * self.B, segment_ends(bk[o]))   # (B²,nf,nf)
+            cc = segment_sum(blocks[o][:, 6:6 + nf, 6:6 + nf], bk[o], self.B * self.B, segment_ends(bk[o]))   # (B²,nf,nf)
             rows = self.blk_cols[torch.arange(self.B, device=self.device).repeat_interleave(self.B)]
             colsb = self.blk_cols[torch.arange(self.B, device=self.device).repeat(self.B)]
             S[rows[:, :, None], colsb[:, None, :]] += cc
+        if getattr(self, "C", 0):
+            # the cubes' log-scales (the last camera-side column of every observation): each part summed per
+            # UNIQUE pair of unknowns before it is added — pose(a)–scale(cube b), scale(cube a)–pose(b),
+            # scale–scale, and with free camera parameters cam(block a)–scale(cube b), scale(cube a)–cam(block b)
+            C, N, B, nf = self.C, self.N, self.B, self.nf
+            ca, cb = self.cube_of_cam[plan["g_a"]], self.cube_of_cam[plan["g_b"]]
+            ar = torch.arange
+            k1 = plan["g_a"] * C + cb
+            o1 = torch.argsort(k1, stable=True)
+            ps = segment_sum(blocks[o1][:, :6, 6 + nf:], k1[o1], N * C, segment_ends(k1[o1]))          # (N·C,6,1)
+            S[self.pose_idx.repeat_interleave(C, 0)[:, :, None], self.scale_cols.repeat(N)[:, None, None]] += ps
+            k2 = ca * N + plan["g_b"]
+            o2 = torch.argsort(k2, stable=True)
+            sp = segment_sum(blocks[o2][:, 6 + nf:, :6], k2[o2], C * N, segment_ends(k2[o2]))          # (C·N,1,6)
+            S[self.scale_cols.repeat_interleave(N)[:, None, None], self.pose_idx.repeat(C, 1)[:, None, :]] += sp
+            k3 = ca * C + cb
+            o3 = torch.argsort(k3, stable=True)
+            ss = segment_sum(blocks[o3][:, 6 + nf:, 6 + nf:], k3[o3], C * C, segment_ends(k3[o3]))     # (C·C,1,1)
+            S[self.scale_cols.repeat_interleave(C), self.scale_cols.repeat(C)] += ss[:, 0, 0]
+            if nf:
+                k4 = self.block_of[plan["g_a"]] * C + cb
+                o4 = torch.argsort(k4, stable=True)
+                ks = segment_sum(blocks[o4][:, 6:6 + nf, 6 + nf:], k4[o4], B * C, segment_ends(k4[o4]))  # (B·C,nf,1)
+                S[self.blk_cols.repeat_interleave(C, 0)[:, :, None], self.scale_cols.repeat(B)[:, None, None]] += ks
+                k5 = ca * B + self.block_of[plan["g_b"]]
+                o5 = torch.argsort(k5, stable=True)
+                sk = segment_sum(blocks[o5][:, 6 + nf:, 6:6 + nf], k5[o5], C * B, segment_ends(k5[o5]))  # (C·B,1,nf)
+                S[self.scale_cols.repeat_interleave(B)[:, None, None], self.blk_cols.repeat(C, 1)[:, None, :]] += sk
+            del ar
         return S
 
     def apply(self, dc, dp):
@@ -579,14 +685,23 @@ class _Problem:
         t = self.t + dw[:, 3:]
         cam = self.cam.clone()
         if self.nf:
-            dk = dc[self.n_pose:].reshape(self.B, self.nf)
+            dk = dc[self.n_pose:self.n_pose + self.nf * self.B].reshape(self.B, self.nf)
             cam[:, list(self.cam_free)] = cam[:, list(self.cam_free)] + dk
         X = self.X + dp
+        if getattr(self, "C", 0):
+            return R, t, cam, X, self.s + dc[self.n_pose + self.nf * self.B:]
         return R, t, cam, X
+
+    def set_state(self, state) -> None:
+        """An accepted step's state (apply's tuple) becomes the problem's."""
+        self.R, self.t, self.cam, self.X = state[:4]
+        if len(state) > 4:
+            self.s = state[4]
 
     def norm_x(self) -> float:
         torch = self.torch
-        return math.sqrt(float((self.t * self.t).sum()) + float((self.X * self.X).sum()) + float((self.cam * self.cam).sum()) + 3 * self.N)
+        extra = float((self.s * self.s).sum()) if getattr(self, "C", 0) else 0.0
+        return math.sqrt(float((self.t * self.t).sum()) + float((self.X * self.X).sum()) + float((self.cam * self.cam).sum()) + 3 * self.N + extra)
 
 
 # THE CARD'S MEMORY (2026-11-10, USER "priorizá la solución … es la prueba justamente de que el sistema puede manejar
@@ -780,9 +895,63 @@ class _ChunkedProblem:
         return (dc, dp), cost, pred, ""
 
 
+def _gather_runs(starts, counts):
+    """The row indices of runs (start, count) laid end to end."""
+    torch = _torch()
+    total = int(counts.sum())
+    if total == 0:
+        return torch.zeros(0, dtype=torch.int64, device=counts.device)
+    first = torch.cumsum(counts, 0) - counts
+    return starts.repeat_interleave(counts) + torch.arange(total, device=counts.device) - first.repeat_interleave(counts)
+
+
+def anchor_dispersions(prob, r, front, n_boot: int, seed: int) -> dict:
+    """The metric anchor at a state (USER 2026-11-22: the weight measured at the solution, until it is stable):
+    σ_px = 1.4826·MAD of the reprojection residuals' components, σ_log = that of the depth rows' log disagreement,
+    the weight they give (σ_px / σ_log), and its STANDARD ERROR under a bootstrap that resamples whole keyframes
+    (the rows of one keyframe share its pose and its depth map) — ``n_boot`` draws with a fixed seed, on the
+    problem's device."""
+    torch = prob.torch
+    madk = 1.0 / 0.6744897501960817
+
+    def mad(x):
+        return madk * (x - x.median()).abs().median()
+    rep = (~prob.is_depth) & front
+    dep = prob.is_depth & front
+    comp = r[rep]                                            # (n, 2)
+    dl = r[dep][:, 0] / prob.kappa
+    if comp.numel() == 0 or dl.numel() == 0:
+        return {"sigma_px": float("nan"), "sigma_log": float("nan"), "kappa": float("nan"), "kappa_se": float("nan")}
+    sp, sl = float(mad(comp.reshape(-1))), float(mad(dl))
+
+    def grouped(mask, vals):
+        c = prob.cam_idx[mask]
+        o = torch.argsort(c, stable=True)
+        counts = torch.bincount(c, minlength=prob.N)
+        return vals[o], torch.cumsum(counts, 0) - counts, counts
+    v_rep, s_rep, c_rep = grouped(rep, comp)
+    v_dep, s_dep, c_dep = grouped(dep, dl)
+    g = torch.Generator(device=r.device)
+    g.manual_seed(int(seed))
+    ks = []
+    for _ in range(int(n_boot)):
+        pick = torch.randint(0, prob.N, (prob.N,), generator=g, device=r.device)
+        ir, idd = _gather_runs(s_rep[pick], c_rep[pick]), _gather_runs(s_dep[pick], c_dep[pick])
+        if ir.numel() and idd.numel():
+            a, b = mad(v_rep[ir].reshape(-1)), mad(v_dep[idd])
+            if float(b) > 0:
+                ks.append(float(a / b))
+    se = float(np.std(ks, ddof=1)) if len(ks) > 1 else float("nan")
+    return {"sigma_px": sp, "sigma_log": sl, "kappa": sp / sl if sl > 0 else float("nan"), "kappa_se": se,
+            "n_boot": len(ks)}
+
+
 def make_problem(w2c0, params_by_block0, block_of, cam_idx, pt_idx, uv, X0, huber_px, cam_free, **kw):
     """The one-piece :class:`_Problem` up to CHUNKED_ABOVE_OBS residual blocks, the :class:`_ChunkedProblem` above."""
     if int(len(uv)) > CHUNKED_ABOVE_OBS:
+        if kw.get("depth") is not None:
+            raise BATorchError("the metric anchor (refine.metric_anchor) is built for the one-piece problem only — "
+                               f"{len(uv):,} residual blocks exceed CHUNKED_ABOVE_OBS ({CHUNKED_ABOVE_OBS:,})")
         return _ChunkedProblem(w2c0, params_by_block0, block_of, cam_idx, pt_idx, uv, X0, huber_px, cam_free, **kw)
     return _Problem(w2c0, params_by_block0, block_of, cam_idx, pt_idx, uv, X0, huber_px, cam_free, **kw)
 
@@ -829,13 +998,15 @@ def solve(problem: _Problem, max_iterations: int, log=None) -> Dict[str, object]
                 termination = "FAILURE"; break
             continue
         dc, dp = step
-        R, t, cam, X = problem.apply(dc, dp)
-        new_cost = problem.total_cost(R, t, cam, X)
+        state = problem.apply(dc, dp)                   # (R, t, cam, X[, s]) — s: the anchor's cube log-scales
+        new_cost = problem.total_cost(*state)
         actual = cost_now - new_cost
         rho = actual / pred if pred > 0 else -1.0
         step_norm = math.sqrt(float((dc * dc).sum()) + float((dp * dp).sum()))
         if rho > tb.min_relative_decrease and math.isfinite(new_cost):
-            problem.R, problem.t, problem.cam, problem.X = R, t, cam, X
+            problem.R, problem.t, problem.cam, problem.X = state[:4]
+            if len(state) > 4:
+                problem.s = state[4]
             problem.invalidate()
             n_ok += 1
             lam = lam * max(1 / 3, 1.0 - (2.0 * rho - 1.0) ** 3); nu = 2.0
@@ -939,8 +1110,10 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
                    fit_groups: Dict[int, List], X_start: Dict[int, np.ndarray], sigmas: Optional[np.ndarray],
                    cfg, block_of: Optional[np.ndarray] = None, params_by_block0: Optional[List[List[float]]] = None,
                    prior_w2c: Optional[np.ndarray] = None, flags_of: Optional[str] = None,
-                   device: Optional[str] = None, log=None):
-    """The same inputs and the same RungResult as precision.refine.run_rung, solved on the device."""
+                   device: Optional[str] = None, log=None, anchor: Optional[dict] = None):
+    """The same inputs and the same RungResult as precision.refine.run_rung, solved on the device.
+    ``anchor``: the metric anchor's rows (precision.refine.build_metric_anchor) — one depth row per landmark of
+    the problem that has one; None = the record."""
     from precision.refine import RefineError, RungResult
     torch = _torch()
     dev = device_for(device)
@@ -1009,12 +1182,31 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
                               f"behind its camera at the start — nothing to solve")
     del probe
     n_rep = int(len(uv))
+    depth = None
+    n_depth = 0
+    if anchor is not None:
+        # THE METRIC ANCHOR (USER 2026-11-22): one depth row per landmark of the problem that has one — its
+        # keyframe, its pixel there, the log of the prior; appended after the reprojections (the off-raster
+        # filter above judged reprojections only)
+        pos = {int(t_): k for k, t_ in enumerate(tracks)}
+        sel = np.fromiter((int(t_) in pos for t_ in anchor["track"].tolist()), bool, len(anchor["track"]))
+        a_pt = np.fromiter((pos[int(t_)] for t_ in anchor["track"][sel].tolist()), np.int64, int(sel.sum()))
+        n_depth = int(len(a_pt))
+        is_d = np.r_[np.zeros(n_rep, bool), np.ones(n_depth, bool)]
+        d_log = np.r_[np.zeros(n_rep), np.asarray(anchor["log_d"], np.float64)[sel]]
+        cam_idx = np.r_[cam_idx, np.asarray(anchor["i_ref"], np.int64)[sel]]
+        pt_idx = np.r_[pt_idx, a_pt]
+        uv = np.r_[uv, np.asarray(anchor["uv"], np.float64)[sel].reshape(-1, 2)]
+        depth = (is_d, d_log, float(anchor["kappa"]), anchor.get("cube_of_cam"), anchor.get("s0"))
+        if log:
+            log(f"metric anchor: {n_depth:,} depth row(s) for {len(tracks):,} landmarks (kappa {anchor['kappa']:.4g})")
     prior_w2c = w2c_start if prior_w2c is None else np.asarray(prior_w2c, np.float64)
     if prior_w2c.shape != np.asarray(w2c_start).shape:
         raise RefineError(f"{name}: {len(prior_w2c)} prior poses for {N} keyframes")
     C = -np.einsum("nji,nj->ni", prior_w2c[:, :3, :3], prior_w2c[:, :3, 3])
     prob = make_problem(w2c_start, pb0, block_of, cam_idx, pt_idx, uv, X0, float(cfg.huber_px), cam_free, device=dev,
-                    sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba)
+                    sigmas=np.asarray(sigmas, np.float64), prior_centres=C, torch_ba=cfg.torch_ba,
+                    **({} if depth is None else {"depth": depth}))
     n_prior = N
     if log is None and os.environ.get("STAC_BA_TORCH_TRACE"):
         log = lambda m: print(f"[ba_torch {name}] {m}", flush=True)       # noqa: E731
@@ -1033,17 +1225,35 @@ def run_rung_torch(name: str, w2c_start: np.ndarray, params_start: Sequence[floa
     err = torch.linalg.norm(r, dim=-1)
     err = torch.where(front, err, torch.full_like(err, float("inf")))
     # pycolmap's per-point error: the MEAN reprojection error over the track; the fit statistic is their median
-    per_pt = segment_sum(err.where(torch.isfinite(err), torch.zeros_like(err)), prob.pt_idx, prob.P) / prob.seg_len.to(err.dtype)
-    bad = segment_sum((~torch.isfinite(err)).to(err.dtype), prob.pt_idx, prob.P) > 0
+    if getattr(prob, "is_depth", None) is None:            # the record (and every chunked problem)
+        per_pt = segment_sum(err.where(torch.isfinite(err), torch.zeros_like(err)), prob.pt_idx, prob.P) / prob.seg_len.to(err.dtype)
+        bad = segment_sum((~torch.isfinite(err)).to(err.dtype), prob.pt_idx, prob.P) > 0
+    else:
+        # the anchor's depth rows are no reprojection: out of the fit statistic
+        rep_row = ~prob.is_depth
+        n_rep_pt = segment_sum(rep_row.to(err.dtype), prob.pt_idx, prob.P)
+        e_rep = torch.where(rep_row & torch.isfinite(err), err, torch.zeros_like(err))
+        per_pt = segment_sum(e_rep, prob.pt_idx, prob.P) / n_rep_pt
+        bad = segment_sum((rep_row & ~torch.isfinite(err)).to(err.dtype), prob.pt_idx, prob.P) > 0
     per_pt = torch.where(bad, torch.full_like(per_pt, float("inf")), per_pt).cpu().numpy()
     diag = float(np.hypot(wh[0], wh[1]))
     ok = np.isfinite(per_pt) & (per_pt >= 0.0) & (per_pt <= diag)
     fit_med = float(np.median(per_pt[ok])) if ok.any() else float("nan")
     X_out = {t_: X[k].copy() for k, t_ in enumerate(tracks)}
-    summary["num_residual_blocks"] = n_rep + n_prior
+    anchor_state = None
+    if depth is not None:
+        # the anchor at the solution: the cubes' log-scales and the two dispersions MEASURED there, with the
+        # weight's bootstrap standard error — the reweighting loop reads them (precision.refine.refine_core)
+        disp = anchor_dispersions(prob, r, front, int(getattr(cfg, "permutations", 0) or 0),
+                                  int(getattr(cfg, "seed", 0) or 0))
+        anchor_state = {"s": (None if prob.s is None else prob.s.cpu().numpy().tolist()),
+                        "sigma_px": disp["sigma_px"], "sigma_log": disp["sigma_log"], "kappa_se": disp["kappa_se"],
+                        "kappa": prob.kappa, "rows": int((prob.is_depth & front).sum())}
+    summary["num_residual_blocks"] = n_rep + n_prior + n_depth
     summary["num_observations_off_raster"] = n_off
+    summary["num_metric_anchor_rows"] = n_depth
     return RungResult(name, w2c, [list(map(float, cam[b])) for b in range(len(blocks))], block_of,
                       fit_med, int(len(tracks)), summary["termination_type"], int((~ok).sum()), X=X_out,
                       initial_cost=float(summary["initial_cost"]), final_cost=float(summary["final_cost"]),
                       iterations=int(summary["num_successful_steps"]) + int(summary["num_unsuccessful_steps"]),
-                      seconds=float(summary["total_time_in_seconds"]))
+                      seconds=float(summary["total_time_in_seconds"]), anchor_state=anchor_state)

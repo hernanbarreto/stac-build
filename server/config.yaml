@@ -1070,9 +1070,17 @@ intake:
                                        # with their long side at most 1024 (cv2.INTER_AREA, deterministic) — every stage
                                        # then works at ≤ 1024 with the points' provenance intact. 0 = as decoded.
   quality:                             # I0 — features, never a percentile gate
-    luma_lo: 40.0                      # BOUND: mean luma below this = unusable exposure ("dark")
+    luma_lo: 0.0                       # BOUND: mean luma below this = unusable exposure ("dark"). OPEN (USER
+                                       #   2026-11-22: "en pccr2408 generaba el escalon por la zona obscura, eso hay
+                                       #   que solucionarlo para que no vuelva a pasar"): at 40 it rejected the 130
+                                       #   frames of pccr 2026-08-24's dark turn (video 6274-6403) — no keyframe there,
+                                       #   the cubes guessed the turn, the floor published 36 cm low; the copy with it
+                                       #   open (2026-11-19, cube overlap 3/4 too) put 26 keyframes in the turn and the
+                                       #   step went from -41 to -7 cm. The audit: wrong by concept (dark ≠ unusable).
     luma_hi: 220.0                     # BOUND: mean luma above this = unusable exposure ("bright")
-    clip_frac_max: 0.25                # BOUND: share of clipped pixels above this = unusable ("clipped")
+    clip_frac_max: 1.0                 # BOUND: share of clipped pixels above this = unusable ("clipped"). OPEN with
+                                       #   luma_lo (USER 2026-11-22, the same order): at 0.25 it rejected 60 more of
+                                       #   that turn's frames (their dark pixels count as clipped at clip_lo)
     clip_lo: 5                         # BOUND: gray value at or below which a pixel counts as clipped dark
     clip_hi: 250                       # BOUND: gray value at or above which a pixel counts as clipped bright
     fft_max_side: 640                  # BOUND: analysis downscale (longest side) of the FFT sharpness
@@ -2673,6 +2681,9 @@ reconstruction:
                                         # and the re-evaluation reads ~1 ulp more
     # F2 — metric gauge along the walk (precision/gauge.py, intake/walk.py)
     gauge:
+      enabled: true                     # false = NO F2 (USER 2026-11-22: "parala, y lanzala sin F2"): the chain
+                                        #   runs F0, F4, F5, F6 and F5's anchor tolerance is the tie's seams'
+                                        #   (precision/tie_tolerance.py, USER 2026-11-21 "ok, de acuerdo")
       window_frames: 32                 # BOUND: keyframes per DA3 multi-view window (I3: one
                                         # joint inference of the NESTED model — its depth and pose
                                         # translations are metric, model/da3.py
@@ -2757,6 +2768,17 @@ reconstruction:
       permutations: 2000                # BOUND: resamples of the permutation / bootstrap tests
       seed: 0                           # their fixed seed
       min_witness_corr: 12              # BOUND: 2D-3D correspondences a witness needs for PnP
+      metric_anchor: false              # USER 2026-11-22 (MetricTrail's concept, "usamos el concepto"): every fit
+                                        #   landmark tied, under the same Huber loss, to Omega's depth in its nearest
+                                        #   keyframe (scaled per keyframe to F5's start; weight = the start's measured
+                                        #   σ_px / σ_log) — precision/refine.build_metric_anchor. false = the record;
+                                        #   the test session bufferStop_mejoras turns it on. torch solver only.
+                                        #   Each Omega cube's scale is an UNKNOWN of the solve (USER 2026-11-22).
+      metric_anchor_reweights: 10       # BOUND (cost): the MOST R0 solves that re-measure the anchor's weight σ_px /
+                                        #   σ_log AT THE SOLUTION before the ladder (USER 2026-11-22: "que de vueltas
+                                        #   hasta que se estabilice, pero ojo que tiene que encontrar una salida"): the
+                                        #   loop stops when the weight moved ≤ error_factor × its bootstrap se; at
+                                        #   this bound it stops anyway, the last weight used and declared unstable
       solver: torch                     # torch = the default since 2026-11-01 (USER: "hacelo todo a GPU ya mismo"); ceres (pycolmap, ONE CPU thread, hours on pccr) | torch:
                                         #   precision/ba_torch.py — the same residuals, loss, priors and camera freedom
                                         #   on the GPU in float64, Schur complement, sorted reductions (bit-identical
@@ -3025,6 +3047,17 @@ reconstruction:
                                         #   cuda — the bend's IRLS fits, every keyframe of a window at once
                                         #   (precision/bend_torch.py), and its bootstraps' medians (precision/
                                         #   judge_torch.py, the same draws). pccr: 95 s of F6 on numpy.
+      depth_source: omega               # omega (the record) | moge3 — USER 2026-11-22 ("quiero probar los mapas de
+                                        #   moge F6"): the keyframes' depth is MoGe-3's (mono_detail.moge3's settings)
+                                        #   in place of Omega's records; Omega's confidence and sky kept
+      field:                            # variant B (USER 2026-11-22: "B" — "cual es mas precisa para vos no importa el
+                                        #   costo"): on top of the bend, a SMOOTH correction field per keyframe fitted
+                                        #   to its own F5 landmark rows (precision/depth_on_f5.py choose_field);
+                                        #   the held-out half A chooses its grid and smoothness, and it enters only if
+                                        #   it beats the plane beyond error_factor x the bootstrap se (the window's rule)
+        enabled: false                  # false = the record (the test session bufferStop_mejoras turns it on)
+        grids: [2, 3, 4, 6, 8]          # BOUND (search): nodes per side of the bilinear field
+        lambdas: [1.0, 0.1, 0.01]       # BOUND (search): second-difference smoothness, × the data's own scale
     flyers:                             # Phase 0 of the mono-detail work (claude_stac.txt 2026-10-04): flyer
                                         # diagnosis of the published cloud (precision/flyers.py). A flyer is an
                                         # ISOLATED point or one BETWEEN two surfaces of its own frame; classes
@@ -3092,6 +3125,19 @@ reconstruction:
       tile_batch: 0                     # tiles of a keyframe per PointDiT forward pass: 0 = all of them at once
                                         #   (USER 2026-10-08: speed; the batch is part of the run's config, so its
                                         #   bits repeat); a card that cannot hold it FAILS the stage, never halves it
+      runner: pointdit                  # pointdit (the record) | moge3 — USER 2026-11-22: "moge 3 como lo tenemos
+                                        #   seteado ahora en lugar de pointdit" (the test session bufferStop_mejoras;
+                                        #   precision/moge3_runner.py). With moge3 the tile side covers the frame:
+                                        #   MoGe-3 is trained on whole images and conditioned on F5's focal.
+      moge3:                            # MoGe-3 (microsoft/MoGe v3), its code outside the repo for the test (USER:
+                                        #   "si sale bien lo pasamos al pod, no importa que este ahora en le disco")
+        code_dir: /root/MoGe            # checkout 74fbce0 (2026-08-19)
+        site_dir: /root/envs/moge3_site_da3   # utils3d_moge 62f09d5 + flex_gemm b2fadb2 (CUDA, sm_80) for da3
+        checkpoint: Ruicheng/moge-3-vitg      # ViT-G, 1.25 B parameters, metric, with its refiner
+        refine_steps: 10                # USER 2026-11-22 ("moge 3 con 10 pasos de refinamiento"); on bufferStop the
+                                        #   change per step falls 0.07-0.13 % → 0.025-0.028 % of the depth at 10
+        resolution_level: 9             # MoGe's most tokens (3600)
+        use_fp16: false                 # FP32 (USER 2026-11-22: "no importa el costo, la que parezca mas precisa")
       ab_edge_gradient_quantile: 90.0   # the Phase 8 A/B's edge band = image gradient energy above this percentile
                                         #   of the session's pixels, or a step of the calibrated depth (never PointDiT)
     cloud_metrics:                      # the floor + edge metrics of EVERY run (precision/cloud_metrics.py;
