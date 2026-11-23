@@ -1070,9 +1070,19 @@ intake:
                                        # with their long side at most 1024 (cv2.INTER_AREA, deterministic) — every stage
                                        # then works at ≤ 1024 with the points' provenance intact. 0 = as decoded.
   quality:                             # I0 — features, never a percentile gate
-    luma_lo: 40.0                      # BOUND: mean luma below this = unusable exposure ("dark")
+    luma_lo: 0.0                       # BOUND: mean luma below this = unusable exposure ("dark"). OPEN (USER
+                                       #   2026-11-22: "en pccr2408 generaba el escalon por la zona obscura, eso hay
+                                       #   que solucionarlo para que no vuelva a pasar"; 2026-11-23: "hay que garantizar
+                                       #   la cobertura en los oscuros"): at 40 it rejected the 130 frames of pccr
+                                       #   2026-08-24's dark turn (video 6274-6403) — no keyframe there, the cubes
+                                       #   guessed the turn, the floor published 36 cm low; the copy with it open
+                                       #   (2026-11-19, cube overlap 3/4 too) used all 13,692 frames, no gap over 8
+                                       #   frames between keyframes, 26 keyframes in the turn, and the step went from
+                                       #   -41 to -7 cm. The audit: wrong by concept (dark ≠ unusable).
     luma_hi: 220.0                     # BOUND: mean luma above this = unusable exposure ("bright")
-    clip_frac_max: 0.25                # BOUND: share of clipped pixels above this = unusable ("clipped")
+    clip_frac_max: 1.0                 # BOUND: share of clipped pixels above this = unusable ("clipped"). OPEN with
+                                       #   luma_lo (USER 2026-11-22, the same order): at 0.25 it rejected 60 more of
+                                       #   that turn's frames (their dark pixels count as clipped at clip_lo)
     clip_lo: 5                         # BOUND: gray value at or below which a pixel counts as clipped dark
     clip_hi: 250                       # BOUND: gray value at or above which a pixel counts as clipped bright
     fft_max_side: 640                  # BOUND: analysis downscale (longest side) of the FFT sharpness
@@ -2673,7 +2683,13 @@ reconstruction:
                                         # and the re-evaluation reads ~1 ulp more
     # F2 — metric gauge along the walk (precision/gauge.py, intake/walk.py)
     gauge:
-      window_frames: 32                 # BOUND: keyframes per DA3 multi-view window (I3: one
+      enabled: false                    # false = NO F2 (USER 2026-11-23: "yo dejaria F2 apagado pointdit afuera en
+                                        #   el principal" / "con lo que corrimos ya es suficiente evidencia"): the
+                                        #   chain runs F0, F4, F5, F6 and F5's anchor tolerance is the tie's seams'
+                                        #   (precision/tie_tolerance.py, USER 2026-11-21 "ok, de acuerdo"). The audit
+                                        #   of 2026-11-20: F2's scale along the walk re-opens what the cube graph
+                                        #   closed (pccr 2026-08-24's copy: cameras moved up to 2.31 m). true = F2
+      window_frames: 32                # BOUND: keyframes per DA3 multi-view window (I3: one
                                         # joint inference of the NESTED model — its depth and pose
                                         # translations are metric, model/da3.py
                                         # _apply_depth_alignment)
@@ -3046,8 +3062,11 @@ reconstruction:
                                         # edges) refines the DETAIL of the bent Omega depth inside f6_bend, before
                                         # the edge-keeping vote; it never touches scale, gauge, poses or camera
                                         # (precision/pointdit_runner.py, precision/mono_detail.py).
-      enabled: true                     # USER 2026-10-04 ("la nitidez de los bordes de pointdit es abrumadoramente
-                                        #   superior a omega"): ON for the end-to-end run; false = epoch 8 bit for bit.
+      enabled: false                    # OFF, not deleted (USER 2026-11-23: "pointdit afuera en el principal"; 2026-11-21:
+                                        #   "queda afuera, no eliminado, pero si apagado"; 2026-11-22: "no quiero meter
+                                        #   una profundidad que no esta verificada"). Was ON since USER 2026-10-04 ("la
+                                        #   nitidez de los bordes de pointdit es abrumadoramente superior a omega");
+                                        #   false = epoch 8 bit for bit.
                                         #   A/B pccr 2026-10-04 (analysis/2026-10-04_pointdit/ab): held-out 2.48 → 2.55 %,
                                         #   in the edge band 2.54 → 2.70 % (p90 29 → 39 %), contradicted 15.1 → 15.7 %,
                                         #   mixed-edge flyers −30 %, +17 min. The cloud in the viewer decides.

@@ -346,3 +346,24 @@ def test_the_core_runs_inside_the_reconstruction_stage():
     text = pathlib.Path(RN.__file__).read_text()
     assert text.index("repro.require_exclusive_gpu(") < text.index("subprocess.Popen(cmd")
     assert "time.strftime" not in text
+
+
+def test_without_f2_the_seams_tolerance_is_written_only_for_a_chain_that_runs_f5(tmp_path, pcfg):
+    """USER 2026-11-23 ("F2 apagado"): with gauge.enabled false F5's anchor tolerance is the tie's seams', written by
+    the chain before the steps' stamps — and a chain that does not run F5 needs no chunk graph."""
+    from precision import tie_tolerance as TT
+    assert pcfg.gauge.enabled is False                       # the main pipeline's config.yaml
+    s = _session(tmp_path)
+    RN.run_chain(s, pcfg, log=lambda *a: None, steps=_steps(tmp_path))
+    assert _ran(s) == ["a", "pub", "c"] and not (s / "output" / "gauge.json").exists()
+    s2 = tmp_path / "sess2"
+    (s2 / "output" / "maplong_run").mkdir(parents=True)
+    seams = [{"a": 1, "b": 0, "sigma_m": 0.03, "lever_m": 2.0}, {"a": 2, "b": 1, "sigma_m": 0.04, "lever_m": 1.0},
+             {"a": 3, "b": 2, "sigma_m": 0.02, "lever_m": 1.0}]
+    (s2 / "output" / "maplong_run" / "chunk_graph.json").write_text(json.dumps({"seams": seams}))
+    f5 = RN.Step("f5_refine", "F5", "da3", "fakestep", ("f5_refine",))
+    RN.run_chain(s2, pcfg, log=lambda *a: None, steps=[f5])
+    assert _ran(s2) == ["f5_refine"]
+    doc = json.loads((s2 / "output" / "gauge.json").read_text())
+    assert doc["applied_instrument"] == TT.INSTRUMENT
+    assert doc["sigma_by_instrument"][TT.INSTRUMENT] == pytest.approx(0.02)   # relative 0.015, 0.04, 0.02

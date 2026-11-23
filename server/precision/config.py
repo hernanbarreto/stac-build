@@ -221,6 +221,11 @@ class GaugeConfig:
     device: str = "numpy"           # 2026-11-01: numpy (the path of record) | cpu | cuda — where the per-frame
                                     #   Huber gains of the I3 windows run (precision/gauge_torch.py: a window's
                                     #   frames at once; 178 s of F2 on pccr on numpy)
+    enabled: bool = True            # false = NO F2 (USER 2026-11-23: "yo dejaria F2 apagado ... en el principal"):
+                                    #   the chain runs F0, F4, F5, F6; F5's one input from F2, the relative tolerance
+                                    #   of its position anchors, is the tie's own (precision/tie_tolerance.py: the
+                                    #   median over the seams of residual / the distance it was measured at — USER
+                                    #   2026-11-21 "ok, de acuerdo"); absent = true (a session frozen before the key)
 
 
 # ── F4: native-pixel tracks ───────────────────────────────────────────────
@@ -706,6 +711,7 @@ def load_precision_config(raw: Optional[Dict[str, Any]] = None, *,
         instruments=tuple(_str_list(g, "instruments", "gauge", allowed=GAUGE_INSTRUMENTS)),
         delete_windows_after_chain=_bool(g, "delete_windows_after_chain", "gauge"),
         device=_enum(g, "device", "gauge", ("numpy", "cpu", "cuda")),
+        enabled=(_bool(g, "enabled", "gauge") if "enabled" in g else True),
     )
     if gauge.window_overlap_frac >= 1.0 or gauge.heldout_confidence >= 1.0:
         raise PrecisionConfigError(

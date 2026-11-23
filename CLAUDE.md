@@ -51,6 +51,19 @@ cloud only, replace). What it is, over §1's pipeline:
 - ✓ OBSERVATORIO SEEN BY HIM (USER 2026-11-20): *"observatorio ya la vi, esta bien, tiene algunos errores en las
   vias, que se yo, observatorio es una corrida corta, podria rehacerse, pero ya veremos"* — fine, some errors on
   the rails; a re-run is possible (a short session) and NOT ordered.
+- ⭐⭐⭐⭐⭐ THIS PIPELINE STAYS — WITH THREE CHANGES (USER 2026-11-23, after the trial of ViPE's concepts on bufferStop
+  and pccr 3108: *"el validado sigue ganando, queda el validado … ninguno le gano al validado, no hay otra"* / *"debe
+  quedar el pipeline original solo con la correccion de oscuros, y el resto fuera del pipeline … nos quedamos con lo
+  que teniamos que funciono perfecto"* / *"yo dejaria F2 apagado pointdit afuera en el principal"* / *"con lo que
+  corrimos ya es suficiente evidencia"* / *"acordate de poner F5 configurado teniendo en cuenta que no esta F2"*):
+  (1) THE DARK FRAMES — `intake.quality.luma_lo` 40 → 0, `clip_frac_max` 0.25 → 1.0: no frame rejected by its
+  exposure (*"hay que garantizar la cobertura en los oscuros para que no pase lo que paso en 2408"*); (2) F2 OFF —
+  `reconstruction.precision.gauge.enabled: false`; F5's one input from F2, its anchors' relative tolerance, is the
+  tie's seams' (`precision/tie_tolerance.py`, written by the chain as output/gauge.json for a chain that runs F5);
+  (3) POINTDIT OFF, NOT DELETED — `mono_detail.enabled: false`. That exact combination has not run as such (the
+  closest runs also had F5's metric anchor and F6's field B: his word, enough evidence). The trial's code: branch
+  `trial/vipe-concepts`; every number: `experiments/new_sequence/RESULTS_vipe_concepts.md`; the check:
+  `bash scripts/checklist/check_validated_pipeline.sh`.
 
 ## 1 · ⭐⭐⭐⭐ THE FINAL PIPELINE — USER 2026-11-08 (11:20 CDMX), pccr, main 8cef74f
 *"la cobertura es muy buena, sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como
@@ -937,6 +950,13 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   bend's. What every stage after it did with a "mixed" pixel at an edge is now the vote's alone. GenRecon's DINOv3
   ViT-L source file moved to `vendor/GenRecon/weights/src/`. Every mention of the edge-detail model elsewhere in this file is the
   record of how the pipeline was BEFORE that date.
+- VIPE'S CONCEPTS (2026-11-21 / 23; code on branch `trial/vipe-concepts`, numbers in
+  `experiments/new_sequence/RESULTS_vipe_concepts.md`): ViPE / MetricTrail as the front (bufferStop: *"es un desastre"*
+  … *"sale muy feo para ser un pipeline de nvidia"*); in our chain, F5's metric anchor (Omega's depth as rows of the
+  adjustment, a scale per cube, its weight re-measured until stable), F6's smooth field on the plane (variant B),
+  MoGe-3 at the edges and as F6's depth (*"horrible"*). None beat the validated pipeline — pccr 3108: vote coverage
+  56.5 against 59.9 %, contradicted 18.2 against 14.7 %, F5 the same (*"el validado sigue ganando, queda el
+  validado"*, 2026-11-23). The architectures of 2026-11-21 / 22 in §7 did not either (pccr 2026-08-24 not validated).
 - AS THE RECONSTRUCTION: VGGT-SLAM 2.0, VidMap, AMB3R's own cloud (2026-11-04: none beat the pipeline); LoGeR +
   the edge-detail model + DA3 (2026-10-06); the DA3-streaming cloud (*"no es mejor ni cerca"*); DA3 depth in the cloud (*"capas
   duplicadas y puntos voladores"*); the plane sweep / witness fusion (`cloud.source: fusion`, selectable).
@@ -965,6 +985,9 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
+- ⭐ 2026-11-23 — HIS DECISION SUPERSEDES THE "RESUME HERE" MARKS BELOW: the validated pipeline stays, with the three
+  changes of §0 (*"nos quedamos con lo que teniamos que funciono perfecto"*). The architectures and trials of 2026-11-19
+  … 23 below are the record of what was tried, not work to resume without his word.
 - ⭐⭐⭐⭐⭐⭐⭐⭐ THE ARCHITECTURE OF 2026-11-21 (morning) — ITS TEST ON THREE SESSIONS (RESUME HERE FIRST; the block
   below is its background). Designed with him step by step that morning; his order to run it: "queda asi y corre asi,
   correlo y vemos luego la nube … creas una nueva sesion bufferstop_prueba y me dejas esta nube ahi publicada, al

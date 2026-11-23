@@ -525,13 +525,16 @@ def chain_steps(pcfg, steps: Sequence[Step] = STEPS) -> List[Step]:
     witness fusion. The check runs last."""
     fusion = pcfg.cloud.source == "fusion"
     drop = set()
+    # USER 2026-11-22 ("lanzala sin F2"): reconstruction.precision.gauge.enabled false = no F2 in the chain
+    no_f2 = set() if bool(getattr(getattr(pcfg, "gauge", None), "enabled", True)) else {"f2_gauge"}
     if pcfg.cloud.source == "omega_bent":
         # USER 2026-10-01 (pccr epoch 7): the depth on F5 IS the product — no plane sweep, no F7.
         # With mono_detail on, PointDiT runs inside it: the step takes the card (vLLM stands down).
         from dataclasses import replace as _replace
         mono = bool(getattr(getattr(pcfg, "mono_detail", None), "enabled", False))
         return [(_replace(s, gpu=True) if (mono and s.key == "f6_bend") else s)
-                for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"}]
+                for s in steps if s.key not in {"f6_sweep", "f6_colmap", "f7_cloud", "f7_fuse"} | no_f2]
+    drop |= no_f2
     drop.add("f6_bend")
     if fusion:
         drop.add("f7_cloud")
@@ -609,6 +612,12 @@ def run_chain(session_dir: Path, pcfg, *, log: Callable = print,
         log(f"{LOG_TAG} re-running from '{from_step}' (the later records forgotten)")
     # the reconstruction's identity enters every step's stamp (its Omega records are its inputs,
     # hashed ONCE here instead of once per step)
+    keys = {s.key for s in steps}
+    if not bool(getattr(pcfg.gauge, "enabled", True)) and "f5_refine" in keys and "f2_gauge" not in keys:
+        # no F2 (USER 2026-11-23: "F2 apagado"): F5's anchor tolerance from the tie's seams, written BEFORE the
+        # steps' stamps — only for a chain that runs F5, its one reader
+        from precision.tie_tolerance import write_tolerance_from_seams
+        write_tolerance_from_seams(out, log=log)
     rid = _reconstruction_id(out)
     # the job's frozen configuration (point 69): every step process reads it through
     # precision.config.raw_config_of; its sha256 is RECORDED on every step record (not a stamp
