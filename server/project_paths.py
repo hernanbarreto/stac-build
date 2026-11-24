@@ -430,6 +430,15 @@ def resolve_session(server_dir: str, session_id: str,
             parts = scan_key.split("/", 1)
             return paths.for_source(parts[0],
                                     parts[1] if len(parts) > 1 else "default")
+        # the scan the REQUEST is on (request_scan.py — each device its own, USER 2026-11-24), before the
+        # project's active scan, which any device rewrites; a scan that is not there is not taken
+        from request_scan import scan_for
+        asked = scan_for(session_id)
+        if asked:
+            parts = asked.split("/", 1)
+            ctx = paths.for_source(parts[0], parts[1])
+            if ctx.source_dir.exists():
+                return ctx
         try:
             _meta = paths.load_project_meta()
             # ACTIVE scan first (the one being worked on), then the

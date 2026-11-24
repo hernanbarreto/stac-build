@@ -13,6 +13,7 @@ import { Sep } from './ui/Panel'
 import { EmptyState } from './ui/EmptyState'
 import { categoricalPalette, tokenColor, VP } from './viewport/palette'
 import { getT, useFmt, useT } from '../i18n'
+import { withScan } from '../net/scanHeader'
 
 /** Translator for callbacks (active language read at call time). */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -1301,7 +1302,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                         {currentFrame ? (
                             <div className="stac-seg__transform" style={{ '--pan-x': `${pan.x}px`, '--pan-y': `${pan.y}px`, '--zoom': zoom } as React.CSSProperties}>
                                 <div className="stac-seg__image-wrap">
-                                    <img ref={imgRef} src={`/api/sessions/${sessionId}/frames/${currentFrame}`} className="stac-seg__image" alt={t('seg.keyframeAlt', { name: currentFrame })} draggable={false} onLoad={() => redrawCanvas()} />
+                                    <img ref={imgRef} src={withScan(`/api/sessions/${sessionId}/frames/${currentFrame}`)} className="stac-seg__image" alt={t('seg.keyframeAlt', { name: currentFrame })} draggable={false} onLoad={() => redrawCanvas()} />
                                     <canvas ref={overlayCanvasRef} className="stac-seg__overlay" onClick={e => handleImageClick(e, true)} onContextMenu={e => handleImageClick(e, false)} onMouseMove={handleCanvasMouseMove} />
                                 </div>
                             </div>
@@ -1335,7 +1336,7 @@ export default function SegmentationManager({ sessionId, onClose, onUpdate }: Pr
                             <div key={i} ref={el => { thumbRefs.current[i] = el }}
                                 className={`stac-seg__thumb ${kfIndex === i ? 'stac-seg__thumb--current' : ''} ${selectedFrames.has(i) ? '' : 'stac-seg__thumb--off'}`.trim()}
                                 onClick={() => setKfIndex(i)}>
-                                <img className="stac-seg__thumb-img" src={`/api/sessions/${sessionId}/frames/${kf}`} loading="lazy" alt={t('seg.keyframeAlt', { name: kf })} />
+                                <img className="stac-seg__thumb-img" src={withScan(`/api/sessions/${sessionId}/frames/${kf}`)} loading="lazy" alt={t('seg.keyframeAlt', { name: kf })} />
                                 {[...promptPointsMapRef.current.keys()].some(k => k.startsWith(`${i}:`)) && <span className="stac-seg__thumb-dot stac-live-dot stac-live-dot--ok" title={t('seg.frameHasPrompts')} />}
                                 <span className="stac-seg__thumb-check" onClick={e => e.stopPropagation()}>
                                     <Checkbox checked={selectedFrames.has(i)} aria-label={t('seg.includeFrame', { n: i + 1 })}

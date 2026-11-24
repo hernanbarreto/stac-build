@@ -14,8 +14,11 @@ import { I18nProvider } from './i18n'
 import { LayoutProvider } from './layout/LayoutContext'
 import { ToastProvider } from './components/ui/Toast'
 import App from './App.tsx'
+import { installScanHeader } from './net/scanHeader'
 
 document.documentElement.dataset.theme = 'dark'
+// every request says which session and scan this device is on (net/scanHeader.ts — each device its own)
+installScanHeader()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>

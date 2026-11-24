@@ -1263,7 +1263,11 @@ def _resolve_segmentation_prompt(prompt: str, session_dir, config: dict,
 async def lifespan(app: FastAPI):
     global frame_storage, alignment_manager
     print("[Server] Starting STAC-BUILD...")
-    
+    # what a route hands to a thread (run_in_executor) runs in the route's context: the scan its request is on
+    # (request_scan.py) — as a sync route already does
+    from request_scan import CopyContextExecutor as _CopyContextExecutor
+    asyncio.get_running_loop().set_default_executor(_CopyContextExecutor())
+
     frame_storage = get_frame_storage()
     alignment_manager = get_alignment_manager()
     
@@ -1347,6 +1351,10 @@ async def lifespan(app: FastAPI):
         print(f"[Server] shutdown — pipeline stage kill failed: {_e}")
 
 app = FastAPI(lifespan=lifespan)
+# EACH DEVICE ITS OWN SCAN (request_scan.py — USER 2026-11-24: "debe mantener el contexto y la conversación para
+# cada sesión de usuario que está trabajando"): the scan a request says it is on, for the routes that name none
+from request_scan import RequestScanMiddleware as _RequestScanMiddleware   # noqa: E402
+app.add_middleware(_RequestScanMiddleware)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # ── Built React app (ui/dist — `npm run build:xr` in ui/) ───────────────
@@ -7041,7 +7049,11 @@ async def viewer_websocket(websocket: WebSocket):
     """
     await websocket.accept()
     await viewer_manager.connect_viewer(websocket)
-    
+    # THIS CONNECTION'S session and scan, set by its load_session (request_scan.py — each device its own, USER
+    # 2026-11-24): what its later commands act on, whatever another device opens meanwhile — the frame
+    # storage's one current session is the last ANY device opened
+    conn_scan = None
+
     try:
         await viewer_manager.send_text(websocket, json.dumps({"type": "status", "message": "Connected"}))
         
@@ -7086,11 +7098,14 @@ async def viewer_websocket(websocket: WebSocket):
 
                 # Retroactive Segmentation — runs segmentation on existing reconstruction
                 if prompt and alignment_manager:
+                    # THIS connection's session, taken now (another device may have opened another one since,
+                    # and this connection may open another while the job runs)
+                    _conn = conn_scan
                     # Check if we have PLY files (either in memory OR on disk)
                     has_plys_in_memory = alignment_manager.get_chunk_count() > 0
                     has_plys_on_disk = False
-                    if frame_storage and frame_storage.current_session:
-                        output_dir = frame_storage.current_session.output_dir
+                    if _conn is not None:
+                        output_dir = _conn.output_dir
                         ply_files = list(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []
                         has_plys_on_disk = len(ply_files) > 0
 
@@ -7100,11 +7115,11 @@ async def viewer_websocket(websocket: WebSocket):
                          print(f"[Viewer] 🔄 Retroactive Segmentation ({source}): {chunk_count} chunks.")
                          
                          # Run in background to not block socket
-                         def _retro_process_active():
+                         def _retro_process_active(_conn=_conn):     # its session bound now
                              # the ONE GPU permit (point 154): refused, declared, while a
                              # pipeline job or another server task holds the card; the VLM on
                              # this task's own engine, stopped before SAM3 (point 156: no fallback)
-                             session = frame_storage.current_session
+                             session = _conn
                              if not session: return False
                              token = _permit_token("retro-segmentation", session.session_id)
                              try:
@@ -7151,19 +7166,19 @@ async def viewer_websocket(websocket: WebSocket):
                                  _semantic_reload_if_idle("retroactive segmentation done")
                          
                          # Execute in thread
-                         async def _run_retro_active():
+                         async def _run_retro_active(_conn=_conn):  # its session bound now
                              loop = asyncio.get_running_loop()
                              success = await loop.run_in_executor(None, _retro_process_active)
                              if success:
                                  # Refresh viewer: resend cleaned cloud + segmentation
-                                 session_id = frame_storage.current_session.session_id
+                                 session_id = _conn.session_id
                                  await viewer_manager.send_text(websocket, json.dumps({"type": "cleared"}))
                                  
                                  # Resend the cleaned cloud
                                  sent = await _send_cleaned_cloud(websocket, session_id)
                                  
                                  # the projection on disk, READ (the server never projects — point 160)
-                                 seg_data = await loop.run_in_executor(None, _read_segments_payload, frame_storage.current_session.output_dir)
+                                 seg_data = await loop.run_in_executor(None, _read_segments_payload, _conn.output_dir)
                                  if seg_data.get("instances"):
                                      await viewer_manager.send_text(websocket, json.dumps(seg_data))
                                  
@@ -7200,15 +7215,15 @@ async def viewer_websocket(websocket: WebSocket):
                 frame_storage.stop_session()
                 
                 # Offload disk I/O to thread pool
+                _loaded = None
                 if frame_storage:
-                    await loop.run_in_executor(None, frame_storage.load_session_from_disk, session_id)
-                
+                    _loaded = await loop.run_in_executor(None, frame_storage.load_session_from_disk, session_id)
+
                 await viewer_manager.send_text(websocket, json.dumps({"type": "cleared"}))
                 await asyncio.sleep(0)  # Yield to process pings
-                
-                total_chunks = 0
-                if frame_storage and frame_storage.current_session:
-                    total_chunks = len(frame_storage.current_session.chunks)
+
+                # the session THIS load returned (the storage's current one may be another device's by now)
+                total_chunks = len(_loaded.chunks) if _loaded is not None else 0
 
                 await viewer_manager.send_text(websocket, json.dumps({
                     "type": "session_info",
@@ -7293,6 +7308,14 @@ async def viewer_websocket(websocket: WebSocket):
                     if not potree_metadata.exists():
                         potree_metadata = output_dir / "potree" / "metadata.json"
                     _load_scan_key = cmd.get("scan_key") or _scan_key_of(_load_ctx)
+                    # THIS CONNECTION is now on this session and scan (request_scan.py): its later commands
+                    # resolve them, never the project's active scan another device may rewrite
+                    from types import SimpleNamespace as _NS
+                    conn_scan = _NS(session_id=session_id, base_dir=_load_ctx.session_dir,
+                                    frames_dir=_load_ctx.frames_dir, output_dir=_load_ctx.output_dir)
+                    if _load_scan_key:
+                        import request_scan as _request_scan
+                        _request_scan.set_scan(session_id, _load_scan_key)
 
                     if not cleaned_ply.exists():
                         chunk_plys = sorted(output_dir.glob("chunk_*.ply")) if output_dir.exists() else []

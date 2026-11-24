@@ -27,6 +27,7 @@ import type { ReadoutAnchor, ViewPreset } from './viewport/ViewportHud'
 import { PhysicsSandbox } from './physics'
 import { SceneShadows, pointShadowUniforms, POINT_SHADOW_VERT_DECL, POINT_SHADOW_VERT_MAIN, POINT_SHADOW_FRAG_DECL } from './shadows'
 import { SceneLights } from './sceneLights'
+import { withScan } from '../net/scanHeader'
 
 /** Translator for callbacks (the active language is read at call time). */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -6032,7 +6033,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             {camTooltip && (
                 <div className="stac-vptip" style={{ '--tip-x': `${camTooltip.x + 16}px`, '--tip-y': `${camTooltip.y - 80}px` } as React.CSSProperties}>
                     <div className="stac-mono">{camTooltip.frameName}</div>
-                    <img className="stac-vptip__thumb" src={`/api/sessions/${camTooltip.sessionId}/frames/${camTooltip.frameName}?upright=1`} alt={camTooltip.frameName}
+                    <img className="stac-vptip__thumb" src={withScan(`/api/sessions/${camTooltip.sessionId}/frames/${camTooltip.frameName}?upright=1`)} alt={camTooltip.frameName}
                         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
                 </div>
             )}

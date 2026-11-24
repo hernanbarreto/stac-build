@@ -75,6 +75,7 @@ import { CalibrationDialog, type CalibrationDraft, type CalMeasurement, type Cal
 import { EvaluationPanel } from './features/EvaluationPanel'
 import { PhysicsPanel } from './features/PhysicsPanel'
 import { ConsolePanel, JobsPanel, PropertiesPanel, type JobTask } from './features/DockPanels'
+import { setScanContext } from './net/scanHeader'
 
 /** Translator for callbacks defined before the i18n hook is read. */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -419,6 +420,8 @@ function App() {
   const lastCloudLoadAtRef = useRef(0)
   const activeSessionRef = useRef<string | null>(null)
   useEffect(() => { activeSessionRef.current = activeSession }, [activeSession])
+  // every request says the session and scan on THIS device's screen (net/scanHeader.ts — each device its own)
+  useEffect(() => { setScanContext(activeSession, activeScanTab) }, [activeSession, activeScanTab])
   const [flythroughOpen, setFlythroughOpen] = useState<string | null>(null)
   const [adminOpen, setAdminOpen] = useState(false)
 
