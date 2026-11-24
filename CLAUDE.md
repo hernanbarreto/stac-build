@@ -64,6 +64,14 @@ cloud only, replace). What it is, over §1's pipeline:
   closest runs also had F5's metric anchor and F6's field B: his word, enough evidence). The trial's code: branch
   `trial/vipe-concepts`; every number: `experiments/new_sequence/RESULTS_vipe_concepts.md`; the check:
   `bash scripts/checklist/check_validated_pipeline.sh`.
+- ✓ GRUPO_ELECTROGENO (scan 2026-11-24, outdoors: a generator set under a canopy) — USER 2026-11-24, on its GenRecon
+  mesh with the enclosure selected (box 3.738 × 2.160 × 1.400 m): *"ya quedo, perfecto"*. Run under the three
+  changes above (config.yaml untouched since 82b709f; the scan's frozen run_config.yaml: gauge and mono_detail off,
+  luma_lo 0, clip_frac_max 1.0) and F0's check of the turn the extraction applied (e187426), relaunched after that
+  fix — reconstruction → segmentation → floor in 9453.9 s: 390 keyframes, 17,646,440 points; VLM 59 concepts, SAM3
+  1129 masklets → 335 objects over 99.45 % of the points; the floor step 0.93° / −15.9 cm (the cloud came out
+  standing), epoch 3. GenRecon on his order (confidence 0, 2.5 m · 3 pts, 119 cubes) in 1851.8 s: raw 7,544,873
+  faces, textured 564 MB (74.8 % of the covered texels photographed), 137 tile files, VRAM peak 13.3 GB.
 
 ## 1 · ⭐⭐⭐⭐ THE FINAL PIPELINE — USER 2026-11-08 (11:20 CDMX), pccr, main 8cef74f
 *"la cobertura es muy buena, sin errores, sin duplicados, muy muy buen resultado, excelente, que quede este como
@@ -385,10 +393,22 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     (c) the dev server is what is published (his live changes): a public address WITHOUT the gate would have
     to serve the built app (ui/dist is of 2026-11-09) — never the dev server, which shows the source.
 - ⭐ EVERYTHING STARTS BY ITSELF WHEN THE POD STARTS (USER 2026-11-20: "y que todo debe arrancar automaticamente al
-  iniciar el pod tambien") — BUILT AND DRY-TESTED, NOT WIRED YET. THE LAST STEP IS A SETTING OF THE POD, set
-  with the pod STOPPED (saving it restarts the pod: never while a job runs) — RunPod → the pod → Edit Pod →
-  "Container Start Command":
+  iniciar el pod tambien") — BUILT AND DRY-TESTED; WIRED 2026-11-24 THROUGH HIS RUNPOD TEMPLATE (USER: "siempre
+  arranco pods nuevos" — a pod's own setting dies with it; "no tengo nada en templates" → he made one): the image
+  runpod/pytorch:1.5.0-cu1281-torch280-ubuntu2404, container disk 50 GB, the volume at /workspace, ports 8888 (http,
+  jupyter) and 22 (tcp, ssh) ONLY — 5173, 8765, 8770, 8798, 8799 stay inside the pod behind the funnel and the gate
+  (5173 NEVER exposed) — and its "Container Start Command":
       bash -c "bash /workspace/stac-build/scripts/pod_autostart.sh & exec /start.sh"
+  A NEW POD, as told to him: Pods → Deploy → his network volume FIRST (CA-MTL-3: it picks the datacenter) → A100
+  80GB PCIe → Change Template → his → Deploy On-Demand; the page at the Tailscale address; the assistant: a
+  terminal, `tmux attach -t claude`, `claude`. ⚠ THE FIRST POD DEPLOYED FROM IT IS THE REAL TEST (below): read
+  logs/autostart_latest.log with him.
+  THE GATE'S START ON A NEW POD, FIXED 2026-11-24 (55d26a2; USER: "fijate ademas que arranque bien el que sirve a
+  la pagina de tailscale para que pueda acceder desde cualquier dispositivo"): its pid file is on the volume and
+  outlives the pod; an old number naming another live process made the start "reload" that process (the signal
+  killed it) and leave the gate down with exit 0 — reproduced with a stand-in, fixed (remote_access.sh gate_pid),
+  and a whole new-pod start simulated with no terminal (no gate, a stale pid on a live process, no tailscaled):
+  5 s, the stand-in alive, from the internet side 403 without the cookie / 302 on the secret link / 200 with it.
   · WHY THERE: the container's disk is new at every pod start (the image's /start.sh has its hooks,
     /pre_start.sh and /post_start.sh, on that disk); the volume and the pod's settings are what survives.
     /start.sh runs under `set -e` — a failing hook would end the pod's first process before anyone could log in
