@@ -48,6 +48,17 @@ new_key() {
     fi
 }
 
+# The gate's nginx master, or nothing. Its pid file lives on the volume and outlives the pod: on a new pod the
+# number it holds can belong to another process (2026-11-24, reproduced: the start then "reloaded" — signalled
+# that process, which died — and never started the gate). The number counts only when its process is this gate.
+gate_pid() {
+    local p
+    p=$(cat "$RUN/nginx.pid" 2>/dev/null) || return 1
+    [[ "$p" =~ ^[0-9]+$ ]] || return 1
+    { tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null | grep -qF -- "nginx -c $CONF -p $RUN" || return 1
+    echo "$p"
+}
+
 gate_up() {
     [ -x "$NGINX" ] || { echo "[remote] $NGINX is not in this image — the gate needs nginx" >&2; exit 1; }
     [ -n "$(key)" ] || new_key
@@ -59,17 +70,18 @@ gate_up() {
           "$ROOT/scripts/remote/gate.nginx.conf.template" > "$CONF.new"
       mv "$CONF.new" "$CONF" )
     "$NGINX" -t -q -c "$CONF" -p "$RUN"
-    if [ -f "$RUN/nginx.pid" ] && kill -0 "$(cat "$RUN/nginx.pid")" 2>/dev/null; then
+    if gate_pid >/dev/null; then
         "$NGINX" -s reload -c "$CONF" -p "$RUN"
         echo "[remote] gate reloaded (127.0.0.1:$GATE_PORT)"
     else
+        rm -f "$RUN/nginx.pid"                  # a previous pod's: never signalled
         "$NGINX" -c "$CONF" -p "$RUN"
         echo "[remote] gate started (127.0.0.1:$GATE_PORT)"
     fi
 }
 
 gate_down() {
-    if [ -f "$RUN/nginx.pid" ] && kill -0 "$(cat "$RUN/nginx.pid")" 2>/dev/null; then
+    if gate_pid >/dev/null; then
         "$NGINX" -s quit -c "$CONF" -p "$RUN" && echo "[remote] gate stopped"
     fi
 }
@@ -127,7 +139,7 @@ case "${1:-start}" in
         echo "https://$(name)/__gate?k=$(key)"
         ;;
     status)
-        if [ -f "$RUN/nginx.pid" ] && kill -0 "$(cat "$RUN/nginx.pid")" 2>/dev/null; then echo "gate: up (127.0.0.1:$GATE_PORT)"; else echo "gate: DOWN"; fi
+        if gate_pid >/dev/null; then echo "gate: up (127.0.0.1:$GATE_PORT)"; else echo "gate: DOWN"; fi
         if pgrep -f "tailscaled.*$TS_DIR/state" >/dev/null; then echo "tailscaled: up — $(name)"; $TS funnel status 2>&1 | sed 's/^/   /'; else echo "tailscaled: DOWN"; fi
         ;;
     rotate)
