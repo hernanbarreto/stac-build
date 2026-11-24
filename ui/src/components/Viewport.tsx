@@ -289,6 +289,8 @@ export interface ViewportHandle {
     setSelectedSegment: (key: string | null) => void
     /** ViewCube (USER 2026-10-04): the main camera's orientation, a snap to any direction, an orbit step */
     getCameraQuaternion: () => THREE.Quaternion | null
+    /** the main camera's position, in the frame flyToPoint and the segments' focus centres use */
+    getCameraPosition: () => [number, number, number] | null
     orientView: (dir: [number, number, number]) => void
     orbitBy: (dAz: number, dEl: number) => void
 }
@@ -3466,6 +3468,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         setSelectedSegment: (key: string | null) => applySegmentSelection(key),
         getCameraQuaternion: () => cameraRef.current ? cameraRef.current.quaternion : null,
+        getCameraPosition: () => {
+            const p = cameraRef.current?.position
+            return p ? [p.x, p.y, p.z] : null
+        },
         orientView: (dir: [number, number, number]) => {
             const cam = cameraRef.current
             const ctrl = controlsRef.current

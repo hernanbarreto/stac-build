@@ -103,6 +103,23 @@ def test_objects_named_by_id_are_resolved_on_the_store(tmp_path):
         qa.close()
 
 
+def test_a_spoken_reference_names_an_object_without_the_hash(tmp_path):
+    # a microphone writes no "#": "wall 2" names wall#2 — only when the word is a whole word
+    # of a label this scan really has, and never when the number carries a unit
+    sp = _store(tmp_path)
+    qa = SpatialQA(sp)
+    try:
+        _a, refs = qa.question_with_references("select and show me wall 2, and door 21.")
+        by_id = {r["id"]: r for r in refs}
+        assert by_id[2]["exists"] and by_id[2]["label"] == "wall"
+        assert by_id[21]["exists"] and by_id[21]["label"] == "door"
+        assert qa.question_with_references("rotate the scene 180 degrees")[1] == []
+        assert qa.question_with_references("a wall 2 meters long")[1] == []
+        assert qa.question_with_references("open pccr 3108")[1] == []
+    finally:
+        qa.close()
+
+
 def test_the_chat_answers_about_the_scan_asked(tmp_path, monkeypatch):
     from phase5_qa import api
     import project_paths
@@ -318,3 +335,31 @@ def test_the_last_turns_of_the_conversation_go_with_the_question(tmp_path, monke
     msgs = fake.chats[0]["messages"]
     assert [m.role for m in msgs] == ["system", "user", "assistant", "user"]
     assert [m.text for m in msgs[1:]] == ["q2", "a2", "y el otro?"]
+
+
+def test_show_me_an_object_of_the_scan_is_selected_without_the_model_whatever_came_before(tmp_path, monkeypatch):
+    """USER 2026-11-24: "le digo show me X elemento y lo selecciona de la lista de segmentos pero no me los muestra
+    como si yo lo tocara en la pantalla, lo filtra, parece que no responde siempre igual a los mismos comandos" —
+    phase5_qa/selection.py. The model is scripted to choose what it chose once that day (showing every object
+    of the label): the sentence never reaches it."""
+    qa, fake = _qa(tmp_path, monkeypatch, _Reply(calls=[("show_objects", {"label": "door", "visible": True})]))
+    try:
+        res = qa.ask("Show me the doors.")
+        later = qa.ask("Show me the doors.", history=[{"role": "user", "text": "hide the doors"},
+                                                      {"role": "assistant", "text": "4 objects hidden (door)."}])
+        floor = qa.ask("select floor.")
+        assert fake.chats == []                                           # the model was not asked
+        grid = qa.ask("show me the grid.")                                # no object of the scan: the model's
+        assert len(fake.chats) == 1
+    finally:
+        qa.close()
+    assert res["stopped"] == "selection_rule" and res["iterations"] == 0 and res["lang"] == "en"
+    assert res["commands"] == [{"id": "viewer.focus_object", "kind": "action", "runs_on": "scene"}]
+    assert res["tool_trace"][0]["result"]["viewer"] == {"action": "select", "ids": [20, 21, 22, 40]}
+    assert res["answer"].endswith("4 “door” objects: the nearest is selected and all of them are in view.")
+    assert res["provenance"]["written_by"] == "tool_layer" and res["ui_actions"] == []
+    # what was said before changes nothing of what is done
+    assert later["commands"] == res["commands"] and later["tool_trace"] == res["tool_trace"]
+    assert floor["tool_trace"][0]["result"]["viewer"] == {"action": "select", "ids": [1]}
+    assert floor["answer"].endswith("floor#1 is selected and in view.")
+    assert grid["stopped"] != "selection_rule"

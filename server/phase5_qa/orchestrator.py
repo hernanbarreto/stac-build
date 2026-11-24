@@ -389,6 +389,33 @@ class SpatialQA:
             lines.append(ln)
         return question + "\n".join(lines), refs
 
+    def _selection_turn(self, question: str, db: Any, lang: str) -> dict | None:
+        """SHOW ME / SELECT <an object of this scan> (phase5_qa/selection.py): the turn written without the
+        model — viewer.focus_object's row and a "select" for the interface (as a touch on the model selects:
+        the object's box and dimensions, the camera on it; several of one label: the one nearest the camera,
+        all framed; a hidden one shown first), worded by the tool layer. None when the sentence is not one."""
+        if self.tools is None:
+            return None
+        from . import answers, selection
+        hit = selection.match(question, ((iid, inst.get("label")) for iid, inst in self.tools._instances().items()))
+        if hit is None:
+            return None
+        row = next((r for r in db.list(lang, status=("available",)) if r["id"] == "viewer.focus_object"), None)
+        if row is None:
+            return None
+        ids, label = [int(i) for i in hit["ids"]], str(hit["label"])
+        result = {"viewer": {"action": "select", "ids": ids}, "label": label, "count": len(ids),
+                  "done": ("the object is selected as a touch selects it: its OBB and dimensions are shown and "
+                           "the camera travels to it" if len(ids) == 1 else
+                           "the object of the label nearest the camera is selected (its OBB and dimensions "
+                           "shown) and every object of the label is framed")}
+        entry = {"iteration": 0, "tool": row["tool"], "arguments": {"ids": ids, "label": label}, "result": result,
+                 "command": row["id"], "kind": row["kind"], "runs_on": row["runs_on"], "rule": "selection"}
+        return {"question": question, "answer": answers.compose_turn([entry], lang), "tool_trace": [entry],
+                "iterations": 0, "stopped": "selection_rule", "references": [],
+                "provenance": {"ok": True, "figures": [], "tools": [], "retried": False,
+                               "written_by": "tool_layer"}}
+
     def ask(self, question: str, images: list | None = None,
             max_iterations: int = 8, history: list | None = None,
             lang: str | None = None, user_name: str | None = None,
@@ -503,24 +530,10 @@ class SpatialQA:
                 impls[tool] = _ui_call(row, question)
 
         client = get_semantic_client(backend=self.backend, consumer="phase5.qa")
-        messages = [system(self.system_prompt(ui=ui, user_name=name, expecting=expecting, lang=lang))]
         keep = cfg["history_turns"]
         turns = [h for h in (history or []) if isinstance(h, dict)
                  and h.get("role") in ("user", "assistant") and str(h.get("text") or "").strip()]
-        for h in (turns[-keep:] if keep else []):
-            messages.append(user(str(h["text"])) if h["role"] == "user"
-                            else assistant(text=str(h["text"])))
-        asked, refs = self.question_with_references(question)
-        messages.append(user(asked, images=images))
-        t_prompt = time.time() - t0
-        # A TOOL CALL COMES FIRST, always (2026-11-13): left to choose, the model answered "only the
-        # extinguishers are shown" having shown nothing, and "1.14 m" having measured nothing — an
-        # answer is preceded by at least one call of the tool layer, then checked
-        cap = cfg["max_tokens"]                    # a call or a brief answer never needs more
-        t_llm = time.time()
-        first = client.chat(messages, tools=tools, tool_choice="required", max_tokens=cap,
-                            consumer="phase5.qa#call")
-        llm_s = time.time() - t_llm
+        t_prompt, llm_s = 0.0, 0.0
 
         def _finish(result: dict, trace: list, composed: bool) -> dict:
             """What every answer carries beside its text: the interface's commands to run, the
@@ -554,6 +567,29 @@ class SpatialQA:
                 latency_s=round(time.time() - t0, 2))
             self._log_session(result, n_images=len(images or []))
             return result
+
+        # SHOW ME / SELECT <an object of this scan>: decided by the sentence alone, before the model and
+        # whatever was said before it (phase5_qa/selection.py — USER 2026-11-24: "parece que no responde
+        # siempre igual a los mismos comandos")
+        chosen = self._selection_turn(question, db, lang)
+        if chosen is not None:
+            t_prompt = time.time() - t0
+            return _finish(chosen, chosen["tool_trace"], composed=True)
+        messages = [system(self.system_prompt(ui=ui, user_name=name, expecting=expecting, lang=lang))]
+        for h in (turns[-keep:] if keep else []):
+            messages.append(user(str(h["text"])) if h["role"] == "user"
+                            else assistant(text=str(h["text"])))
+        asked, refs = self.question_with_references(question)
+        messages.append(user(asked, images=images))
+        t_prompt = time.time() - t0
+        # A TOOL CALL COMES FIRST, always (2026-11-13): left to choose, the model answered "only the
+        # extinguishers are shown" having shown nothing, and "1.14 m" having measured nothing — an
+        # answer is preceded by at least one call of the tool layer, then checked
+        cap = cfg["max_tokens"]                    # a call or a brief answer never needs more
+        t_llm = time.time()
+        first = client.chat(messages, tools=tools, tool_choice="required", max_tokens=cap,
+                            consumer="phase5.qa#call")
+        llm_s = time.time() - t_llm
 
         if first.has_tool_calls:
             trace = []

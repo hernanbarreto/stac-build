@@ -1690,6 +1690,22 @@ function App() {
     }
     switch (a.action) {
       case 'focus': focusSegmentsRef.current(ids); break
+      case 'select': {
+        // "SHOW ME / SELECT <an object>" (server phase5_qa/selection.py — USER 2026-11-24: "no me los muestra
+        // como si yo lo tocara en la pantalla"): as a touch on the model — its box and dimensions, the camera
+        // on it, nothing filtered, no panel. Several of one label: the one nearest the camera is selected and
+        // all of them are framed. A hidden one is shown first (a touch could not reach it).
+        const targets = ids.map(i => segments.find(s => s.id === i)).filter((s): s is SegmentInstance => !!s)
+        if (!targets.length) break
+        if (targets.some(s => !s.visible)) setVis(s => (ids.includes(s.id) ? true : null))
+        const cam = vp?.getCameraPosition() ?? null
+        const dist = (s: SegmentInstance) => (cam && s.focus
+          ? Math.hypot(s.focus.center[0] - cam[0], s.focus.center[1] - cam[1], s.focus.center[2] - cam[2])
+          : Number.POSITIVE_INFINITY)
+        const pick = targets.reduce((a, b) => (dist(b) < dist(a) ? b : a))
+        focusSegmentsRef.current([pick.id, ...targets.filter(s => s !== pick).map(s => s.id)])
+        break
+      }
       case 'visibility': setVis(s => (ids.includes(s.id) ? !!a.visible : null)); break
       case 'show_only': setVis(s => ids.includes(s.id)); break
       case 'show_all': setVis(() => true); break

@@ -113,6 +113,12 @@ def _insufficient(res: Dict[str, Any], lang: str) -> Optional[str]:
 # ── one function per tool: (args, result, lang) -> sentence ─────────────────────────────────
 def _focus_object(a, r, lang):
     ids = (r.get("viewer") or {}).get("ids") or [a.get("id")]
+    if int(r.get("count") or 1) > 1:
+        # "show me column" with several (phase5_qa/selection.py): the interface selects the nearest
+        n, lab = int(r["count"]), r.get("label", "")
+        return _t(lang, f"{n} objetos «{lab}»: quedó seleccionado el más cercano y todos a la vista.",
+                  f"{n} “{lab}” objects: the nearest is selected and all of them are in view.",
+                  f"{n} objets « {lab} » : le plus proche est sélectionné et tous sont cadrés.")
     name = f"{r.get('label', '')}#{ids[0]}"
     return _t(lang, f"{name} quedó seleccionado y enfocado en la vista.",
               f"{name} is selected and in view.",

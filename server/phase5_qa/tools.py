@@ -151,6 +151,14 @@ def id_ranges(ids) -> str:
 # or "id 797" / "id=797"
 _REF_LABELLED = re.compile(r"([A-Za-zÀ-ÿ][\w\-]*)\s*#\s*(\d+)")
 _REF_BARE = re.compile(r"(?:#\s*|\bids?\s*[=:]?\s*)(\d+)", re.IGNORECASE)
+# the SPOKEN form — "wall 13" (a microphone writes no "#"): taken only when the word before the
+# number names a label of THIS scan's store (checked in resolve_references), and never when the
+# number carries a unit ("a wall 2 meters long" measures, it does not name)
+_REF_SPOKEN = re.compile(
+    r"([A-Za-zÀ-ÿ][\w\-]*)\s+(\d{1,6})\b"
+    r"(?!\s*(?:m|mm|cm|km|s|°|º|deg(?:rees?)?|grados?|degr[ée]s?|"
+    r"met(?:ers?|res?|ros?)|m[èe]tres?|points?|puntos?|views?|vistas?|vues?)\b)",
+    re.IGNORECASE)
 
 
 # the tools that read an object's POINTS (everything else is a lookup in the store): with
@@ -301,6 +309,18 @@ class SpatialTools:
             refs.setdefault(int(m.group(2)), m.group(1))
         for m in _REF_BARE.finditer(text or ""):
             refs.setdefault(int(m.group(1)), None)
+        for m in _REF_SPOKEN.finditer(text or ""):
+            # spoken "wall 13" counts only when the word is a WHOLE word of a label this scan
+            # really has ("wall", "enclosure" of glass_enclosure; "walls" too) — never a
+            # substring: "a 13" must not name an object
+            w = norm_label(m.group(1))
+            forms = {w}
+            for suffix in ("es", "s"):
+                if w.endswith(suffix) and len(w) > len(suffix) + 1:
+                    forms.add(w[: -len(suffix)])
+            if any(f in norm_label(i["label"]).split()
+                   for f in forms for i in self._instances().values()):
+                refs.setdefault(int(m.group(2)), m.group(1))
         out = []
         for iid, said in refs.items():
             inst = self._instance(iid)
