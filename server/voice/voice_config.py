@@ -45,6 +45,8 @@ def validate(block: Any) -> Dict[str, Any]:
         "max_new_tokens": _need(stt, "max_new_tokens", int, "voice.stt", lambda x: x > 0),
         "no_speech_threshold": float(_need(stt, "no_speech_threshold", (int, float), "voice.stt", lambda x: 0 <= x <= 1)),
         "logprob_threshold": float(_need(stt, "logprob_threshold", (int, float), "voice.stt")),
+        "compression_ratio_threshold": float(_need(stt, "compression_ratio_threshold", (int, float), "voice.stt",
+                                                   lambda x: x > 0)),
         "prompt_max_labels": _need(stt, "prompt_max_labels", int, "voice.stt", lambda x: x >= 0),
         "vad_threshold": float(_need(stt, "vad_threshold", (int, float), "voice.stt", lambda x: 0 < x < 1)),
     }

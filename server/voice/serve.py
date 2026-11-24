@@ -12,7 +12,9 @@
 speech → text: Whisper through transformers. The LANGUAGE is decided among the system's own
 (``voice.languages``) from the first decoder step — never one of Whisper's other 96. Silence is
 not transcribed (the vendor's rule: no-speech probability over its threshold AND a low mean
-log-probability). Greedy, temperature 0: the same audio gives the same text.
+log-probability). A transcription that repeats itself (the vendor's compression-ratio test) is decoded
+again without the vocabulary, then dropped (voice/repetition.py). Greedy, temperature 0: the same audio
+gives the same text.
 text → speech: Kokoro, one voice per language, the text first turned into what is SAID
 (voice/spoken.py).
 """
@@ -34,11 +36,38 @@ if str(SERVER_DIR) not in sys.path:
 from fastapi import FastAPI, Request          # noqa: E402 — module level: the routes' annotations
 from fastapi.responses import JSONResponse, Response      # noqa: E402
 
+from voice import repetition                 # noqa: E402
 from voice import spoken                     # noqa: E402
 from voice import voice_config               # noqa: E402
 
 SAMPLE_RATE_IN = 16000                        # Whisper's
 SAMPLE_RATE_OUT = 24000                       # Kokoro's
+
+# WHAT STAC HEARD, KEPT FOR TRACING (on the user's own pod, never leaving it): one log line per
+# utterance and the LAST 20 recordings with their transcription in logs/voice_utterances/ —
+# a mis-heard command is then replayed against the recogniser instead of guessed about.
+UTTERANCES_DIR = SERVER_DIR.parent / "logs" / "voice_utterances"
+UTTERANCES_KEPT = 20
+
+
+def keep_utterance(data: bytes, ctype: str, res: Dict[str, Any]) -> None:
+    """The recording and what was written from it, kept as a short ring; never fails a turn."""
+    import json
+    try:
+        UTTERANCES_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime()) + f"_{int(time.time() * 1000) % 1000:03d}"
+        ext = ".ogg" if "ogg" in ctype else ".mp4" if "mp4" in ctype else ".wav" if "wav" in ctype else ".webm"
+        (UTTERANCES_DIR / f"utt_{stamp}{ext}").write_bytes(data)
+        (UTTERANCES_DIR / f"utt_{stamp}.json").write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+        old = sorted(p for p in UTTERANCES_DIR.iterdir() if p.name.startswith("utt_"))
+        for p in old[: max(0, len(old) - 2 * UTTERANCES_KEPT)]:    # two files per utterance
+            p.unlink()
+    except OSError:
+        pass
+    print(f"[Voice] heard {res.get('language')} audio {res.get('audio_s')}s"
+          f" (speech {res.get('speech_s')}s, written in {res.get('seconds')}s):"
+          f" {(res.get('text') or ('(repeats itself: not understood)' if res.get('repetitive') else '(no speech)'))!r}"
+          f"{' — written again without the vocabulary' if res.get('retried_without_vocabulary') else ''}", flush=True)
 
 
 class VoiceError(RuntimeError):
@@ -170,34 +199,48 @@ class Engines:
                                           max_new_tokens=int(self.cfg["stt"]["max_new_tokens"]),
                                           attention_mask=mask)
             prompt_ids: List[int] = []
+            prompt_t = None
             if prompt.strip():
-                p = self.proc.get_prompt_ids(prompt.strip(), return_tensors="pt")
-                prompt_ids = [int(x) for x in p.tolist()]
-                kwargs["prompt_ids"] = p.to(self.device)
-            ids = self.stt.generate(feats, **kwargs)[0].tolist()
-            # THE TEXT: the tokens after the decoder's own prefix (… <|notimestamps|>), whatever
-            # of that prefix this version of generate returns; special tokens are not text
-            last = max((k for k, t in enumerate(ids) if t in (sot, self.prefix_tokens[-1])), default=-1)
-            said = [t for t in ids[last + 1:] if t < tok.eos_token_id]
-            text = tok.decode(said, skip_special_tokens=True).strip()
-            # the mean log-probability of what was said, end token included (the vendor's
-            # definition): one teacher-forced pass over the decoder's full input
-            mean_logp = 0.0
-            if said:
-                head = prompt_ids + [sot, self.lang_tokens[k_lang]] + self.prefix_tokens
-                target = said + [tok.eos_token_id]
-                dec = torch.tensor([head + said], device=self.device)
-                logits = self.stt(feats, decoder_input_ids=dec).logits[0, len(head) - 1:].float()
-                logp = torch.log_softmax(logits, dim=-1).gather(
-                    1, torch.tensor(target, device=self.device).unsqueeze(1)).squeeze(1)
-                mean_logp = float(logp.mean())
+                prompt_t = self.proc.get_prompt_ids(prompt.strip(), return_tensors="pt")
+                prompt_ids = [int(x) for x in prompt_t.tolist()]
+
+            def decode(with_vocabulary: bool):
+                kw = dict(kwargs)
+                head_prompt = prompt_ids if with_vocabulary else []
+                if head_prompt:
+                    kw["prompt_ids"] = prompt_t.to(self.device)
+                ids = self.stt.generate(feats, **kw)[0].tolist()
+                # THE TEXT: the tokens after the decoder's own prefix (… <|notimestamps|>), whatever
+                # of that prefix this version of generate returns; special tokens are not text
+                last = max((k for k, t in enumerate(ids) if t in (sot, self.prefix_tokens[-1])), default=-1)
+                said = [t for t in ids[last + 1:] if t < tok.eos_token_id]
+                text = tok.decode(said, skip_special_tokens=True).strip()
+                # the mean log-probability of what was said, end token included (the vendor's
+                # definition): one teacher-forced pass over the decoder's full input
+                mean_logp = 0.0
+                if said:
+                    head = head_prompt + [sot, self.lang_tokens[k_lang]] + self.prefix_tokens
+                    target = said + [tok.eos_token_id]
+                    dec = torch.tensor([head + said], device=self.device)
+                    logits = self.stt(feats, decoder_input_ids=dec).logits[0, len(head) - 1:].float()
+                    logp = torch.log_softmax(logits, dim=-1).gather(
+                        1, torch.tensor(target, device=self.device).unsqueeze(1)).squeeze(1)
+                    mean_logp = float(logp.mean())
+                return text, mean_logp
+
+            # A TRANSCRIPTION THAT REPEATS ITSELF ("STAC, STAC, STAC, …", 2026-11-24 — voice/repetition.py):
+            # decoded again without the vocabulary, then dropped
+            kept = repetition.without_loops(decode, bool(prompt_ids),
+                                            float(self.cfg["stt"]["compression_ratio_threshold"]))
+            text, mean_logp = kept["text"], kept["mean_logprob"]
         silent = not text or (no_speech > self.cfg["stt"]["no_speech_threshold"]
                               and mean_logp < self.cfg["stt"]["logprob_threshold"])
         return {"text": "" if silent else text, "language": lang,
                 "probabilities": {l: round(float(p), 4) for l, p in zip(self.langs, torch.exp(lp).tolist())},
                 "no_speech": bool(silent), "no_speech_probability": round(no_speech, 4),
-                "mean_logprob": round(mean_logp, 4), "speech_s": round(speech_s, 2),
-                "audio_s": round(seconds, 2), "seconds": round(time.time() - t0, 3)}
+                "mean_logprob": round(mean_logp, 4), "compression_ratio": kept["compression_ratio"],
+                "retried_without_vocabulary": kept["retried_without_vocabulary"], "repetitive": kept["repetitive"],
+                "speech_s": round(speech_s, 2), "audio_s": round(seconds, 2), "seconds": round(time.time() - t0, 3)}
 
     # ── text → speech ───────────────────────────────────────────────────────────────────────
     def speak(self, text: str, lang: str) -> Dict[str, Any]:
@@ -238,7 +281,9 @@ def build_app(engines: Engines):
         data = await request.body()
         try:
             audio = decode_audio(data, cfg["stt"]["max_audio_s"])
-            return engines.transcribe(audio, prompt, default)
+            res = engines.transcribe(audio, prompt, default)
+            keep_utterance(data, request.headers.get("content-type") or "", res)
+            return res
         except VoiceError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 

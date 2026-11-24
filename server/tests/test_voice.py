@@ -26,7 +26,8 @@ def test_the_configuration_is_typed_and_a_missing_key_fails_naming_it():
     block = yaml.safe_load(voice_config.CONFIG_PATH.read_text())["voice"]
     for path, said in ((("stt", "model"), "voice.stt.model"), (("service", "port"), "voice.service.port"),
                        (("name",), "voice.name"), (("tts", "voices", "fr"), "voice.tts.voices.fr"),
-                       (("stt", "vad_threshold"), "voice.stt.vad_threshold")):
+                       (("stt", "vad_threshold"), "voice.stt.vad_threshold"),
+                       (("stt", "compression_ratio_threshold"), "voice.stt.compression_ratio_threshold")):
         bad = copy.deepcopy(block)
         node = bad
         for k in path[:-1]:
@@ -150,6 +151,48 @@ def test_the_wav_the_service_answers_with_and_the_decoder_bounds():
         serve.decode_audio(b"", 30)
     with pytest.raises(serve.VoiceError):
         serve.decode_audio(b"this is not audio", 30)
+
+
+def test_a_transcription_that_repeats_itself_is_written_again_without_the_vocabulary_then_dropped():
+    """USER 2026-11-24: "a veces cuando hablo en manos libres aparece ese error de stac stac stac" — on the
+    recording traced that day the recogniser looped on "STAC, " up to its token bound with the vocabulary, and
+    wrote "Thank you." without it (voice/repetition.py)."""
+    from voice import repetition
+    looped = ("STAC, " * 67)[:400]                          # what was written: 400 characters
+    threshold = voice_config.load()["stt"]["compression_ratio_threshold"]
+    assert threshold == 2.4                                   # the vendor's (openai-whisper, transcribe())
+    assert repetition.compression_ratio(looped) > threshold
+    for said in ("STAC, open, grupo electrógeno.", "STAC describe the scene.", "STAC, STAC, show me the window.",
+                 "STAC rotate the scene 55 degrees.", "Show me the column.", "STAC",
+                 "Hey Stac Build, cuántas puertas hay en el segundo piso y cuál es la más ancha de todas, "
+                 "medida de jamba a jamba, sin contar las de los armarios ni las ventanas del pasillo."):
+        assert repetition.compression_ratio(said) <= threshold, said
+    calls = []
+
+    def recogniser(loops_with, loops_without):
+        def decode(with_vocabulary):
+            calls.append(with_vocabulary)
+            if with_vocabulary:
+                return (looped, -0.05) if loops_with else ("STAC describe the scene.", -0.2)
+            return (looped, -0.05) if loops_without else ("Thank you.", -0.9)
+        return decode
+
+    # the traced case: looped with the vocabulary, written again without it
+    r = repetition.without_loops(recogniser(True, False), True, threshold)
+    assert calls == [True, False] and r["text"] == "Thank you." and r["mean_logprob"] == -0.9
+    assert r["retried_without_vocabulary"] and not r["repetitive"]
+    # looped both ways: nothing is written, nothing is acted on
+    calls.clear()
+    r = repetition.without_loops(recogniser(True, True), True, threshold)
+    assert calls == [True, False] and r["text"] == "" and r["repetitive"] and r["mean_logprob"] == 0.0
+    # no vocabulary to take away: dropped at once
+    calls.clear()
+    r = repetition.without_loops(recogniser(False, True), False, threshold)
+    assert calls == [False] and r["text"] == "" and r["repetitive"] and not r["retried_without_vocabulary"]
+    # what does not repeat itself is decoded ONCE, as before
+    calls.clear()
+    r = repetition.without_loops(recogniser(False, False), True, threshold)
+    assert calls == [True] and r["text"] == "STAC describe the scene." and not r["retried_without_vocabulary"]
 
 
 @pytest.mark.parametrize("heard, addressed, command", [

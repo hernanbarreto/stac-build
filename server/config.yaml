@@ -865,6 +865,9 @@ voice:
     max_new_tokens: 200        # BOUND (work): the tokens of one transcription
     no_speech_threshold: 0.6   # VENDOR DEFAULT (Whisper): with logprob_threshold, silence is not transcribed
     logprob_threshold: -1.0    # VENDOR DEFAULT (Whisper)
+    compression_ratio_threshold: 2.4   # VENDOR DEFAULT (Whisper's transcribe()): a transcription whose text compresses
+                               # more than this repeats itself ("STAC, STAC, STAC, …" on a weak copy of an utterance,
+                               # 2026-11-24) — written again without the vocabulary, then dropped (voice/repetition.py)
     prompt_max_labels: 60      # BOUND (context): the scene's labels given to the recogniser as vocabulary (with the
                                # system's name), the most frequent first — Whisper's prompt holds ~220 tokens
     vad_threshold: 0.5         # VENDOR DEFAULT (Silero VAD, MIT): is there speech at all — asked BEFORE the
