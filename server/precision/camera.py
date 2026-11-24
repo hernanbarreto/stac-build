@@ -644,23 +644,36 @@ def find_source_video(session_dir: os.PathLike) -> Optional[Path]:
     return sorted(pref or cands)[0]
 
 
-def video_size(video_path: os.PathLike) -> Tuple[int, int]:
-    """(width, height) of the decoded frames of a video as cv2 delivers them
-    (rotation metadata applied, the same decoder the extractor uses)."""
+QUARTER_TURNS = ("ROTATE_90_CLOCKWISE", "ROTATE_90_COUNTERCLOCKWISE")
+
+
+def video_decode(video_path: os.PathLike) -> Tuple[int, int, float]:
+    """(width, height, rotation) of a video decoded as the frame extractor decodes it
+    (intake.frames_manifest.extract_video): OpenCV's FFMPEG backend with the decoder's own
+    rotation OFF — (width, height) is the CODED frame — and the rotation its container carries,
+    in degrees (0 when none)."""
     cv2 = _cv2()
-    cap = cv2.VideoCapture(str(video_path))
+    from intake import frames_manifest as FM
+    cap = cv2.VideoCapture(str(video_path), cv2.CAP_FFMPEG)
     try:
+        if not cap.isOpened():
+            raise CameraError(f"OpenCV's FFMPEG backend cannot open {video_path}")
+        if not cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, FM.ORIENTATION_AUTO) or \
+                int(cap.get(cv2.CAP_PROP_ORIENTATION_AUTO)) != FM.ORIENTATION_AUTO:
+            raise CameraError(f"the decoder refuses the extraction's orientation policy "
+                              f"CAP_PROP_ORIENTATION_AUTO={FM.ORIENTATION_AUTO} on {video_path}")
+        meta = float(cap.get(cv2.CAP_PROP_ORIENTATION_META))
         ok, frame = cap.read()
         if ok and frame is not None:
             h, w = frame.shape[:2]
-            return int(w), int(h)
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        else:
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     finally:
         cap.release()
     if w <= 0 or h <= 0:
         raise CameraError(f"cannot read the frame size of {video_path}")
-    return w, h
+    return int(w), int(h), meta
 
 
 def frame_sizes(frames_dir: os.PathLike, pattern: str = "*.jpg") -> Dict[Tuple[int, int], int]:
@@ -693,20 +706,37 @@ def verify_native_frames(session_dir: os.PathLike, frames_subdir: str = "frames"
     (fw, fh), = hist.keys()
     report.update({"native_w": fw, "native_h": fh})
     if video is not None:
-        vw, vh = video_size(video)
-        # the extraction's declared long-side cap (USER 2026-11-09, "a 1024 todo"; the frames manifest's decoder
-        # record): the frames are the video's decode reduced to it by the one computation, never anything else
+        vw, vh, meta = video_decode(video)
+        # what the extraction did, from the frames manifest's decoder record: the declared long-side cap (USER
+        # 2026-11-09, "a 1024 todo") and the turn it applied. The extractor turns a video's frames upright when, and
+        # only when, its container carries a rotation, then reduces them to the cap (frames_manifest.extract_video).
+        # A manifest that records no turn — frames extracted before 2026-11-14 (bufferStop), or a capture kept as
+        # coded — holds the coded frames.
         from intake import frames_manifest as FM
-        cap = 0
+        cap, turn = 0, None
         mp = FM.manifest_path(root)
         if mp.exists():
-            cap = int(((json.loads(mp.read_text()).get("decoder") or {}).get("max_long_side")) or 0)
-        ew, eh = FM.reduced_size(vw, vh, cap)
-        report.update({"video_w": vw, "video_h": vh, "extraction_max_long_side": cap,
-                       "expected_w": ew, "expected_h": eh})
+            dec = json.loads(mp.read_text()).get("decoder") or {}
+            cap = int(dec.get("max_long_side") or 0)
+            turn = dec.get("orientation_applied") or None
+        report.update({"video_w": vw, "video_h": vh, "video_rotation_deg": meta,
+                       "extraction_max_long_side": cap, "extraction_turn": turn})
+        if turn is not None:
+            try:
+                needed = FM.upright_rotation(meta)
+            except FM.FramesManifestError as e:
+                raise NativeResolutionError(f"{video.name}: {e}") from e
+            if turn != needed:
+                raise NativeResolutionError(
+                    f"the frames were turned {turn} but {video.name} carries a rotation of {meta:g}°, "
+                    f"which calls for {needed or 'no turn'}: re-extract them")
+        tw, th = (vh, vw) if turn in QUARTER_TURNS else (vw, vh)
+        ew, eh = FM.reduced_size(tw, th, cap)
+        report.update({"expected_w": ew, "expected_h": eh})
         if (fw, fh) != (ew, eh):
             raise NativeResolutionError(
                 f"frames are {fw}x{fh} but {video.name} decodes to {vw}x{vh}"
+                + (f", {tw}x{th} turned {turn}" if turn else "")
                 + (f", {ew}x{eh} under the extraction's declared cap of {cap} px" if cap else "")
                 + ": something rescaled the frames — re-extract them")
     return report

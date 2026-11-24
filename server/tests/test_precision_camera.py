@@ -3,6 +3,8 @@ distortion round-trips; the session camera from omega's per-frame K; the
 native-resolution guard."""
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -276,6 +278,66 @@ def test_verify_native_frames(tmp_path):
     with pytest.raises(C.CameraError, match="does not match"):
         C.verify_omega_grid(C.omega_grid_for(464, 832, "balanced", 512), (384, 688))
     C.verify_omega_grid(C.omega_grid_for(464, 832, "balanced", 512), (688, 384))
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs the ffmpeg CLI to tag rotation")
+@pytest.mark.parametrize("tag", [0, 90, 180, 270])
+def test_verify_native_frames_follows_the_extractions_turn(tmp_path, tag):
+    """USER 2026-11-24 (grupo_electrogeno, a video recorded with the phone upright: F0 refused its
+    upright frames): "debe detectar siempre si necesita rotar o no, no debe rotar por rotar". The
+    frames the extractor writes — turned upright when, and only when, the video carries a rotation,
+    then reduced to the cap — are what F0 expects; a turn the video does not call for is refused; a
+    manifest that records no turn (bufferStop's frames, stored as coded) is held to the coded frame."""
+    cv2 = pytest.importorskip("cv2")
+    from intake import frames_manifest as FM
+    W, H = 64, 48
+    src = tmp_path / "v.mp4"
+    w = cv2.VideoWriter(str(src), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (W, H))
+    for k in range(3):
+        frame = np.zeros((H, W, 3), np.uint8)
+        frame[: H // 2, : W // 3] = (40 * k + 10, 200, 30)
+        w.write(frame)
+    w.release()
+
+    def scan(name, upright=True):
+        s = tmp_path / name
+        (s / "frames").mkdir(parents=True)
+        video = s / "source_video.mp4"
+        if tag:
+            r = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-display_rotation", str(tag), "-i",
+                                str(src), "-c", "copy", str(video)], capture_output=True, timeout=60)
+            if r.returncode != 0:
+                pytest.skip(f"this ffmpeg cannot tag a display rotation: {r.stderr[-200:]!r}")
+        else:
+            shutil.copy(src, video)
+        doc = FM.extract_video(video, s, max_long_side=32, upright=upright, log=lambda *a: None)
+        return s, doc["decoder"]
+
+    s, dec = scan("upright")
+    rep = C.verify_native_frames(s)
+    quarter = dec["orientation_applied"] in C.QUARTER_TURNS
+    assert (rep["video_w"], rep["video_h"]) == (W, H)                       # the coded frame
+    assert rep["extraction_turn"] == dec["orientation_applied"] == FM.upright_rotation(rep["video_rotation_deg"])
+    assert (tag == 0) == (dec["orientation_applied"] is None)                # turned only when the video asks
+    assert (rep["native_w"], rep["native_h"]) == ((24, 32) if quarter else (32, 24))
+
+    mp = FM.manifest_path(s)
+    doc = json.loads(mp.read_text())
+    if tag == 0:                                                             # a turn the video does not ask for
+        doc["decoder"]["orientation_applied"] = "ROTATE_90_CLOCKWISE"
+        mp.write_text(json.dumps(doc))
+        with pytest.raises(C.NativeResolutionError, match="calls for no turn"):
+            C.verify_native_frames(s)
+    else:                                                                    # the turn left out of the record
+        doc["decoder"]["orientation_applied"] = None
+        mp.write_text(json.dumps(doc))
+        if quarter:
+            with pytest.raises(C.NativeResolutionError, match="rescaled"):
+                C.verify_native_frames(s)
+        coded, dec_c = scan("coded", upright=False)                          # frames stored as coded
+        assert dec_c["orientation_applied"] is None
+        rep_c = C.verify_native_frames(coded)
+        assert (rep_c["native_w"], rep_c["native_h"], rep_c["extraction_turn"]) == (32, 24, None)
 
 
 def _fake_session(tmp_path, nw=464, nh=832, mode="balanced", res=512, stray=False, masks=True):
