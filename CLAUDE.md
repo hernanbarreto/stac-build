@@ -1056,6 +1056,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     elements, 1,213 textured face sets, 68 images (226 MB), a 482 MB IFC in 178 s; drawn from the IFC alone, the
     enclosure's "Electra Molins" logo reads right. A simplified mesh (keep < 1) carries no texture. HIS EYE in Bonsai:
     pending.
+  · THE VIEWER'S IFCs REPAINTED (4edc3da; USER 2026-11-25: "Generale el ifc con el color dominante … por defecto apagada.
+    Generala para las sesiones que tengan ifc generado y avisame asi las veo"): each element's dominant colour only (no
+    texture: web-ifc reads none) — from the texture on a whole mesh, from its object's cloud points on a light one.
+    Regenerated in place, same names: bufferStop 271 elements (texture), grupo_electrogeno 336 (texture), pccr 2026-08-31
+    1209 (the 10 % one, from the cloud — the same 1209 elements its stored comparison names). Off by default in the BIM
+    panel (865a123). HIS EYE: pending.
   · NOT TOUCHED: init_pod.sh's uncommitted line (his own SSH command, with his PC's path and an old pod address —
     the repo is public).
 - ⭐ 2026-11-23 — HIS DECISION SUPERSEDES THE "RESUME HERE" MARKS BELOW: the validated pipeline stays, with the three
