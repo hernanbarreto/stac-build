@@ -1605,6 +1605,7 @@ function App() {
   const [geoError, setGeoError] = useState<string | null>(null)
   const [locating, setLocating] = useState<string | null>(null)       // the work whose Location window is open
   const [globeFocus, setGlobeFocus] = useState<{ sid: string; n: number } | null>(null)
+  const [globeIfc, setGlobeIfc] = useState<string[]>([])               // the works whose IFC stands on the globe
   const globeOpen = layout.state.leftTab === 'globe'
   const refreshGeo = useCallback(async () => {
     setGeoLoading(true)
@@ -3618,7 +3619,8 @@ function App() {
             {globeOpen && (
               <GlobePanel projects={geoProjects} loading={geoLoading} error={geoError} placing={locating} canEdit={!!token}
                 onShow={flyToWork} onOpen={openFromGlobe} onRefresh={() => void refreshGeo()}
-                onPlace={setLocating} onRemove={sid => void removePlace(sid)} />
+                onPlace={setLocating} onRemove={sid => void removePlace(sid)} ifcOn={globeIfc}
+                onToggleIfc={sid => { setGlobeIfc(l => (l.includes(sid) ? l.filter(x => x !== sid) : [...l, sid])); flyToWork(sid) }} />
             )}
             {layout.state.leftTab === 'tickets' && (
               <TicketsPanel sessionId={activeSession} scanKey={activeScanTab} tickets={tickets} counts={ticketCounts}
@@ -3697,7 +3699,7 @@ function App() {
           {globeOpen && (
             // THE GLOBE over the viewer while its section is open; the viewer underneath keeps its state
             <Suspense fallback={<div className="stac-globe-fallback">{t('globe.loading')}</div>}>
-              <GlobeView projects={geoProjects} focus={globeFocus} onOpen={openFromGlobe} />
+              <GlobeView projects={geoProjects} focus={globeFocus} onOpen={openFromGlobe} ifcOn={globeIfc} />
             </Suspense>
           )}
           {locating && (

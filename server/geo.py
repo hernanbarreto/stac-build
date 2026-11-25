@@ -229,3 +229,62 @@ def plan_raster(output_dir: Path, *, max_points: int = 8_000_000, max_side: int 
     Image.fromarray(img.reshape(h, w, 4), "RGBA").save(buf, format="PNG", optimize=False)
     return {"png": buf.getvalue(), "cell_m": cell, "x_min": x0, "x_max": x0 + w * cell, "y_min": y1 - h * cell,
             "y_max": y1, "width": w, "height": h, "points_used": int(len(X)), "points": int(n)}
+
+
+# ── the cloud on the globe, when the work has no mesh: a few points of it as one glTF of points ────────────────────
+def cloud_points_glb(output_dir: Path, *, max_points: int = 1_000_000) -> Dict[str, Any]:
+    """At most ``max_points`` points of the published cloud (every k-th: the same ones at every call), in the display
+    frame (its floor adjustment applied) and glTF's own axes (Y up), with their colours, as ONE glTF of POINTS (a
+    3D Tiles 1.1 content: the viewer turns glTF's Y up to its Z up). Returns {glb, box (the 3D Tiles box in that Z-up
+    frame: X = x, Y = -z, Z = y), points_used, points}."""
+    import struct
+    import numpy as np
+    cloud = Path(output_dir) / "cleaned_cloud.ply"
+    if not cloud.is_file():
+        raise GeoError(f"{cloud}: no published cloud")
+    v = _ply_points(cloud)
+    n = len(v)
+    step = max(1, -(-n // max_points))
+    pts = np.stack([np.asarray(v[c][::step], np.float64) for c in ("x", "y", "z")], axis=1)
+    rgb = np.stack([np.asarray(v[c][::step], np.uint8) for c in ("red", "green", "blue")], axis=1)
+    ft = Path(output_dir) / "floor_transform.npz"
+    if ft.is_file():
+        d = np.load(ft)
+        pts = float(d["s"]) * pts @ np.asarray(d["R"], np.float64).T + np.asarray(d["t"], np.float64)
+    pos = pts.astype("<f4")
+    col = np.concatenate([rgb, np.full((len(rgb), 1), 255, np.uint8)], axis=1)       # RGBA: 4-byte aligned
+    blob = pos.tobytes() + col.tobytes()
+    gltf = {
+        "asset": {"version": "2.0", "generator": "STAC geo.cloud_points_glb"},
+        "extensionsUsed": ["KHR_materials_unlit"],
+        "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "COLOR_0": 1}, "mode": 0, "material": 0}]}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 1], "metallicFactor": 0, "roughnessFactor": 1},
+                       "extensions": {"KHR_materials_unlit": {}}}],
+        "buffers": [{"byteLength": len(blob)}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": pos.nbytes, "target": 34962},
+                        {"buffer": 0, "byteOffset": pos.nbytes, "byteLength": col.nbytes, "target": 34962}],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": len(pos), "type": "VEC3",
+                       "min": pos.min(axis=0).astype(float).tolist(), "max": pos.max(axis=0).astype(float).tolist()},
+                      {"bufferView": 1, "componentType": 5121, "normalized": True, "count": len(col), "type": "VEC4"}],
+    }
+    js = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    js += b" " * (-len(js) % 4)
+    blob += b"\0" * (-len(blob) % 4)
+    glb = (struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(js) + 8 + len(blob))
+           + struct.pack("<I4s", len(js), b"JSON") + js + struct.pack("<I4s", len(blob), b"BIN\0") + blob)
+    X, Y, Z = pts[:, 0], -pts[:, 2], pts[:, 1]
+    lo = np.array([X.min(), Y.min(), Z.min()]); hi = np.array([X.max(), Y.max(), Z.max()])
+    c, h = (lo + hi) / 2, np.maximum((hi - lo) / 2, 0.01)
+    box = [float(c[0]), float(c[1]), float(c[2]), float(h[0]), 0.0, 0.0, 0.0, float(h[1]), 0.0, 0.0, 0.0, float(h[2])]
+    return {"glb": glb, "box": box, "points_used": int(len(pos)), "points": int(n)}
+
+
+def floor_adjustment(output_dir: Path) -> Optional[Dict[str, Any]]:
+    """The scan's display adjustment (floor_transform.npz: p' = s R p + t, glTF's Y-up frame), or None."""
+    import numpy as np
+    ft = Path(output_dir) / "floor_transform.npz"
+    if not ft.is_file():
+        return None
+    d = np.load(ft)
+    return {"R": np.asarray(d["R"], float).tolist(), "s": float(d["s"]), "t": np.asarray(d["t"], float).tolist()}

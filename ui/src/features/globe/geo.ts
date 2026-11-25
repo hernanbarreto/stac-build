@@ -25,6 +25,8 @@ export interface GeoProject {
   scans: string[]
   reference: string | null
   georef: Georef | null
+  /** the project's IFC files (ifcs/) */
+  ifcs: string[]
 }
 
 export interface GeoPlacement {

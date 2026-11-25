@@ -72,7 +72,10 @@ def _project_row(d: Path) -> Dict[str, Any]:
         georef = None
     # its name is the session's, the folder's, as everywhere in the app (a project.json's own "name" can be an old
     # one: zaragoza's says "test5")
-    return {"session_id": d.name, "name": d.name, "scans": scans, "reference": reference, "georef": georef}
+    ifc_dir = d / "ifcs"
+    ifcs = sorted(p.name for p in ifc_dir.glob("*.ifc")) if ifc_dir.is_dir() else []
+    return {"session_id": d.name, "name": d.name, "scans": scans, "reference": reference, "georef": georef,
+            "ifcs": ifcs}
 
 
 @router.get("")
@@ -171,3 +174,65 @@ def geo_plan(session_id: str, scan: Optional[str] = None):
             _PLANS.pop(next(iter(_PLANS)))
         _PLANS[stamp] = plan
     return {"ok": True, "scan": key, **plan}
+
+
+@router.get("/{session_id}/content")
+def geo_content(session_id: str, scan: Optional[str] = None):
+    """What the globe can show of a work, in its scan: the GenRecon mesh's tileset when it has one, else the cloud's
+    (a few points, geo.cloud_points_glb); the scan's floor adjustment. URLs name their scan (stac_scan / scan)."""
+    from urllib.parse import quote
+    key = _scan_of(session_id, scan)
+    out = Path(_scan_ctx(session_id, key).output_dir)
+    sid = quote(session_id, safe="")
+    stac_scan = quote(f"{session_id}|{key}", safe="")
+    mesh = None
+    tsdf = out / "tsdf"
+    folders = sorted(p.parent.parent.name for p in tsdf.glob("*/tiles/tileset.json")) if tsdf.is_dir() else []
+    folder = "genrecon_photo" if "genrecon_photo" in folders else (folders[0] if folders else None)
+    if folder:
+        mesh = f"/api/segmentation/tsdf/tiles/{sid}/{quote(folder, safe='')}/tileset.json?stac_scan={stac_scan}"
+    cloud = (f"/api/geo/{sid}/cloud/tileset.json?scan={quote(key, safe='')}"
+             if (out / "cleaned_cloud.ply").is_file() else None)
+    # the project's IFC models, as the BIM panel loads them (the page turns one into glTF for the globe on demand)
+    ifcs = [{"name": n, "url": f"/api/sessions/{sid}/bim/{quote(n, safe='')}"}
+            for n in _project_row(_project_dir(session_id))["ifcs"]]
+    return {"ok": True, "scan": key, "georef": G.load(_project_dir(session_id)), "floor": G.floor_adjustment(out),
+            "mesh_tileset": mesh, "mesh_folder": folder, "cloud_tileset": cloud, "ifcs": ifcs}
+
+
+_CLOUDS: Dict[tuple, Dict[str, Any]] = {}
+
+
+def _cloud(session_id: str, scan: Optional[str]) -> Dict[str, Any]:
+    key = _scan_of(session_id, scan)
+    out = Path(_scan_ctx(session_id, key).output_dir)
+    cloud, ft = out / "cleaned_cloud.ply", out / "floor_transform.npz"
+    if not cloud.is_file():
+        raise HTTPException(404, f"{session_id} {key}: no published cloud")
+    st = cloud.stat()
+    stamp = (str(cloud), st.st_size, st.st_mtime_ns, ft.stat().st_mtime_ns if ft.is_file() else 0)
+    got = _CLOUDS.get(stamp)
+    if got is None:
+        try:
+            got = {**G.cloud_points_glb(out), "scan": key}
+        except G.GeoError as e:
+            raise HTTPException(500, str(e)) from e
+        if len(_CLOUDS) >= 2:                                 # ~15 MB each
+            _CLOUDS.pop(next(iter(_CLOUDS)))
+        _CLOUDS[stamp] = got
+    return got
+
+
+@router.get("/{session_id}/cloud/tileset.json")
+def geo_cloud_tileset(session_id: str, scan: Optional[str] = None):
+    from urllib.parse import quote
+    c = _cloud(session_id, scan)
+    return {"asset": {"version": "1.1", "generator": "STAC geo_api"}, "geometricError": 0,
+            "root": {"boundingVolume": {"box": c["box"]}, "geometricError": 0, "refine": "ADD",
+                     "content": {"uri": f"cloud.glb?scan={quote(c['scan'], safe='')}"}}}
+
+
+@router.get("/{session_id}/cloud/cloud.glb")
+def geo_cloud_glb(session_id: str, scan: Optional[str] = None):
+    from fastapi.responses import Response
+    return Response(_cloud(session_id, scan)["glb"], media_type="model/gltf-binary")

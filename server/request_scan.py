@@ -54,7 +54,7 @@ def scan_for(session_id: str) -> Optional[str]:
 
 
 class RequestScanMiddleware:
-    """Pure ASGI (the route runs in the same task, so it sees what is set here): the header, else the query."""
+    """Pure ASGI (the route runs in the same task, so it sees what is set here): the query, else the header."""
 
     def __init__(self, app):
         self.app = app
@@ -62,14 +62,15 @@ class RequestScanMiddleware:
     async def __call__(self, scope, receive, send):
         if scope.get("type") not in ("http", "websocket"):
             return await self.app(scope, receive, send)
-        said = None
-        for k, v in scope.get("headers") or []:
-            if k == HEADER:
-                said = parse(v.decode("latin-1"))
-                break
+        # a URL that names its scan (stac_scan=) is the more specific word: it is taken before the page's header
+        # (the globe asks for a placed work's own scan while the page may be on another scan of that project)
+        q = parse_qs((scope.get("query_string") or b"").decode("latin-1")).get(QUERY)
+        said = parse(q[0]) if q else None
         if said is None:
-            q = parse_qs((scope.get("query_string") or b"").decode("latin-1")).get(QUERY)
-            said = parse(q[0]) if q else None
+            for k, v in scope.get("headers") or []:
+                if k == HEADER:
+                    said = parse(v.decode("latin-1"))
+                    break
         if said is None:
             return await self.app(scope, receive, send)
         token = set_scan(*said)

@@ -163,3 +163,70 @@ def test_the_plan_and_the_videos_place_through_the_routes(tmp_path):
     assert client.get("/api/geo/grupo_electrogeno/plan").json() == plan           # the same, from memory
     video = client.get("/api/geo/grupo_electrogeno/video").json()
     assert video == {"ok": True, "scan": "2026-11-24/default", "video": None, "location": None}
+
+
+def _glb(data: bytes):
+    import json as _json
+    import struct
+    magic, version, length = struct.unpack("<4sII", data[:12])
+    jl, jt = struct.unpack("<I4s", data[12:20])
+    doc = _json.loads(data[20:20 + jl])
+    bl, bt = struct.unpack("<I4s", data[20 + jl:28 + jl])
+    return (magic, version, length, jt, bt), doc, data[28 + jl:28 + jl + bl]
+
+
+def test_the_cloud_goes_on_the_globe_as_one_gltf_of_points_with_its_colours(tmp_path):
+    import numpy as np
+    out = tmp_path / "output"
+    out.mkdir()
+    _ply(out / "cleaned_cloud.ply", [(0.0, 0.0, 0.0, 255, 0, 0), (2.0, 3.0, -4.0, 0, 255, 0), (1.0, 1.0, -1.0, 0, 0, 255)])
+    r = G.cloud_points_glb(out)
+    (magic, version, length, jt, bt), doc, blob = _glb(r["glb"])
+    assert (magic, version, length, jt, bt) == (b"glTF", 2, len(r["glb"]), b"JSON", b"BIN\0")
+    prim = doc["meshes"][0]["primitives"][0]
+    assert prim["mode"] == 0 and r["points"] == r["points_used"] == 3                       # POINTS
+    pos = np.frombuffer(blob[:36], "<f4").reshape(3, 3)
+    col = np.frombuffer(blob[36:48], np.uint8).reshape(3, 4)
+    assert pos.tolist() == [[0, 0, 0], [2, 3, -4], [1, 1, -1]]                               # glTF's own axes, Y up
+    assert col[:, :3].tolist() == [[255, 0, 0], [0, 255, 0], [0, 0, 255]] and (col[:, 3] == 255).all()
+    # the 3D Tiles box is in the Z-up frame the viewer turns glTF into: X = x, Y = -z, Z = y
+    assert r["box"][:3] == [1.0, 2.0, 1.5] and [r["box"][i] for i in (3, 7, 11)] == [1.0, 2.0, 1.5]
+    assert G.floor_adjustment(out) is None
+    np.savez(out / "floor_transform.npz", R=np.eye(3), s=np.float64(2.0), t=np.array([0.0, 1.0, 0.0]))
+    assert G.floor_adjustment(out) == {"R": np.eye(3).tolist(), "s": 2.0, "t": [0.0, 1.0, 0.0]}
+    _, _, blob2 = _glb(G.cloud_points_glb(out)["glb"])
+    assert np.frombuffer(blob2[:36], "<f4").reshape(3, 3)[1].tolist() == [4, 7, -8]           # the adjustment applied
+
+
+def test_what_the_globe_shows_of_a_work_and_its_cloud_through_the_routes(tmp_path):
+    import types
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import geo_api
+
+    d = _project(tmp_path, "zaragoza", days=("2026-06-03",))
+    src = d / "scans" / "2026-06-03" / "src_default"
+    _ply(src / "output" / "cleaned_cloud.ply", [(0.0, 0.0, 0.0, 1, 2, 3), (1.0, 2.0, -3.0, 4, 5, 6)])
+    ctx = types.SimpleNamespace(output_dir=src / "output", source_dir=src, session_dir=src)
+    geo_api.configure(resolve_ctx=lambda *a: ctx, projects_dir=lambda: tmp_path)
+    app = FastAPI()
+    app.include_router(geo_api.router)
+    client = TestClient(app)
+    c = client.get("/api/geo/zaragoza/content").json()
+    assert c["mesh_tileset"] is None and c["floor"] is None and c["georef"] is None and c["ifcs"] == []
+    (d / "ifcs").mkdir()
+    (d / "ifcs" / "zaragoza elements.ifc").write_text("ISO-10303-21;")
+    assert client.get("/api/geo/zaragoza/content").json()["ifcs"] == [
+        {"name": "zaragoza elements.ifc", "url": "/api/sessions/zaragoza/bim/zaragoza%20elements.ifc"}]
+    assert client.get("/api/geo").json()["projects"][0]["ifcs"] == ["zaragoza elements.ifc"]
+    assert c["cloud_tileset"] == "/api/geo/zaragoza/cloud/tileset.json?scan=2026-06-03%2Fdefault"
+    (src / "output" / "tsdf" / "genrecon_photo" / "tiles").mkdir(parents=True)
+    (src / "output" / "tsdf" / "genrecon_photo" / "tiles" / "tileset.json").write_text("{}")
+    c = client.get("/api/geo/zaragoza/content").json()
+    assert c["mesh_folder"] == "genrecon_photo" and c["mesh_tileset"] == (
+        "/api/segmentation/tsdf/tiles/zaragoza/genrecon_photo/tileset.json?stac_scan=zaragoza%7C2026-06-03%2Fdefault")
+    ts = client.get("/api/geo/zaragoza/cloud/tileset.json").json()
+    assert ts["asset"]["version"] == "1.1" and ts["root"]["content"]["uri"] == "cloud.glb?scan=2026-06-03%2Fdefault"
+    glb = client.get("/api/geo/zaragoza/cloud/cloud.glb")
+    assert glb.headers["content-type"] == "model/gltf-binary" and glb.content[:4] == b"glTF"

@@ -74,8 +74,11 @@ def test_the_header_or_the_query_says_it_and_the_routes_threads_see_it():
         b = client.get("/where", headers={"X-STAC-Scan": "pccr|2026-08-31%2Fdefault"}).json()
         img = client.get("/where", params={"stac_scan": "pccr|2026-08-24/default"}).json()
         none = client.get("/where").json()
+        both = client.get("/where", params={"stac_scan": "pccr|2026-08-31/default"},
+                          headers={"X-STAC-Scan": "pccr|2026-08-24%2Fdefault"}).json()
     pool.shutdown()
     assert a == {"here": "2026-08-24/default", "thread": "2026-08-24/default", "other": None}
     assert b["here"] == b["thread"] == "2026-08-31/default"                    # two devices, two scans
     assert img["here"] == "2026-08-24/default"                                 # an <img> says it in its query
     assert none == {"here": None, "thread": None, "other": None}               # no word of it: as before
+    assert both["here"] == "2026-08-31/default"                                # the URL's own scan first

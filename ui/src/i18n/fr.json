@@ -1635,7 +1635,10 @@
     "candidate": "« {name} » à {place}",
     "source_manual": "à la main",
     "source_video": "GPS de la vidéo",
-    "source_points": "par points connus"
+    "source_points": "par points connus",
+    "workFailed": "{name} n'a pas pu être affiché sur le globe : {detail}",
+    "ifcOn": "IFC sur le globe",
+    "ifcLoading": "Conversion de l'IFC de {name} pour le globe…"
   },
   "location": {
     "title": "Emplacement de {name}",
