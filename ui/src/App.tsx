@@ -387,6 +387,14 @@ function App() {
   const [serverAlive, setServerAlive] = useState(false)
 
   const [bimModels, setBimModels] = useState<IFCLoadResult[]>([])
+  // THE PROJECT'S IFC MODELS, listed at a session's open and NOT loaded (USER 2026-11-24: "cuando se carga una sesión
+  // que tenga bim por defecto no aparezca visible, no lo cargue, como con la malla, que solo se vea si el usuario lo
+  // elige, para que no demore la carga, solo se carga la nube al abrir la sesión"): a tick in the BIM panel loads one,
+  // and hides or shows it once loaded. The comparison is the server's: it needs the file, not the page's model.
+  const [bimAvailable, setBimAvailable] = useState<{ name: string; url: string }[]>([])
+  const [bimLoading, setBimLoading] = useState<string[]>([])
+  const [bimHidden, setBimHidden] = useState<string[]>([])
+  const hasBim = bimModels.length > 0 || bimAvailable.length > 0
   const [vlmStatus, setVlmStatus] = useState<'up' | 'loading' | 'busy' | 'down' | null>(null)
   // THE POINT SIZE OF A SCAN WITH NO STORED PREFERENCE — HIS (USER 2026-11-19: "por defecto en 0.15"; it was 5, the
   // slider's maximum: "me deja los puntos el 5"). A scan he has set keeps his own value (per user, per scan).
@@ -664,7 +672,7 @@ function App() {
       setActiveSession(null)
       setSelectedSession(null)
       setSegments([])
-      setBimModels([])
+      setBimModels([]); setBimAvailable([]); setBimHidden([])
       setPointCount(0)
       setCloudEverShown(false)
       setPipelineRunning(null)
@@ -932,7 +940,7 @@ function App() {
     viewportRef.current?.sendCommand({ type: 'cleared' })
     // Clear React state
     setSegments([])
-    setBimModels([])
+    setBimModels([]); setBimAvailable([]); setBimHidden([])
     setPointCount(0)
     setCloudEverShown(false)
     setStatusMessage('')
@@ -1025,9 +1033,10 @@ function App() {
   const prevBimCount = useRef(0)
   useEffect(() => {
     const wasZero = prevBimCount.current === 0
-    prevBimCount.current = bimModels.length
+    const known = Math.max(bimModels.length, bimAvailable.length)   // listed or loaded
+    prevBimCount.current = known
     // Only trigger when transitioning from 0  N models (fresh session load)
-    if (!wasZero || bimModels.length === 0 || !activeSession) return
+    if (!wasZero || known === 0 || !activeSession) return
     const sid = activeSession, scan = activeScanTab ?? null
     // a comparison of this scan still running (launched before a reload): follow it to its sheet
     // (asked by the scan's key and with none: a run launched before the tabs knew the scan named none)
@@ -1057,7 +1066,7 @@ function App() {
         setSessionLoading(null)
       })
       .catch(() => { setSessionLoading(null) })
-  }, [bimModels, activeSession, followComparison, loadDeviationReport])
+  }, [bimModels, bimAvailable, activeSession, followComparison, loadDeviationReport])
 
   // the overlay text the tasks poll put up, so it takes down exactly that one
   const taskOverlayRef = useRef<string | null>(null)
@@ -1431,7 +1440,7 @@ function App() {
     viewportRef.current?.sendCommand({ type: 'cleared' })
     setActiveSession(null)
     setSegments([])
-    setBimModels([])
+    setBimModels([]); setBimAvailable([]); setBimHidden([])
     setPointCount(0)
     setCloudEverShown(false)
     setStatusMessage('')
@@ -1915,7 +1924,7 @@ function App() {
     setSelectedSession(null)
     setSessionLoading(null)
     setSegments([])
-    setBimModels([])
+    setBimModels([]); setBimAvailable([]); setBimHidden([])
     setPointCount(0)
     setCloudEverShown(false)
     setActiveTool('navigate')
@@ -2437,13 +2446,39 @@ function App() {
   }, [interactiveSessionId, reloadSegments, refreshUnsegmentedCount, refreshFloorLevel, report, t])
 
   /** delete one BIM model from the server; `confirmed`: already confirmed (STAC's spoken confirmation) */
+  /** a tick in the BIM panel: a model listed and not loaded is loaded (as an uploaded one is) and shown; a loaded one
+   *  is hidden or shown again — it stays in memory, a second tick is instant */
+  const toggleBimModel = useCallback(async (name: string, on: boolean) => {
+    const loaded = bimModels.find(m => m.filename === name)
+    if (loaded) {
+      loaded.group.visible = on
+      setBimHidden(h => (on ? h.filter(n => n !== name) : [...h.filter(n => n !== name), name]))
+      return
+    }
+    const item = bimAvailable.find(m => m.name === name)
+    if (!on || !item || bimLoading.includes(name)) return
+    setBimLoading(l => [...l, name])
+    setStatusMessage(t('bim.uploadedLoading', { name }))
+    try {
+      const { loadIFC } = await import('./components/IFCLoader')
+      const result = await loadIFC(item.url, item.name)
+      viewportRef.current?.addBIMGroup(result.group)
+      setBimModels(prev => [...prev.filter(m => m.filename !== name), result])
+      setBimHidden(h => h.filter(n => n !== name))
+      report(t('bim.loaded', { name, n: result.group.children.length }), 'ok')
+    } catch (err) {
+      report(t('bim.uploadFailed', { detail: err instanceof Error ? err.message : String(err) }), 'err')
+    } finally {
+      setBimLoading(l => l.filter(n => n !== name))
+    }
+  }, [bimModels, bimAvailable, bimLoading, report, t])
   const deleteIfc = useCallback(async (filename: string, confirmed = false): Promise<boolean> => {
     if (!activeSession || !token) return false
     const ok = confirmed || await confirmDanger(t('bim.deleteMessage', { name: filename }), t('bim.deleteTitle'))
     if (!ok) return false
     try {
       const res = await fetch(`/api/sessions/${activeSession}/bim/${filename}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } })
-      if (res.ok) { report(t('bim.deleted', { name: filename }), 'ok'); viewportRef.current?.removeBIMGroup(filename); setBimModels(prev => prev.filter(m => m.filename !== filename)); connectToServer(); return true }
+      if (res.ok) { report(t('bim.deleted', { name: filename }), 'ok'); viewportRef.current?.removeBIMGroup(filename); setBimModels(prev => prev.filter(m => m.filename !== filename)); setBimAvailable(prev => prev.filter(m => m.name !== filename)); connectToServer(); return true }
       report(t('bim.deleteFailed', { detail: (await res.json()).detail }), 'err')
     } catch (err: any) { report(t('bim.deleteFailed', { detail: err.message }), 'err') }
     return false
@@ -2508,7 +2543,7 @@ function App() {
     commonPoints, commonFit, startCommonMark, otherScans,
     sabanaIsThisScan: !sabanaScan || !activeScanTab || sabanaScan === activeScanTab,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
-    bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
+    bimModels, hasBim, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
     mergeSegments, eraseMarks, hasConfidence, unsegmentedVisible, handlePickVideo, handleSegment, openSegmentationManager,
     resumeDialog, resumeBusy, resumeRun, resumeCancel, runAutosegment, interactiveSessionId,
@@ -2525,7 +2560,7 @@ function App() {
     commonPoints, commonFit, startCommonMark, otherScans,
     sabanaIsThisScan: !sabanaScan || !activeScanTab || sabanaScan === activeScanTab,
     handlePipelineCancel, pipelineRunning, eraseBoxSel, readouts,
-    bimModels, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
+    bimModels, hasBim, sabanaVisible, sabanaLoading, handleGenerateComparison, runComparison, handleToggleSabana,
     deleteSession, deleteSegment, deleteTsdfMesh, runGenrecon, applyFloorLevel,
     mergeSegments, eraseMarks, hasConfidence, unsegmentedVisible, handlePickVideo, handleSegment, openSegmentationManager,
     resumeDialog, resumeBusy, resumeRun, resumeCancel, runAutosegment, interactiveSessionId,
@@ -2603,7 +2638,7 @@ function App() {
     /** the BIM comparison needs a model and a segmentation */
     const comparable = (): Outcome => {
       if (!open()) return noSession
-      return cmd.current.bimModels.length > 0 && cmd.current.segments.length > 0 ? done : { ok: false, reason: 'nothing_to_do' }
+      return cmd.current.hasBim && cmd.current.segments.length > 0 ? done : { ok: false, reason: 'nothing_to_do' }
     }
     const meshBy = (mesh: string): MeshListItem | Outcome => {
       if (!open()) return noSession
@@ -3389,7 +3424,7 @@ function App() {
     { id: 'instances', icon: <Tag aria-hidden />, label: t('instances.title'), badge: segments.length || undefined, active: layout.state.leftTab === 'instances', disabled: !hasSession, onClick: () => layout.toggleLeftTab('instances') },
     { id: 'tickets', icon: <Flag aria-hidden />, label: t('tickets.title'), badge: ticketCounts?.open || undefined, active: layout.state.leftTab === 'tickets', disabled: !hasSession, onClick: () => layout.toggleLeftTab('tickets') },
     { id: 'scans', icon: <Layers aria-hidden />, label: t('scans.title'), badge: projectScans.length || undefined, active: layout.state.leftTab === 'scans', disabled: !hasSession, onClick: () => layout.toggleLeftTab('scans') },
-    { id: 'bim', icon: <Building2 aria-hidden />, label: t('bim.title'), badge: bimModels.length || undefined, active: layout.state.leftTab === 'bim', disabled: !hasSession, onClick: () => layout.toggleLeftTab('bim') },
+    { id: 'bim', icon: <Building2 aria-hidden />, label: t('bim.title'), badge: (bimAvailable.length || bimModels.length) || undefined, active: layout.state.leftTab === 'bim', disabled: !hasSession, onClick: () => layout.toggleLeftTab('bim') },
     // (USER 2026-11-19: "al panel izquiero le vamos a agregar dos campos mas, uno es de docuemntacion … es un arbol
     //  completo, pero por el momento vacio, y otro campo mas que es el gantt")
     { id: 'docs', icon: <FileText aria-hidden />, label: t('docs.title'), active: layout.state.leftTab === 'docs', disabled: !hasSession, onClick: () => layout.toggleLeftTab('docs') },
@@ -3599,7 +3634,7 @@ function App() {
                     options={[{ value: 'model', label: t('bim.viewModel') }, { value: 'report', label: t('dock.report') }]} />
                 </div>
                 {bimView === 'report' ? (
-                  activeSession && bimModels.length > 0 && segments.length > 0
+                  activeSession && hasBim && segments.length > 0
                     ? <DeviationOverlay compact sessionId={activeSession} scanKey={activeScanTab} tolerance={deviationTolerance} onTolerance={setDeviationTolerance}
                         onRun={tol => { void runComparison(undefined, tol) }} running={sabanaLoading} report={deviationReport}
                         selectedInstanceId={selectedSegmentId}
@@ -3607,6 +3642,9 @@ function App() {
                     : <EmptyState compact icon={<BarChart3 aria-hidden />} title={t('report.emptyTitle')} description={t('report.emptyDesc')} />
                 ) : (
                   <BIMNavigator models={bimModels} userRole={activeSession ? (user?.role || 'viewer') : 'viewer'}
+                    available={bimAvailable.map(m => ({ name: m.name, loaded: bimModels.some(x => x.filename === m.name),
+                      visible: !bimHidden.includes(m.name), loading: bimLoading.includes(m.name) }))}
+                    onToggleModel={(name, on) => void toggleBimModel(name, on)}
                     onToggleVisibility={(names, v) => viewportRef.current?.toggleBIMVisibility(names, v)}
                     onSelectElement={names => viewportRef.current?.highlightBIMElement(names)}
                     onSetOpacity={(names, o) => viewportRef.current?.setBIMOpacity(names, o)}
@@ -3621,6 +3659,8 @@ function App() {
                           const result = await loadIFC(`/api/sessions/${activeSession}/bim/${file.name}`, file.name)
                           viewportRef.current?.addBIMGroup(result.group)
                           setBimModels(prev => [...prev, result])
+                          setBimAvailable(prev => (prev.some(m => m.name === file.name) ? prev
+                            : [...prev, { name: file.name, url: `/api/sessions/${activeSession}/bim/${file.name}` }]))
                           report(t('bim.loaded', { name: file.name, n: result.group.children.length }), 'ok')
                           connectToServer()
                         } else report(t('bim.uploadFailed', { detail: (await res.json()).detail }), 'err')
@@ -3709,7 +3749,7 @@ function App() {
               try { await fetch('/api/scene/volumes/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, volume_id: volumeId }) }) } catch { /* ignore */ }
             }}
             onHasConfidence={setHasConfidence}
-            onBimLoaded={models => setBimModels(models)}   /* (the grid and the axes stay as the user has them: they were turned off at every BIM load — USER 2026-11-19 "me desaparece la grilla, o sea no respeta lo que selecciono el usuario") */
+            onBimAvailable={setBimAvailable}   /* the project's IFC models listed, none loaded (USER 2026-11-24); the grid and the axes stay as the user has them (USER 2026-11-19) */
             onSabanaLoaded={nPts => { setSabanaLoading(false); setSessionLoading(null); setStatusMessage(t('deviation.loadedPoints', { n: fmt.integer(nPts ?? 0) })) }}
             showCameraPoses={showCameraPoses && !sabanaVisible}
             onCubes={setCubes}
@@ -3787,7 +3827,7 @@ function App() {
               display={{ pointSize, onPointSize: setPointSize, light: lightIntensity, onLight: setLightIntensity, pointOpacity, onPointOpacity: setPointOpacity, budgetM: pointBudget / 1_000_000, onBudgetM: v => setPointBudget(v * 1_000_000), hasConfidence, confidence: confidenceThreshold, onConfidence: setConfidenceThreshold }}
               view={{ hasCameraPoses, showCameraPoses, onToggleCameraPoses: () => setShowCameraPoses(v => !v), showGrid, onToggleGrid: () => setShowGrid(v => !v), showAxes, onToggleAxes: () => setShowAxes(v => !v), onFullscreen: toggleFullscreen }}
               compare={{
-                available: bimModels.length > 0 && segments.length > 0, loading: sabanaLoading, hasResult: hasSabanaResult, showing: sabanaVisible,
+                available: hasBim && segments.length > 0, loading: sabanaLoading, hasResult: hasSabanaResult, showing: sabanaVisible,
                 onRun: handleGenerateComparison, onToggle: handleToggleSabana,
                 chip: sabanaMetrics ? t('deviation.elementsChip', { n: sabanaMetrics.elements?.filter((e: any) => e.status === 'evaluated').length || 0, total: sabanaMetrics.summary?.total_elements || 0 }) : undefined,
               }}

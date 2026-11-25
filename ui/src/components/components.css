@@ -826,6 +826,28 @@
   border-bottom: var(--bw) solid var(--border-1);
 }
 
+/* the project's IFC models: none loaded when a session opens, a tick loads one (USER 2026-11-24) */
+.stac-bim__models {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--panel-pad);
+}
+
+.stac-bim__model {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.stac-bim__model svg {
+  flex: none;
+  width: var(--icon-sm);
+  height: var(--icon-sm);
+  color: var(--text-2);
+}
+
 .stac-bap {
   display: flex;
   flex-direction: column;

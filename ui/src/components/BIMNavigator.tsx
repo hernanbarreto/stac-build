@@ -6,14 +6,14 @@
  */
 import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from 'react'
 import { findByName, registerCommands, type BimCommandId, type Executors, type Outcome } from '../commands/registry'
-import { Building2, Box, Columns3, DoorOpen, Eye, EyeOff, FileBox, Globe, Layers, Minus, Square, Trash2, Upload, Wrench, AppWindow, Armchair, Home, Grid2X2, Landmark, Ruler } from 'lucide-react'
+import { Building2, Box, Columns3, DoorOpen, Eye, EyeOff, FileBox, Globe, Layers, Loader2, Minus, Square, Trash2, Upload, Wrench, AppWindow, Armchair, Home, Grid2X2, Landmark, Ruler } from 'lucide-react'
 import type { IFCTreeNode, IFCLoadResult } from './IFCLoader'
 import { countDescendants, collectMeshNames, BIM_DEFAULT_OPACITY } from './IFCLoader'
 import { Panel, Section } from './ui/Panel'
 import { Tree, type TreeNodeData } from './ui/Tree'
 import { IconButton } from './ui/IconButton'
 import { Button } from './ui/Button'
-import { SearchInput, Slider } from './ui/Field'
+import { Checkbox, SearchInput, Slider } from './ui/Field'
 import { Badge } from './ui/Badge'
 import { EmptyState } from './ui/EmptyState'
 import { useFmt, useT } from '../i18n'
@@ -25,6 +25,10 @@ export interface BIMNavigatorProps {
   onSelectElement: (meshNames: string[]) => void
   onSetOpacity: (meshNames: string[], opacity: number) => void
   onUploadIFC: (file: File) => void
+  /** the project's IFC models, listed at the session's open and NOT loaded (USER 2026-11-24: "que solo se vea si el
+   *  usuario lo elige, para que no demore la carga"): ticked = loaded and shown */
+  available?: { name: string; loaded: boolean; visible: boolean; loading: boolean }[]
+  onToggleModel?: (name: string, on: boolean) => void
   /** `confirmed`: the user already confirmed it (STAC's spoken confirmation) — no dialog is shown */
   onDeleteIFC: (filename: string, confirmed?: boolean) => Promise<boolean>
 }
@@ -56,7 +60,7 @@ function typeIcon(type: string): ReactNode {
   return <Box aria-hidden />
 }
 
-export default function BIMNavigator({ models, userRole, onToggleVisibility, onSelectElement, onSetOpacity, onUploadIFC, onDeleteIFC }: BIMNavigatorProps) {
+export default function BIMNavigator({ models, userRole, onToggleVisibility, onSelectElement, onSetOpacity, onUploadIFC, onDeleteIFC, available = [], onToggleModel }: BIMNavigatorProps) {
   const t = useT()
   const fmt = useFmt()
   const [searchText, setSearchText] = useState('')
@@ -204,7 +208,7 @@ export default function BIMNavigator({ models, userRole, onToggleVisibility, onS
   return (
     <Panel title={t('bim.title')} subtitle={totalElements > 0 ? t.plural('bim.elements', totalElements) : undefined}
       toolbar={<SearchInput size="sm" value={searchText} onChange={e => setSearchText(e.target.value)} onClear={() => setSearchText('')} placeholder={t('bim.search')} />}
-      isEmpty={models.length === 0}
+      isEmpty={models.length === 0 && available.length === 0}
       empty={<EmptyState icon={<Building2 aria-hidden />} title={t('bim.emptyTitle')} description={isAdmin ? t('bim.emptyDescAdmin') : t('bim.emptyDesc')}
         action={isAdmin ? <Button variant="primary" icon={<Upload aria-hidden />} onClick={() => fileInputRef.current?.click()}>{t('bim.loadIfc')}</Button> : undefined} />}
       footer={isAdmin ? (
@@ -213,6 +217,21 @@ export default function BIMNavigator({ models, userRole, onToggleVisibility, onS
           <input ref={fileInputRef} type="file" accept=".ifc" className="stac-hidden" onChange={e => { const f = e.target.files?.[0]; if (f) { onUploadIFC(f); e.target.value = '' } }} />
         </>
       ) : undefined}>
+      {/* THE PROJECT'S MODELS: ticked = loaded and shown (none is loaded when the session opens — USER 2026-11-24) */}
+      {available.length > 0 && (
+        <Section flush title={t('bim.projectModels')}>
+          <div className="stac-bim__models">
+            {available.map(m => (
+              <div key={m.name} className="stac-bim__model">
+                <Checkbox checked={m.loaded && m.visible} disabled={m.loading || !onToggleModel}
+                  onChange={on => onToggleModel?.(m.name, on)} label={<span className="stac-mono">{m.name}</span>}
+                  description={m.loading ? t('bim.modelLoading') : m.loaded ? undefined : t('bim.modelNotLoaded')} />
+                {m.loading && <Loader2 className="stac-spin" aria-hidden />}
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
       {/* the opacity: the whole tree's, always there; and the selected element's (or branch's) own */}
       <div className="stac-bim__opacity">
         <Slider min={0} max={100} step={1} value={Math.round(modelOpacity * 100)} onChange={v => handleModelOpacity(v / 100)}

@@ -889,7 +889,10 @@
     "deleteTitle": "Delete BIM model",
     "deleted": "BIM model {name} deleted",
     "deleteFailed": "Could not delete the model. {detail}",
-    "viewModel": "Model"
+    "viewModel": "Model",
+    "projectModels": "The project's models",
+    "modelNotLoaded": "Not loaded: tick it to see it",
+    "modelLoading": "Loading…"
   },
   "team": {
     "title": "Team",

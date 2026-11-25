@@ -70,7 +70,9 @@ interface ViewportProps {
     onStatusMessage?: (msg: string) => void
     onSegments?: (segments: SegmentInstance[]) => void
     onPipelineProgress?: (data: Record<string, unknown>) => void
-    onBimLoaded?: (models: import('./IFCLoader').IFCLoadResult[]) => void
+    /** the project's IFC models, LISTED at a session's open — none is loaded (USER 2026-11-24): the BIM panel
+     *  loads one when it is ticked (addBIMGroup) */
+    onBimAvailable?: (models: { name: string; url: string }[]) => void
     onSabanaLoaded?: (pointCount: number) => void
     onHasConfidence?: (has: boolean) => void
     showCameraPoses?: boolean
@@ -682,7 +684,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimLoaded, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked, onPointPicked, onPointContext, tickets },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimAvailable, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked, onPointPicked, onPointContext, tickets },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -5596,73 +5598,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if (onStatusMessage) onStatusMessage(tt('vp.deviationError', { detail: err.message }))
             })
         }
-        // ── BIM: load IFC models via web-ifc ──
+        // ── BIM: the project's IFC models are LISTED, none is loaded (USER 2026-11-24: "cuando se carga una sesión que
+        //    tenga bim por defecto no aparezca visible, no lo cargue, como con la malla, que solo se vea si el usuario lo
+        //    elige, para que no demore la carga, solo se carga la nube al abrir la sesión"): the BIM panel loads one when it
+        //    is ticked ──
         if (msg.type === 'bim_ready') {
-            const models = msg.models as Array<{ name: string; url: string }>
-            if (!models || models.length === 0) return
-            const bimGroup = bimGroupRef.current
-            if (!bimGroup) return
-
-            import('./IFCLoader').then(({ loadIFC }) => {
-                const loadedResults: import('./IFCLoader').IFCLoadResult[] = []
-                let remaining = models.length
-                for (const model of models) {
-                    // console.log(`[Viewport] Loading BIM: ${model.name}`)
-                    if (onStatusMessage) onStatusMessage(tt('vp.bimLoading', { name: model.name }))
-                    loadIFC(model.url, model.name).then((result) => {
-                        bimGroup.add(result.group)
-                        const bimBox = new THREE.Box3().setFromObject(result.group)
-                        // Expand scene bbox to include BIM, re-frame + re-grid
-                        if (!bimBox.isEmpty()) {
-                            const bimSize = new THREE.Vector3()
-                            bimBox.getSize(bimSize)
-                            console.log(`[Viewport] BIM bbox: min(${bimBox.min.x.toFixed(2)},${bimBox.min.y.toFixed(2)},${bimBox.min.z.toFixed(2)}) max(${bimBox.max.x.toFixed(2)},${bimBox.max.y.toFixed(2)},${bimBox.max.z.toFixed(2)}) size(${bimSize.x.toFixed(2)},${bimSize.y.toFixed(2)},${bimSize.z.toFixed(2)})`)
-                            if (cloudBBoxRef.current) {
-                                const cloudSize = new THREE.Vector3()
-                                cloudBBoxRef.current.getSize(cloudSize)
-                                console.log(`[Viewport] Cloud bbox before union: min(${cloudBBoxRef.current.min.x.toFixed(2)},${cloudBBoxRef.current.min.y.toFixed(2)},${cloudBBoxRef.current.min.z.toFixed(2)}) max(${cloudBBoxRef.current.max.x.toFixed(2)},${cloudBBoxRef.current.max.y.toFixed(2)},${cloudBBoxRef.current.max.z.toFixed(2)}) size(${cloudSize.x.toFixed(2)},${cloudSize.y.toFixed(2)},${cloudSize.z.toFixed(2)})`)
-                                cloudBBoxRef.current.union(bimBox)
-                                const unionSize = new THREE.Vector3()
-                                cloudBBoxRef.current.getSize(unionSize)
-                                console.log(`[Viewport] Union bbox: min(${cloudBBoxRef.current.min.x.toFixed(2)},${cloudBBoxRef.current.min.y.toFixed(2)},${cloudBBoxRef.current.min.z.toFixed(2)}) max(${cloudBBoxRef.current.max.x.toFixed(2)},${cloudBBoxRef.current.max.y.toFixed(2)},${cloudBBoxRef.current.max.z.toFixed(2)}) size(${unionSize.x.toFixed(2)},${unionSize.y.toFixed(2)},${unionSize.z.toFixed(2)}) maxDim=${Math.max(unionSize.x, unionSize.y, unionSize.z).toFixed(2)}`)
-                            } else {
-                                cloudBBoxRef.current = bimBox.clone()
-                            }
-                            if (cameraRef.current && controlsRef.current) {
-                                if (!preserveCameraRef.current) {
-                                    frameCloud(cloudBBoxRef.current, cameraRef.current, controlsRef.current)
-                                }
-                            }
-                            // Restore saved camera state if mode-switching (final load step)
-                            if (preserveCameraRef.current && cameraRef.current && controlsRef.current) {
-                                cameraRef.current.position.copy(preserveCameraRef.current.pos)
-                                controlsRef.current.target.copy(preserveCameraRef.current.target)
-                                controlsRef.current.update()
-                                preserveCameraRef.current = null
-                            }
-                            if (sceneRef.current) {
-                                adaptGrid(cloudBBoxRef.current, sceneRef.current, gridRef, showGridRef.current, lookRef.current)
-                            }
-                        }
-                        console.log(`[Viewport]  BIM loaded: ${model.name} (${result.group.children.length} elements, ${result.hierarchy.length} hierarchy roots)`)
-                        if (onStatusMessage) onStatusMessage(tt('bim.loaded', { name: model.name, n: result.group.children.length }))
-                        loadedResults.push(result)
-                        remaining--
-                        if (remaining === 0 && onBimLoaded) {
-                            onBimLoaded(loadedResults)
-                        }
-                    }).catch((err) => {
-                        console.error(`[Viewport] BIM load error: ${model.name}`, err)
-                        if (onStatusMessage) onStatusMessage(tt('vp.bimError', { detail: err.message }))
-                        remaining--
-                        if (remaining === 0 && onBimLoaded && loadedResults.length > 0) {
-                            onBimLoaded(loadedResults)
-                        }
-                    })
-                }
-            })
+            const models = (msg.models as Array<{ name: string; url: string }> | undefined) ?? []
+            onBimAvailable?.(models.filter(m => m && m.name && m.url))
         }
-    }, [onStatusMessage, onSegments, onPipelineProgress, onPointCount, onBimLoaded, onSabanaLoaded])
+    }, [onStatusMessage, onSegments, onPipelineProgress, onPointCount, onBimAvailable, onSabanaLoaded])
 
     // Toggle camera poses visibility
     useEffect(() => {
