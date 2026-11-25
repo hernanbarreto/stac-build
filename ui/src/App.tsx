@@ -1606,7 +1606,17 @@ function App() {
   const [locating, setLocating] = useState<string | null>(null)       // the work whose Location window is open
   const [globeFocus, setGlobeFocus] = useState<{ sid: string; n: number } | null>(null)
   const [globeIfc, setGlobeIfc] = useState<string[]>([])               // the works whose IFC stands on the globe
-  const globeOpen = layout.state.leftTab === 'globe'
+  // THE GLOBE STAYS while its section is the current one, its list (the left panel) shown or hidden over it (USER
+  // 2026-11-25: "si vuelvo a presionar el icono del globo cuando esta el globo puesto no debe sacar el globo, debe
+  // ocultar el panel como en el resto de las barras laterales, sino en celulares no se puede ver"): the globe's icon
+  // hides and shows its list like every other section's; choosing another section, or opening a work from a pin, gives
+  // the screen back to the 3D viewer
+  const globeListOpen = layout.state.leftTab === 'globe'
+  const [globeOn, setGlobeOn] = useState(globeListOpen)
+  useEffect(() => {
+    if (layout.state.leftTab === 'globe') setGlobeOn(true)
+    else if (layout.state.leftTab) setGlobeOn(false)
+  }, [layout.state.leftTab])
   const refreshGeo = useCallback(async () => {
     setGeoLoading(true)
     try { setGeoProjects(await fetchGeoProjects()); setGeoError(null) }
@@ -1614,7 +1624,7 @@ function App() {
     finally { setGeoLoading(false) }
   }, [])
   // the places are read when the globe opens and whenever the sessions change (the sessions list marks the placed ones)
-  useEffect(() => { if (globeOpen) void refreshGeo() }, [globeOpen, refreshGeo])
+  useEffect(() => { if (globeOn) void refreshGeo() }, [globeOn, refreshGeo])
   const sessionIds = sessions.map(s => s.id).join('|')
   useEffect(() => { if (sessionIds) void refreshGeo() }, [sessionIds, refreshGeo])
   const geoPlaced = useMemo(() => Object.fromEntries(geoProjects.filter(p => p.georef).map(p => [p.session_id, p.georef!])),
@@ -1631,8 +1641,12 @@ function App() {
   }, [token, refreshGeo])
   const openFromGlobe = useCallback((sid: string) => {
     layout.setLeftTab(null)                          // the globe closes: the work opens in the 3D viewer
+    setGlobeOn(false)
     if (sid !== activeSession) handleSessionLoad(sid)
   }, [layout, activeSession, handleSessionLoad])
+  // a work touched in the globe's list: the globe flies there and the list steps aside (USER 2026-11-25: "cuando abro
+  // un proyecto en el globo, es decir que toco la lista debe ocultarse la lista para que en celulares pueda ver el globo")
+  const showFromGlobeList = useCallback((sid: string) => { flyToWork(sid); layout.setLeftTab(null) }, [flyToWork, layout])
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null)
@@ -3432,7 +3446,7 @@ function App() {
     { id: 'gantt', icon: <ChartNoAxesGantt aria-hidden />, label: t('gantt.title'), active: layout.state.leftTab === 'gantt', disabled: !hasSession, onClick: () => layout.toggleLeftTab('gantt') },
     // (USER 2026-11-24: "en el panel izquierdo debe haber una opción con icono de mundo") — every work, with or
     //  without a session open
-    { id: 'globe', icon: <Earth aria-hidden />, label: t('globe.title'), active: globeOpen, onClick: () => layout.toggleLeftTab('globe') },
+    { id: 'globe', icon: <Earth aria-hidden />, label: t('globe.title'), active: globeListOpen, onClick: () => layout.toggleLeftTab('globe') },
   ]
   // HOW MANY TASKS ARE RUNNING OR QUEUED (USER 2026-11-19: "en el icono de consola deberia figurar el numero de
   // tareas que se estan ejecutando o en cola"): every pipeline job — each scan's, running or waiting its turn —,
@@ -3616,11 +3630,11 @@ function App() {
             )}
             {layout.state.leftTab === 'docs' && <DocumentationPanel />}
             {layout.state.leftTab === 'gantt' && <GanttPanel />}
-            {globeOpen && (
+            {globeListOpen && (
               <GlobePanel projects={geoProjects} loading={geoLoading} error={geoError} placing={locating} canEdit={!!token}
-                onShow={flyToWork} onRefresh={() => void refreshGeo()}
+                onShow={showFromGlobeList} onRefresh={() => void refreshGeo()}
                 onPlace={setLocating} onRemove={sid => void removePlace(sid)} ifcOn={globeIfc}
-                onToggleIfc={sid => { setGlobeIfc(l => (l.includes(sid) ? l.filter(x => x !== sid) : [...l, sid])); flyToWork(sid) }} />
+                onToggleIfc={sid => { setGlobeIfc(l => (l.includes(sid) ? l.filter(x => x !== sid) : [...l, sid])); showFromGlobeList(sid) }} />
             )}
             {layout.state.leftTab === 'tickets' && (
               <TicketsPanel sessionId={activeSession} scanKey={activeScanTab} tickets={tickets} counts={ticketCounts}
@@ -3696,8 +3710,9 @@ function App() {
             pin, a button drawn over the canvas, opened the browser's. USER 2026-11-19: "no debe aparecer nada") */}
         <div className={`stac-main__viewport ${loadingOverlay ? 'stac-main__viewport--hidden' : ''} ${flythroughOpen ? 'stac-main__viewport--flythrough' : ''}`.trim()}
           onContextMenu={e => e.preventDefault()}>
-          {globeOpen && (
-            // THE GLOBE over the viewer while its section is open; the viewer underneath keeps its state
+          {globeOn && (
+            // THE GLOBE over the viewer while its section is the current one, its list shown or hidden; the viewer
+            // underneath keeps its state
             <Suspense fallback={<div className="stac-globe-fallback">{t('globe.loading')}</div>}>
               <GlobeView projects={geoProjects} focus={globeFocus} onOpen={openFromGlobe} ifcOn={globeIfc} />
             </Suspense>
