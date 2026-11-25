@@ -1042,6 +1042,20 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     and writes no colour), but almost no BIM program shows IFC textures (Revit ignores them, Bonsai reads them; our
     viewer's web-ifc 0.0.75 gives one colour per geometry). Proposed: the real texture (UVs + the atlas images in the
     export ZIP) AND a colour per element (every program shows it).
+  · PLACING A WORK MADE FRIENDLY (b13c935; USER: "agrega varias herramientas para buscar ciudad, por ejemplo, como
+    google maps tiene, de hecho quise agregar este punto 19°23'53.8"N 99°11'58.4"W y me fue imposible … no hace falta el
+    boton open"): one search box (places.ts / PlaceSearch.tsx) for names and addresses (Esri's public geocoder, its
+    suggestions — OpenStreetMap's refused the pod) and coordinates in any form (DMS with O for oeste, decimal, decimal
+    commas, a Google Maps link — ui/scripts/check-places.ts, 17 cases); "my location"; the Location window in three
+    numbered steps, the plan DRAGGED; places' names and roads over the imagery; the globe's list has no Open.
+  · THE IFC CARRIES GENRECON'S REAL TEXTURE (91b99d1; USER: "Dale proba mejor con la textura real primero si no sale
+    vamos por el color dominante"): corner texture coordinates through the weld, the split and the cut; one face set
+    per atlas image with its IfcIndexedTriangleTextureMap; a style of two layers — the image (copied as it is into
+    <ifc>_textures/ beside the IFC, in the export ZIP) and the element's dominant colour (IfcSurfaceStyleShading) for
+    the programs that read no IFC texture (Revit, web-ifc). Bonsai shows the photograph. grupo_electrogeno: 336
+    elements, 1,213 textured face sets, 68 images (226 MB), a 482 MB IFC in 178 s; drawn from the IFC alone, the
+    enclosure's "Electra Molins" logo reads right. A simplified mesh (keep < 1) carries no texture. HIS EYE in Bonsai:
+    pending.
   · NOT TOUCHED: init_pod.sh's uncommitted line (his own SSH command, with his PC's path and an old pod address —
     the repo is public).
 - ⭐ 2026-11-23 — HIS DECISION SUPERSEDES THE "RESUME HERE" MARKS BELOW: the validated pipeline stays, with the three
