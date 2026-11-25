@@ -1061,7 +1061,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     texture: web-ifc reads none) — from the texture on a whole mesh, from its object's cloud points on a light one.
     Regenerated in place, same names: bufferStop 271 elements (texture), grupo_electrogeno 336 (texture), pccr 2026-08-31
     1209 (the 10 % one, from the cloud — the same 1209 elements its stored comparison names). Off by default in the BIM
-    panel (865a123). HIS EYE: pending.
+    panel (865a123). THE DARK CORNER (72dc7c8): read with web-ifc, pccr's floor#72 came out (3, 4, 3) — 19 % of its
+    points under-exposed collapse into ONE 5-bit bin; the colour cube's two corners now vote only when they are most of
+    the element: floor#72 (100, 93, 84), floor#75 (197, 187, 171). THE ROUTE (a098f51): the BIM files were served
+    `max-age=3600` (a regenerated IFC hidden for an hour) — now `no-cache` + 304 on the ETag, the viewer asks
+    `cache: 'no-cache'`; the backend restarted for it (01:49 UTC, the chat warm 01:51). HIS EYE: pending.
+  · THE GLOBE'S LIST (f763852; USER 2026-11-25: "cuando abro un proyecto en el globo, es decir que toco la lista debe
+    ocultarse la lista … si vuelvo a presionar el icono del globo cuando esta el globo puesto no debe sacar el globo,
+    debe ocultar el panel como en el resto de las barras laterales"): the globe stays while its section is current, its
+    icon hides / shows the list; a work touched in the list (or its IFC toggle) flies there and hides the list; another
+    section or a pin's work gives the screen back to the 3D viewer. HIS EYE on a phone: pending.
   · NOT TOUCHED: init_pod.sh's uncommitted line (his own SSH command, with his PC's path and an old pod address —
     the repo is public).
 - ⭐ 2026-11-23 — HIS DECISION SUPERSEDES THE "RESUME HERE" MARKS BELOW: the validated pipeline stays, with the three
