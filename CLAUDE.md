@@ -1026,6 +1026,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     conversation was already per page (history, name, pending confirmation sent with each question).
   · A SESSION OPENS WITH ITS CLOUD ALONE (865a123): the project's IFCs are listed in the BIM panel, a tick loads one.
     USER: "cuando se carga una sesion que tenga bim por defecto no aparezca visible, no lo cargue, como con la malla".
+    CORRECTED BY HIM (e8dada8; USER 2026-11-25: "si lo debe mandar al ui, solo que debe estar destildado, porque cuando lo
+    tildo recien ahi lo trae, no no, ya lo debe enviar solo que destildado para que no se cargue en el visor"): once the
+    cloud is on screen every IFC is fetched and built in the background, one after another, HIDDEN and unticked; the
+    tick only shows it. A hidden model is neither picked (three.js casts rays at invisible objects) nor framed. Expected,
+    not measured: web-ifc parses on the page's thread — the 260 MB IFC of grupo_electrogeno may stall the view seconds
+    after the cloud appears. HIS EYE: pending.
   · THE GLOBE, CesiumJS 1.147 WITH NO ACCOUNT (USER: "cesium siempre sin cuenta, baja la mejor calidad que se pueda
     tener, no tenemos cuenta, veamos de conseguir relieves si o si" / "cesium si esta bien en 3 etapas"): Esri's public
     World Imagery + World Elevation 3D (both answer with no key; for a commercial product Esri asks a key — told to
