@@ -3661,7 +3661,7 @@ function App() {
                 extracting={extractingSessions} canManage={canManage}
                 onConnect={connectToServer} onSelect={handleSessionSelect} onLoad={handleSessionLoad}
                 onFlythrough={id => { if (activeSession !== id) handleSessionLoad(id); setFlythroughOpen(id) }}
-                onReconstruct={handleReconstruct} onPickVideo={handlePickVideo} onSegment={handleSegment} onOpenManager={openSegmentationManager}
+                onReconstruct={handleReconstruct} onPickVideo={handlePickVideo} onOpenManager={openSegmentationManager}
                 onUnload={handleUnload} onRename={renameSession} onDelete={deleteSession} onCreate={createSession}
                 onDownloadZip={id => openDownload(id, 'session')} onPickZip={pickSessionZip} importing={sessionImport} onCancelImport={cancelSessionImport}
                 onFuse={openFuse} onOpenScan={openScanFromTree} onSetReference={setReference} />

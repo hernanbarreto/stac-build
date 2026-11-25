@@ -63,7 +63,6 @@ interface SessionsPanelProps {
   /** opens the fusion of the project's scans; the icon is only rendered
    *  when there are two or more non-fused scans to fuse */
   onFuse: (id: string) => void
-  onSegment: (id: string) => void
   onOpenManager: (id: string) => void
   onUnload: () => void
   onRename: (id: string, name: string) => Promise<unknown>
@@ -193,7 +192,9 @@ export function SessionsPanel(p: SessionsPanelProps) {
               <IconButton size="sm" label={t('sessions.uploadVideo')} icon={<Plus aria-hidden />} onClick={() => p.onPickVideo(s.id)} />
             ) : null}
             {canFuse && <IconButton size="sm" label={t('sessions.fuse')} icon={<Layers aria-hidden />} onClick={() => p.onFuse(s.id)} />}
-            {loaded && <IconButton size="sm" label={t('sessions.segmentAuto')} icon={<Tag aria-hidden />} onClick={() => p.onSegment(s.id)} />}
+            {/* at most it OPENS the Segmentation Manager — a touch never launches a segmentation (USER 2026-11-25: "si toco el
+                boton de segmentacion como mucho … deberia abrir el segmentation manager, no mandar el autosegment") */}
+            {loaded && <IconButton size="sm" label={t('sessions.segmentAuto')} icon={<Tag aria-hidden />} onClick={() => p.onOpenManager(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.segmentManual')} icon={<Crosshair aria-hidden />} onClick={() => p.onOpenManager(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.unload')} icon={<ArrowUpFromLine aria-hidden />} onClick={p.onUnload} />}
             {p.onLocate && <IconButton size="sm" label={t('location.action')} icon={<MapPin aria-hidden />} onClick={() => p.onLocate?.(s.id)} />}
