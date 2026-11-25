@@ -183,3 +183,79 @@ def test_a_floor_adjustment_reaches_the_ifc(tmp_path):
     text = M.build(moved, session="s", scan_key="2026-01-01/default", geometry_epoch="0", described="t").to_string()
     assert text.count("IFCTRIANGULATEDFACESET") == 2
 
+
+
+def _textured_scan(tmp_path):
+    """_scan's wall and chair, each with its own atlas image (a red wall, a green chair) and texture coordinates that
+    follow the position (so a corner's coordinates can be checked from where it is)."""
+    from PIL import Image
+    out, glb, wall, chair = _scan(tmp_path)
+
+    def textured(mesh, rgb):
+        soup = trimesh.Trimesh(vertices=mesh.vertices[mesh.faces].reshape(-1, 3),
+                               faces=np.arange(len(mesh.faces) * 3).reshape(-1, 3), process=False)
+        vv = soup.vertices
+        uv = np.column_stack([(vv[:, 0] - vv[:, 0].min()) / np.ptp(vv[:, 0]), (vv[:, 1] - vv[:, 1].min()) / np.ptp(vv[:, 1])])
+        soup.visual = trimesh.visual.TextureVisuals(uv=uv, image=Image.new("RGB", (8, 8), rgb))
+        return soup
+    glb.write_bytes(trimesh.exchange.gltf.export_glb(trimesh.Scene([textured(wall, (200, 30, 30)),
+                                                                     textured(chair, (30, 180, 60))])))
+    return out, glb
+
+
+def test_the_genrecon_texture_reaches_the_ifc_with_each_elements_dominant_colour(tmp_path):
+    """USER 2026-11-24: "es posible generar los IFC con la textura de genrecon?" / "proba mejor con la textura real
+    primero si no sale vamos por el color dominante"."""
+    import ifcopenshell.validate
+    out, glb = _textured_scan(tmp_path)
+    src = M.read_glb_textured(glb)
+    assert src["uv"] is not None and len(src["images"]) == 2
+    # glTF's coordinates of each position (they follow the position: one per position)
+    want = {tuple(np.round(src["vertices"][src["faces"][k, c]], 4)): src["uv"][k, c] for k in range(len(src["faces"])) for c in range(3)}
+    elements, report = M.elements_of(out, glb, keep=1.0, max_distance=0.05, max_edge=0.3)   # the large triangles split
+    assert report["texture"]["materials_used"] == 2 and report["faces_after_split"] > report["faces"]
+    assert all("uv" in e and len(e["uv"]) == len(e["faces"]) for e in elements)
+    M.element_colours(elements, report["texture"])
+    colour = {e["label"]: e["colour"] for e in elements}
+    assert np.allclose(colour["wall"], (200 / 255, 30 / 255, 30 / 255), atol=1e-6)            # the dominant colour
+    assert np.allclose(colour["chair"], (30 / 255, 180 / 255, 60 / 255), atol=1e-6)
+    path = tmp_path / "scan_elements.ifc"
+    urls = M.write_textures(elements, report["texture"], tmp_path / "scan_elements_textures")
+    M.build(elements, session="s", scan_key="2026-01-01/default", geometry_epoch="0", described="test",
+            textures=urls).write(str(path))
+    assert sorted(urls.values()) == sorted(f"scan_elements_textures/{p.name}" for p in (tmp_path / "scan_elements_textures").iterdir())
+    f = ifcopenshell.open(str(path))
+    logger = ifcopenshell.validate.json_logger()
+    ifcopenshell.validate.validate(f, logger)
+    assert logger.statements == []                                                            # a valid IFC4 file
+    maps = f.by_type("IfcIndexedTriangleTextureMap")
+    assert len(maps) >= 2 and {t.URLReference for t in f.by_type("IfcImageTexture")} == set(urls.values())
+    checked = 0
+    for tm in maps:
+        fs = tm.MappedTo
+        xyz = np.asarray(fs.Coordinates.CoordList)
+        disp = np.column_stack([xyz[:, 0], xyz[:, 2], -xyz[:, 1]])                           # IFC's Z up back to the display frame
+        st = np.asarray(tm.TexCoords.TexCoordsList)
+        assert len(tm.TexCoordIndex) == len(fs.CoordIndex)
+        for tri, ti in zip(fs.CoordIndex, tm.TexCoordIndex):
+            for c in range(3):
+                p = disp[tri[c] - 1]
+                s, t = st[ti[c] - 1]
+                key = tuple(np.round(p, 4))
+                if key in want:                                                               # a corner of the mesh as stored
+                    u, v = want[key]
+                    assert abs(s - u) < 2e-5 and abs(t - (1.0 - v)) < 2e-5                    # IFC's t is up: 1 − glTF's v
+                    checked += 1
+    assert checked > 100
+    # the split triangles' new corners lie in their parent: their coordinates in the parent's span
+    assert all(0.0 - 1e-6 <= x <= 1.0 + 1e-6 for tm in maps for row in tm.TexCoords.TexCoordsList for x in row)
+    # each face set's style: its texture over its element's colour
+    for item in f.by_type("IfcStyledItem"):
+        layers = item.Styles[0].Styles
+        assert {l.is_a() for l in layers} == {"IfcSurfaceStyleShading", "IfcSurfaceStyleWithTextures"}
+
+
+def test_a_simplified_mesh_carries_no_texture(tmp_path):
+    out, glb = _textured_scan(tmp_path)
+    elements, report = M.elements_of(out, glb, keep=0.5, max_distance=0.05)
+    assert report["texture"] is None and not any("uv" in e for e in elements)

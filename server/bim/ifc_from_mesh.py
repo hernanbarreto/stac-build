@@ -22,9 +22,21 @@ malla genrecon cortada desde la segmentacion, exacto". The boxes were measured t
 
 Coordinates are written Z-up, (x, y, z) → (x, −z, y), rounded to 0.1 mm (the mesh's cells are
 4.9 mm): it keeps the file a third smaller than the float32's full digits.
+
+THE TEXTURE (USER 2026-11-24: "es posible generar los IFC con la textura de genrecon?" / "proba mejor con la textura
+real primero si no sale vamos por el color dominante"): when the mesh is written whole (``keep`` 1 — a simplified
+mesh's triangles are new: they have no texture), each triangle keeps its corner texture coordinates and its material
+through the welding, the split of the large triangles (interpolated in their parent triangle) and the cut. An
+element is then one IfcTriangulatedFaceSet per atlas image it uses, each with its IfcIndexedTriangleTextureMap
+(IFC's t up from the image's bottom: t = 1 − glTF's v) and a style of two layers: the image (IfcImageTexture, the
+base-colour images copied out of the GLB as they are, beside the IFC in ``<name>_textures/``) and the element's
+DOMINANT colour (IfcSurfaceStyleShading — "pintar cada elemento por el color dominante del elemento, un color plano
+con el color del elemento"): a program that reads IFC textures shows the photograph, one that does not (Revit, the
+viewer's web-ifc) the colour.
 """
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import struct
@@ -48,6 +60,14 @@ class MeshError(ValueError):
 def read_glb(path: Path | str) -> Tuple[np.ndarray, np.ndarray]:
     """(vertices N×3 float32, triangles M×3 int64) of a binary glTF: every primitive's positions
     and indices, as stored (the nodes of a published GenRecon mesh carry no transform — checked)."""
+    d = read_glb_textured(path, textures=False)
+    return d["vertices"], d["faces"]
+
+
+def read_glb_textured(path: Path | str, *, textures: bool = True) -> Dict[str, Any]:
+    """read_glb's vertices and faces and — ``textures``, and every primitive with its TEXCOORD_0 and a material with a
+    base-colour image — each triangle's corner texture coordinates (M×3×2 float32, glTF's: v down from the image's
+    top), its material, and where each material's image lies in the file ({material: {offset, length, mime}})."""
     with open(path, "rb") as f:
         magic, _version, _total = struct.unpack("<III", f.read(12))
         if magic != 0x46546C67:
@@ -72,7 +92,9 @@ def read_glb(path: Path | str) -> Tuple[np.ndarray, np.ndarray]:
             return np.frombuffer(f.read(a["count"] * size), dtype).reshape(-1, comps)
 
         types = {5123: "<u2", 5125: "<u4"}
-        verts, faces, offset = [], [], 0
+        verts, faces, uvs, mats, offset = [], [], [], [], 0
+        images: Dict[int, Dict[str, Any]] = {}
+        textured = textures
         for mesh in doc["meshes"]:
             for prim in mesh["primitives"]:
                 if prim.get("mode", 4) != 4:
@@ -83,7 +105,32 @@ def read_glb(path: Path | str) -> Tuple[np.ndarray, np.ndarray]:
                 verts.append(v)
                 faces.append(i.astype(np.int64) + offset)
                 offset += len(v)
-    return np.vstack(verts), np.vstack(faces)
+                if not textured:
+                    continue
+                m = prim.get("material")
+                tc = prim["attributes"].get("TEXCOORD_0")
+                if m is None or tc is None or acc[tc].get("componentType") != 5126:
+                    textured = False
+                    continue
+                if m not in images:
+                    bct = (((doc.get("materials") or [])[m].get("pbrMetallicRoughness") or {}).get("baseColorTexture") or {})
+                    texs, imgs = doc.get("textures") or [], doc.get("images") or []
+                    t_i = bct.get("index")
+                    src = texs[t_i].get("source") if t_i is not None and t_i < len(texs) else None
+                    img = imgs[src] if src is not None and src < len(imgs) else None
+                    if not img or "bufferView" not in img:
+                        textured = False
+                        continue
+                    view = views[img["bufferView"]]
+                    images[m] = {"offset": base + view.get("byteOffset", 0), "length": view["byteLength"],
+                                 "mime": img.get("mimeType", "image/png")}
+                uvs.append(array(tc, "<f4", 2)[i])                          # each corner's own coordinates
+                mats.append(np.full(len(i), m, np.int32))
+    out: Dict[str, Any] = {"vertices": np.vstack(verts), "faces": np.vstack(faces), "uv": None, "material": None,
+                           "images": {}}
+    if textured and uvs:
+        out.update(uv=np.vstack(uvs).astype(np.float32), material=np.concatenate(mats), images=images)
+    return out
 
 
 def _most_frequent(rows: np.ndarray) -> np.ndarray:
@@ -182,12 +229,19 @@ def submesh(vertices: np.ndarray, faces: np.ndarray) -> Tuple[np.ndarray, np.nda
     by index, an object's surface is tens of thousands of loose pieces (measured on pccr 3108:
     45,793 for one wall, 44,329 of them under 20 triangles) and a simplification deletes them.
     Vertices at the same float32 position are one; a triangle that collapses is dropped."""
+    v, f, _kept = weld(vertices, faces)
+    return v, f
+
+
+def weld(vertices: np.ndarray, faces: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """submesh, and which of ``faces`` were kept (in their order): a triangle's own data (its texture
+    coordinates, its material) follows it."""
     used, inverse = np.unique(faces, return_inverse=True)
     v = np.ascontiguousarray(vertices[used])
-    _, first, weld = np.unique(v.view([("", v.dtype)] * 3).ravel(), return_index=True, return_inverse=True)
-    f = weld[inverse].reshape(-1, 3)
-    f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
-    return v[first], f
+    _, first, w = np.unique(v.view([("", v.dtype)] * 3).ravel(), return_index=True, return_inverse=True)
+    f = w[inverse].reshape(-1, 3)
+    kept = (f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])
+    return v[first], f[kept], kept
 
 
 def simplify(v: np.ndarray, f: np.ndarray, keep: float) -> Tuple[np.ndarray, np.ndarray]:
@@ -204,7 +258,7 @@ def simplify(v: np.ndarray, f: np.ndarray, keep: float) -> Tuple[np.ndarray, np.
     return (out_v, out_f) if len(out_f) else (v, f)
 
 
-def split_large(v: np.ndarray, f: np.ndarray, max_edge: float) -> Tuple[np.ndarray, np.ndarray]:
+def split_large(v: np.ndarray, f: np.ndarray, max_edge: float, *, return_parent: bool = False):
     """The triangles whose longest edge is over ``max_edge`` split (in their own plane: the
     surface does not move) until none is. A simplification leaves triangles of metres on a flat
     floor or wall — larger than the objects on it (a 57 cm tile), so the cut could not follow
@@ -213,9 +267,34 @@ def split_large(v: np.ndarray, f: np.ndarray, max_edge: float) -> Tuple[np.ndarr
     edges = np.linalg.norm(v[f] - v[f[:, [1, 2, 0]]], axis=2).max(axis=1)
     big = edges > max_edge
     if not big.any():
-        return v, f
-    nv, nf = trimesh.remesh.subdivide_to_size(np.asarray(v, np.float64), f[big], max_edge=max_edge, max_iter=30)
-    return np.vstack([v, nv.astype(v.dtype)]), np.vstack([f[~big], nf.astype(np.int64) + len(v)])
+        return (v, f, np.arange(len(f))) if return_parent else (v, f)
+    nv, nf, idx = trimesh.remesh.subdivide_to_size(np.asarray(v, np.float64), f[big], max_edge=max_edge, max_iter=30,
+                                                   return_index=True)
+    out_v, out_f = np.vstack([v, nv.astype(v.dtype)]), np.vstack([f[~big], nf.astype(np.int64) + len(v)])
+    if return_parent:                    # each triangle's own one in ``f`` (the split ones: the one they lie in)
+        return out_v, out_f, np.concatenate([np.flatnonzero(~big), np.flatnonzero(big)[idx]])
+    return out_v, out_f
+
+
+def corner_uv(v: np.ndarray, f: np.ndarray, parent: np.ndarray, src_v: np.ndarray, src_f: np.ndarray,
+              src_uv: np.ndarray) -> np.ndarray:
+    """The corner texture coordinates of triangles ``f`` lying in the triangles ``src_f[parent]``: each corner's
+    barycentric coordinates in its parent triangle, applied to the parent's corner coordinates."""
+    a, b, c = (np.asarray(src_v[src_f[parent, k]], np.float64) for k in range(3))
+    p = np.asarray(v[f], np.float64)                                     # P×3 corners×3
+    e0, e1, e2 = b - a, c - a, p - a[:, None, :]
+    d00, d01, d11 = (e0 * e0).sum(-1), (e0 * e1).sum(-1), (e1 * e1).sum(-1)
+    d20, d21 = (e2 * e0[:, None]).sum(-1), (e2 * e1[:, None]).sum(-1)
+    den = d00 * d11 - d01 * d01
+    ok = np.abs(den) > 1e-24
+    den = np.where(ok, den, 1.0)
+    lb = (d11[:, None] * d20 - d01[:, None] * d21) / den[:, None]
+    lc = (d00[:, None] * d21 - d01[:, None] * d20) / den[:, None]
+    la = 1.0 - lb - lc
+    uv = src_uv[parent].astype(np.float64)                               # P×3×2
+    out = la[..., None] * uv[:, None, 0] + lb[..., None] * uv[:, None, 1] + lc[..., None] * uv[:, None, 2]
+    out[~ok] = uv[~ok].mean(axis=1, keepdims=True)                       # a degenerate parent: its mean
+    return out.astype(np.float32)
 
 
 def deviation(v: np.ndarray, sv: np.ndarray, sf: np.ndarray) -> np.ndarray:
@@ -249,12 +328,18 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
         raise MeshError(f"keep must be in (0, 1], got {keep!r}")
     A, t = C.floor_transform(out)                               # display = A · stored + t
     adjusted = not (np.array_equal(A, np.eye(3)) and not t.any())
-    raw_v, raw_f = read_glb(mesh_path)
-    full_v, full_f = submesh(raw_v, raw_f)                       # welded: one surface
-    del raw_v, raw_f
-    log(f"mesh: {len(full_v):,} vertices, {len(full_f):,} triangles (welded)")
+    glb = read_glb_textured(mesh_path)
+    full_v, full_f, kept = weld(glb["vertices"], glb["faces"])     # welded: one surface
+    uv = glb["uv"][kept] if glb["uv"] is not None else None        # each triangle's own texture, kept with it
+    mat = glb["material"][kept] if glb["material"] is not None else None
+    del glb["vertices"], glb["faces"], glb["uv"], glb["material"]
+    log(f"mesh: {len(full_v):,} vertices, {len(full_f):,} triangles (welded)"
+        + (f"; textured: {len(glb['images'])} images" if uv is not None else "; no texture"))
     vertices, faces = simplify(full_v, full_f, keep)
     log(f"simplified to {len(faces):,} triangles (keep {keep})")
+    if uv is not None and faces is not full_f:
+        uv = mat = None                                          # a simplified mesh's triangles are new: no texture
+        log("texture: not carried — the mesh was simplified (its triangles are new); the elements get no colour")
     report: Dict[str, Any] = {"mesh_vertices": int(len(full_v)), "mesh_faces": int(len(full_f)), "keep": float(keep),
                               "faces": int(len(faces)), "max_distance": float(max_distance)}
     if measure and len(faces) != len(full_f):
@@ -263,7 +348,12 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
                                  "p99": float(np.percentile(d, 99)), "max": float(d.max())}
     del full_v, full_f
     if max_edge:
-        vertices, faces = split_large(vertices, faces, float(max_edge))
+        if uv is not None:
+            v2, f2, parent = split_large(vertices, faces, float(max_edge), return_parent=True)
+            uv, mat = corner_uv(v2, f2, parent, vertices, faces, uv), mat[parent]
+            vertices, faces = v2, f2
+        else:
+            vertices, faces = split_large(vertices, faces, float(max_edge))
         report["faces_after_split"] = int(len(faces))
         report["max_edge"] = float(max_edge)
         log(f"triangles over {max_edge * 100:.1f} cm split: {len(faces):,} triangles")
@@ -293,15 +383,22 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
             continue
         if iid != UNSEGMENTED and iid not in labels:
             raise MeshError(f"the cloud holds instance {iid}, which the store does not")
-        v, f = submesh(vertices, faces[order[bounds[k]:bounds[k + 1]]])
+        idx = order[bounds[k]:bounds[k + 1]]
+        v, f, kept_e = weld(vertices, faces[idx])
         if not len(f):
             continue
         if adjusted:
             v = np.asarray(v, np.float64) @ A.T + t             # the floor adjustment, as the viewer applies it
         label = "unsegmented" if iid == UNSEGMENTED else str(labels[iid])
-        elements.append({"id": iid, "label": label, "ifc": IFC_CLASS.get(label, PROXY), "vertices": v, "faces": f,
-                         "n_points": int(n_points.get(iid, 0))})
+        el = {"id": iid, "label": label, "ifc": IFC_CLASS.get(label, PROXY), "vertices": v, "faces": f,
+              "n_points": int(n_points.get(iid, 0))}
+        if uv is not None:
+            el["uv"], el["material"] = uv[idx][kept_e], mat[idx][kept_e]
+        elements.append(el)
     with_faces = {e["id"] for e in elements}
+    report["texture"] = ({"glb": str(mesh_path), "images": {int(m): i for m, i in glb["images"].items()},
+                          "materials_used": int(len({int(m) for e in elements for m in np.unique(e["material"])}))}
+                         if uv is not None else None)
     report.update(floor_adjusted=bool(adjusted),
                   elements=len(elements), faces_written=int(sum(len(e["faces"]) for e in elements)),
                   faces_unsegmented=int((owner == UNSEGMENTED).sum()),
@@ -309,7 +406,72 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
     return elements, report
 
 
-def build(elements: List[Dict[str, Any]], *, session: str, scan_key: str, geometry_epoch: str, described: str):
+def element_colours(elements: List[Dict[str, Any]], texture: Optional[Dict[str, Any]]) -> None:
+    """Each textured element's DOMINANT colour, set as ``e["colour"]`` (r, g, b in 0..1): the colour of its triangles in
+    the image at their centres, the most common one at 5 bits a channel, each triangle weighing its area (USER
+    2026-11-24: "pintar cada elemento por el color dominante del elemento, un color plano con el color del elemento").
+    The images are decoded one at a time."""
+    if not texture:
+        return
+    from PIL import Image
+    parts: Dict[int, List[Tuple[int, np.ndarray]]] = {}
+    for k, e in enumerate(elements):
+        if "uv" in e:
+            for m in np.unique(e["material"]):
+                parts.setdefault(int(m), []).append((k, np.flatnonzero(e["material"] == m)))
+    samples: Dict[int, List[Tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+    with open(texture["glb"], "rb") as fh:
+        for m, owners in sorted(parts.items()):
+            info = texture["images"].get(m)
+            if not info:
+                continue
+            fh.seek(info["offset"])
+            img = np.asarray(Image.open(io.BytesIO(fh.read(info["length"]))).convert("RGB"))
+            h, w = img.shape[:2]
+            for k, fi in owners:
+                e = elements[k]
+                c = e["uv"][fi].mean(axis=1)                       # each triangle's centre in the image (v down)
+                x = np.clip(((c[:, 0] % 1.0) * w).astype(np.int64), 0, w - 1)
+                y = np.clip(((c[:, 1] % 1.0) * h).astype(np.int64), 0, h - 1)
+                rgb = img[y, x].astype(np.int64)
+                p = np.asarray(e["vertices"], np.float64)[np.asarray(e["faces"])[fi]]
+                area = np.linalg.norm(np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1) / 2
+                bins = (rgb[:, 0] >> 3) << 10 | (rgb[:, 1] >> 3) << 5 | (rgb[:, 2] >> 3)
+                samples.setdefault(k, []).append((bins, area, rgb))
+    for k, got in samples.items():
+        bins = np.concatenate([g[0] for g in got]); area = np.concatenate([g[1] for g in got])
+        rgb = np.concatenate([g[2] for g in got]).astype(np.float64)
+        weight = np.bincount(bins, weights=area, minlength=1 << 15)
+        top = int(np.argmax(weight))
+        sel = bins == top
+        wsum = float(area[sel].sum())
+        mean = (rgb[sel] * area[sel, None]).sum(axis=0) / wsum if wsum > 0 else rgb[sel].mean(axis=0)
+        elements[k]["colour"] = tuple(float(x) for x in np.clip(mean / 255.0, 0.0, 1.0))
+
+
+def write_textures(elements: List[Dict[str, Any]], texture: Optional[Dict[str, Any]], folder: Path) -> Dict[int, str]:
+    """The base-colour images the elements use, copied out of the GLB AS THEY ARE (no re-encoding) into ``folder``;
+    returns each material's URL as the IFC beside the folder refers to it (``<folder name>/m<material>.<ext>``)."""
+    if not texture:
+        return {}
+    used = sorted({int(m) for e in elements if "uv" in e for m in np.unique(e["material"])})
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    urls: Dict[int, str] = {}
+    with open(texture["glb"], "rb") as fh:
+        for m in used:
+            info = texture["images"].get(m)
+            if not info:
+                continue
+            ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}.get(info["mime"], "png")
+            fh.seek(info["offset"])
+            (folder / f"m{m}.{ext}").write_bytes(fh.read(info["length"]))
+            urls[m] = f"{folder.name}/m{m}.{ext}"
+    return urls
+
+
+def build(elements: List[Dict[str, Any]], *, session: str, scan_key: str, geometry_epoch: str, described: str,
+          textures: Optional[Dict[int, str]] = None):
     """The IFC4 model of ``elements`` (each a triangulated face set)."""
     import ifcopenshell
     f = ifcopenshell.file(schema="IFC4")
@@ -335,13 +497,54 @@ def build(elements: List[Dict[str, Any]], *, session: str, scan_key: str, geomet
     f.createIfcRelAggregates(_guid(*key, "agg", "project"), None, None, None, project, [site])
     f.createIfcRelAggregates(_guid(*key, "agg", "site"), None, None, None, site, [building])
     f.createIfcRelAggregates(_guid(*key, "agg", "building"), None, None, None, building, [storey])
+    images: Dict[int, Any] = {}
+
+    def image(m: int):                                           # one IfcImageTexture per atlas image
+        if m not in images:
+            images[m] = f.create_entity("IfcImageTexture", RepeatS=False, RepeatT=False, URLReference=textures[m])
+        return images[m]
+
+    def styled(item, label: str, colour, texture_entity) -> None:
+        """the face set's style: its texture over its element's dominant colour (a program without textures shows the colour)"""
+        layers = []
+        if colour is not None:
+            layers.append(f.createIfcSurfaceStyleShading(f.createIfcColourRgb(None, *[round(c, 4) for c in colour]), 0.0))
+        if texture_entity is not None:
+            layers.append(f.createIfcSurfaceStyleWithTextures([texture_entity]))
+        if layers:
+            f.createIfcStyledItem(item, [f.createIfcSurfaceStyle(label, "BOTH", layers)], None)
+
     products = []
     for e in elements:
-        xyz = np.round(np.asarray(e["vertices"], np.float64) @ TO_IFC.T, _DECIMALS) + 0.0     # (+ 0.0: no "-0.")
-        coords = f.createIfcCartesianPointList3D(xyz.tolist())
-        mesh = f.createIfcTriangulatedFaceSet(coords, None, None, (np.asarray(e["faces"]) + 1).tolist(), None)
+        items = []
+        colour = e.get("colour")
+        if textures and "uv" in e:
+            # one face set per atlas image, each with its texture map (IFC's t is up from the image's bottom)
+            for m in np.unique(e["material"]):
+                sel = e["material"] == m
+                gv, gf, kept_g = weld(np.asarray(e["vertices"]), np.asarray(e["faces"])[sel])
+                if not len(gf):
+                    continue
+                guv = e["uv"][sel][kept_g]
+                xyz = np.round(np.asarray(gv, np.float64) @ TO_IFC.T, _DECIMALS) + 0.0
+                mesh = f.createIfcTriangulatedFaceSet(f.createIfcCartesianPointList3D(xyz.tolist()), None, None,
+                                                      (gf + 1).tolist(), None)
+                st = np.round(np.stack([guv[..., 0], 1.0 - guv[..., 1]], axis=-1).reshape(-1, 2).astype(np.float64), 6) + 0.0
+                uniq, inv = np.unique(st, axis=0, return_inverse=True)
+                tex = image(int(m)) if int(m) in textures else None
+                if tex is not None:
+                    f.createIfcIndexedTriangleTextureMap([tex], mesh, f.createIfcTextureVertexList(uniq.tolist()),
+                                                         (inv.reshape(-1, 3) + 1).tolist())
+                styled(mesh, e["label"], colour, tex)
+                items.append(mesh)
+        if not items:
+            xyz = np.round(np.asarray(e["vertices"], np.float64) @ TO_IFC.T, _DECIMALS) + 0.0     # (+ 0.0: no "-0.")
+            coords = f.createIfcCartesianPointList3D(xyz.tolist())
+            mesh = f.createIfcTriangulatedFaceSet(coords, None, None, (np.asarray(e["faces"]) + 1).tolist(), None)
+            styled(mesh, e["label"], colour, None)
+            items = [mesh]
         shape = f.createIfcProductDefinitionShape(None, None, [
-            f.createIfcShapeRepresentation(body, "Body", "Tessellation", [mesh])])
+            f.createIfcShapeRepresentation(body, "Body", "Tessellation", items)])
         cls, predefined = e["ifc"]
         product = f.create_entity(cls, GlobalId=_guid(*key, "element", e["id"]), Name=f"{e['label']}:{e['label']}:{e['id']}",
                                   ObjectType=e["label"], ObjectPlacement=place(storey.ObjectPlacement),
@@ -404,14 +607,16 @@ def write(session: str, scan_key: str, *, keep: float, neighbours: int = 0, max_
     elements, report = elements_of(output_dir, mesh_of(output_dir), keep=keep, max_distance=voxel_of(),
                                    neighbours=neighbours, max_edge=max_edge_voxels * voxel_of() or None,
                                    measure=measure, log=log)
+    out = Path(out) if out is not None else Path(ctx.ifcs_dir) / f"{session}_{scan_key.replace('/', '_')}_from_mesh.ifc"
+    element_colours(elements, report.get("texture"))
+    urls = write_textures(elements, report.get("texture"), out.parent / f"{out.stem}_textures")
     dev = report.get("deviation_m")
     described = (f"STAC Build — built from the GenRecon mesh of the scan {session} {scan_key}, geometry epoch {epoch}, "
                  f"cut by its segmentation: each element is its object's part of the mesh. Triangles kept: "
                  f"{report['faces']:,} of {report['mesh_faces']:,}"
                  + (f"; distance from the full mesh: median {dev['median'] * 1000:.2f} mm, 95 % under {dev['p95'] * 1000:.2f} mm"
                     if dev else ""))
-    model = build(elements, session=session, scan_key=scan_key, geometry_epoch=epoch, described=described)
-    out = Path(out) if out is not None else Path(ctx.ifcs_dir) / f"{session}_{scan_key.replace('/', '_')}_from_mesh.ifc"
+    model = build(elements, session=session, scan_key=scan_key, geometry_epoch=epoch, described=described, textures=urls)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(f".{out.name}.tmp")
     model.write(str(tmp))
@@ -419,7 +624,8 @@ def write(session: str, scan_key: str, *, keep: float, neighbours: int = 0, max_
     by_class: Dict[str, int] = {}
     for e in elements:
         by_class[e["ifc"][0]] = by_class.get(e["ifc"][0], 0) + 1
-    report.update(path=str(out), bytes=out.stat().st_size, by_class=by_class)
+    report.update(path=str(out), bytes=out.stat().st_size, by_class=by_class, textures=len(urls),
+                  coloured=sum(1 for e in elements if "colour" in e))
     return report
 
 

@@ -40,7 +40,7 @@ ITEMS = ("e57", "las", "ply", "glb", "ifc", "csv")
 CLOUD_ITEMS = ("e57", "las", "ply")
 LANGS = ("es", "en", "fr")
 # already packed: stored as they are; the rest is deflated fast (level 1)
-_STORED = (".glb", ".e57")
+_STORED = (".glb", ".e57", ".png", ".jpg", ".jpeg", ".webp")       # already compressed
 
 
 class ExportError(ValueError):
@@ -247,6 +247,16 @@ _T = {
         "fr": "{file} — IFC4 : le maillage GenRecon découpé par la segmentation, {n} éléments, chacun la partie du maillage de son objet, "
               "avec sa classe (mur, dalle, porte, poutre, gaine… ; le reste en IfcBuildingElementProxy) et son id. {kept} % des triangles du "
               "maillage sont conservés ; 95 % de la surface est à moins de {p95} mm du maillage complet. Revit, Navisworks, BIMcollab, Solibri."},
+    "ifc_textures": {
+        "es": "{folder}/ — las {n} imágenes de la textura GenRecon a las que apunta el IFC (déjelas junto al IFC): cada elemento lleva "
+              "su textura y, debajo, su color dominante. Los programas que leen texturas IFC (Bonsai / BlenderBIM) muestran la foto; los "
+              "que no (Revit, Navisworks) muestran el color de cada elemento.",
+        "en": "{folder}/ — the {n} images of the GenRecon texture the IFC points to (keep them beside the IFC): each element carries its "
+              "texture and, under it, its dominant colour. Programs that read IFC textures (Bonsai / BlenderBIM) show the photograph; "
+              "those that do not (Revit, Navisworks) show each element's colour.",
+        "fr": "{folder}/ — les {n} images de la texture GenRecon vers lesquelles pointe l'IFC (gardez-les à côté de l'IFC) : chaque élément "
+              "porte sa texture et, dessous, sa couleur dominante. Les logiciels qui lisent les textures IFC (Bonsai / BlenderBIM) montrent "
+              "la photo ; les autres (Revit, Navisworks) la couleur de chaque élément."},
     "loaded_title": {"es": "STAC Build — IFC cargados en el proyecto {session}", "en": "STAC Build — IFC files loaded in the project {session}",
                      "fr": "STAC Build — IFC chargés dans le projet {session}"},
     "loaded": {"es": "{file} — IFC cargado en el proyecto, tal como se subió.", "en": "{file} — an IFC loaded in the project, as it was uploaded.",
@@ -339,15 +349,27 @@ def _produce(session: str, scan_key: Optional[str], items: List[str], *, confide
             neighbours=int(how["neighbours"]), max_edge=float(how["max_edge_voxels"]) * voxel or None,
             measure=True, log=lambda m: at("ifc", 0.5, m))
         path = work / f"{name}_elements.ifc"
+        # the texture (USER 2026-11-24: "proba mejor con la textura real primero si no sale vamos por el color
+        # dominante"): its images beside the IFC, and each element's dominant colour under it
+        at("ifc", 0.8, "the texture's images and each element's colour")
+        ifc_from_mesh.element_colours(elements, cut.get("texture"))
+        tex_dir = work / f"{path.stem}_textures"
+        urls = ifc_from_mesh.write_textures(elements, cut.get("texture"), tex_dir)
         ifc_from_mesh.build(elements, session=session, scan_key=scan_key or "",
                             geometry_epoch=str(state_of(out)["geometry_epoch"]),
-                            described=f"STAC Build — the GenRecon mesh of {session} {scan_key or ''} cut by its segmentation"
-                            ).write(str(path))
+                            described=f"STAC Build — the GenRecon mesh of {session} {scan_key or ''} cut by its segmentation",
+                            textures=urls).write(str(path))
         files.append({"path": path, "arc": path.name, "key": "ifc"})
+        for img in (sorted(tex_dir.iterdir()) if urls else []):
+            files.append({"path": img, "arc": f"{tex_dir.name}/{img.name}", "key": "ifc"})
         dev = cut.get("deviation_m")
         lines.append(_t("ifc", lang, file=path.name, n=len(elements), kept=f"{100.0 * cut['faces'] / cut['mesh_faces']:.0f}",
                         p95=f"{dev['p95'] * 1000:.2f}" if dev else "0"))
+        if urls:
+            lines.append(_t("ifc_textures", lang, folder=tex_dir.name, n=len(urls)))
         report["ifc_elements"] = len(elements)
+        report["ifc_textures"] = len(urls)
+        report["ifc_coloured"] = sum(1 for e in elements if "colour" in e)
         report["ifc"] = {k: cut[k] for k in ("mesh_faces", "faces", "faces_written", "faces_no_object", "keep") if k in cut}
         if dev:
             report["ifc"]["deviation_m"] = dev
