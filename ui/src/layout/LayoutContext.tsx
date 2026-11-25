@@ -14,7 +14,7 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
-export type LeftTab = 'sessions' | 'instances' | 'tickets' | 'scans' | 'bim' | 'docs' | 'gantt' | 'team'
+export type LeftTab = 'sessions' | 'instances' | 'tickets' | 'scans' | 'bim' | 'docs' | 'gantt' | 'globe' | 'team'
 export type InspectorTab = 'properties' | 'assistant'
 export type DockTab = 'console' | 'jobs' | 'timeline' | 'evaluation'
 export type Density = 'compact' | 'comfortable'

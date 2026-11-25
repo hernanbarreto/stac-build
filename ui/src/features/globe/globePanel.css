@@ -1,0 +1,31 @@
+/* The globe's section of the left panel (GlobePanel.tsx) */
+.stac-globe-list { list-style: none; margin: 0 0 var(--sp-3); padding: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+.stac-globe-list__group {
+  display: flex; align-items: center; gap: var(--sp-2); margin: var(--sp-3) 0 var(--sp-2);
+  font-size: var(--fs-1); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-2);
+}
+.stac-globe-list__group svg { width: 14px; height: 14px; }
+.stac-globe-list__group span { margin-left: auto; color: var(--text-3); font-weight: 500; }
+.stac-globe-list__row {
+  display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-2); border-radius: var(--r-2);
+  border: 1px solid var(--border-1); background: var(--surface-1);
+}
+.stac-globe-list__row.is-placing { border-color: var(--brand-orange); background: var(--brand-orange-soft); }
+.stac-globe-list__name {
+  display: flex; align-items: center; gap: var(--sp-2); min-width: 0; padding: 0; border: 0; background: none;
+  color: var(--text-1); font: inherit; font-weight: 600; text-align: left; cursor: pointer;
+}
+.stac-globe-list__name--plain { cursor: default; }
+.stac-globe-list__name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stac-globe-list__name svg { flex: none; width: 16px; height: 16px; color: var(--brand-orange); }
+.stac-globe-list__name:hover span { text-decoration: underline; }
+.stac-globe-list__meta { color: var(--text-2); font-size: var(--fs-1); font-variant-numeric: tabular-nums; }
+.stac-globe-list__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1); }
+.stac-globe-list__actions > span { color: var(--text-2); font-size: var(--fs-1); }
+.stac-globe-list__hint { color: var(--text-3); font-size: var(--fs-1); margin: var(--sp-1) 0; }
+.stac-globe-list__error { color: var(--err-fg); font-size: var(--fs-1); margin: var(--sp-1) 0; }
+/* while CesiumJS is being fetched the first time (App's Suspense around GlobeView) */
+.stac-globe-fallback {
+  position: absolute; inset: 0; z-index: 70; display: grid; place-items: center;
+  background: var(--surface-0); color: var(--text-2); font-size: var(--fs-2);
+}

@@ -8,7 +8,7 @@
  * (features/*) that receive their handlers as props — prompt_ui.txt §5.
  * Status messages go through i18n (`tt` = translator for callbacks).
  */
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
 import Viewport, { ViewportHandle, SegmentInstance, type CubeInfo } from './components/Viewport'
 import type { UserVolume } from './components/assistantViz'
 import { SyncPlayer } from './components/SyncPlayer'
@@ -27,7 +27,7 @@ import { DocumentationPanel, GanttPanel } from './features/ProjectPanels'
 import { TicketsPanel, TicketCreateDialog, ticketTone, ticketHistory, objectName, type Ticket, type TicketCounts, type TicketDraft } from './features/TicketsPanel'
 import { CommonPointsDialog, type CommonFit, type CommonPoint } from './features/CommonPointsDialog'
 import AssistantPanel from './components/AssistantPanel'
-import { TriangleAlert, BadgeCheck, FileText, ChartNoAxesGantt, Flag, Waypoints,
+import { Earth, TriangleAlert, BadgeCheck, FileText, ChartNoAxesGantt, Flag, Waypoints,
   Search, Tag, Plug, Settings, Crosshair, Maximize, Monitor, Grid3X3, RotateCcw, Ruler, TriangleRight, Scissors,
   Move, BookOpen, Keyboard, Info, Users, LogOut, FolderOpen, Axis3D, Building2, Package, ArrowUpFromLine, Trash2, Unlock,
   Clock, Scale, BarChart3, Home, Camera, SlidersHorizontal, Sparkles, Undo2, Brush, Layers, Star, Terminal,
@@ -76,6 +76,11 @@ import { EvaluationPanel } from './features/EvaluationPanel'
 import { PhysicsPanel } from './features/PhysicsPanel'
 import { ConsolePanel, JobsPanel, PropertiesPanel, type JobTask } from './features/DockPanels'
 import { setScanContext } from './net/scanHeader'
+import { GlobePanel } from './features/globe/GlobePanel'
+import { fetchGeoProjects, removeGeoref, saveGeoref, type GeoProject } from './features/globe/geo'
+
+// the globe and CesiumJS are loaded when the globe is first opened (USER 2026-11-24 — features/globe)
+const GlobeView = lazy(() => import('./features/globe/GlobeView'))
 
 /** Translator for callbacks defined before the i18n hook is read. */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -1581,6 +1586,45 @@ function App() {
   const { t, fmt, lang, setLang } = useI18n()
   const layout = useLayout()
   const { notify } = useToast()
+
+  // THE GLOBE (features/globe — USER 2026-11-24: "en el panel izquierdo debe haber una opción con icono de mundo …
+  // cuando selecciono alguno de los pines, me lleva a ese lugar del mapa cesium y abre la sesión por defecto"): the
+  // works and their places, the one being placed, the one to fly to
+  const [geoProjects, setGeoProjects] = useState<GeoProject[]>([])
+  const [geoLoading, setGeoLoading] = useState(false)
+  const [geoError, setGeoError] = useState<string | null>(null)
+  const [globePlacing, setGlobePlacing] = useState<string | null>(null)
+  const [globeFocus, setGlobeFocus] = useState<{ sid: string; n: number } | null>(null)
+  const globeOpen = layout.state.leftTab === 'globe'
+  const refreshGeo = useCallback(async () => {
+    setGeoLoading(true)
+    try { setGeoProjects(await fetchGeoProjects()); setGeoError(null) }
+    catch (e) { setGeoError(e instanceof Error ? e.message : String(e)) }
+    finally { setGeoLoading(false) }
+  }, [])
+  useEffect(() => { if (globeOpen) void refreshGeo(); else setGlobePlacing(null) }, [globeOpen, refreshGeo])
+  const flyToWork = useCallback((sid: string) => setGlobeFocus(f => ({ sid, n: (f?.n ?? 0) + 1 })), [])
+  const placeWork = useCallback(async (sid: string, at: { lat: number; lon: number; height_m: number }) => {
+    const name = sid                                  // the session's name, as the whole app writes it
+    try {
+      // placed by hand: the heading it had is kept (0 = the plan's up to the north until it is turned)
+      const heading = geoProjects.find(p => p.session_id === sid)?.georef?.heading_deg ?? 0
+      await saveGeoref(sid, { ...at, heading_deg: heading, source: 'manual' }, token)
+      setGlobePlacing(null)
+      await refreshGeo()
+      notify(t('globe.saved', { name }), { tone: 'ok' })
+    } catch (e) {
+      setGeoError(e instanceof Error ? e.message : String(e))
+    }
+  }, [geoProjects, token, refreshGeo, notify, t])
+  const removePlace = useCallback(async (sid: string) => {
+    try { await removeGeoref(sid, token); await refreshGeo() }
+    catch (e) { setGeoError(e instanceof Error ? e.message : String(e)) }
+  }, [token, refreshGeo])
+  const openFromGlobe = useCallback((sid: string) => {
+    layout.setLeftTab(null)                          // the globe closes: the work opens in the 3D viewer
+    if (sid !== activeSession) handleSessionLoad(sid)
+  }, [layout, activeSession, handleSessionLoad])
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [selectedSegmentId, setSelectedSegmentId] = useState<number | null>(null)
@@ -3352,6 +3396,9 @@ function App() {
     //  completo, pero por el momento vacio, y otro campo mas que es el gantt")
     { id: 'docs', icon: <FileText aria-hidden />, label: t('docs.title'), active: layout.state.leftTab === 'docs', disabled: !hasSession, onClick: () => layout.toggleLeftTab('docs') },
     { id: 'gantt', icon: <ChartNoAxesGantt aria-hidden />, label: t('gantt.title'), active: layout.state.leftTab === 'gantt', disabled: !hasSession, onClick: () => layout.toggleLeftTab('gantt') },
+    // (USER 2026-11-24: "en el panel izquierdo debe haber una opción con icono de mundo") — every work, with or
+    //  without a session open
+    { id: 'globe', icon: <Earth aria-hidden />, label: t('globe.title'), active: globeOpen, onClick: () => layout.toggleLeftTab('globe') },
   ]
   // HOW MANY TASKS ARE RUNNING OR QUEUED (USER 2026-11-19: "en el icono de consola deberia figurar el numero de
   // tareas que se estan ejecutando o en cola"): every pipeline job — each scan's, running or waiting its turn —,
@@ -3535,6 +3582,11 @@ function App() {
             )}
             {layout.state.leftTab === 'docs' && <DocumentationPanel />}
             {layout.state.leftTab === 'gantt' && <GanttPanel />}
+            {globeOpen && (
+              <GlobePanel projects={geoProjects} loading={geoLoading} error={geoError} placing={globePlacing} canEdit={!!token}
+                onShow={flyToWork} onOpen={openFromGlobe} onRefresh={() => void refreshGeo()}
+                onPlace={sid => { setGlobePlacing(sid); flyToWork(sid) }} onRemove={sid => void removePlace(sid)} />
+            )}
             {layout.state.leftTab === 'tickets' && (
               <TicketsPanel sessionId={activeSession} scanKey={activeScanTab} tickets={tickets} counts={ticketCounts}
                 userName={user?.username ?? null} canManage={canManage} selectedId={selectedTicket} hidden={hiddenTickets} loadError={ticketsError}
@@ -3604,6 +3656,13 @@ function App() {
             pin, a button drawn over the canvas, opened the browser's. USER 2026-11-19: "no debe aparecer nada") */}
         <div className={`stac-main__viewport ${loadingOverlay ? 'stac-main__viewport--hidden' : ''} ${flythroughOpen ? 'stac-main__viewport--flythrough' : ''}`.trim()}
           onContextMenu={e => e.preventDefault()}>
+          {globeOpen && (
+            // THE GLOBE over the viewer while its section is open; the viewer underneath keeps its state
+            <Suspense fallback={<div className="stac-globe-fallback">{t('globe.loading')}</div>}>
+              <GlobeView projects={geoProjects} placing={globePlacing} focus={globeFocus}
+                onPlaced={placeWork} onCancelPlacing={() => setGlobePlacing(null)} onOpen={openFromGlobe} />
+            </Suspense>
+          )}
           <Viewport
             ref={viewportRef}
             openScanKey={openScanKey}

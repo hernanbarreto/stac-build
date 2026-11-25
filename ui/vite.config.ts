@@ -76,6 +76,9 @@ export default defineConfig(async () => {
 
   return {
     plugins,
+    // CesiumJS (the globe, features/globe) pre-bundled when the server starts, not on the first open of the globe
+    // (that would reload the page); its workers and assets are public/cesium (a link to node_modules)
+    optimizeDeps: { include: ['cesium'] },
     build: {
       rollupOptions: {
         input: {
