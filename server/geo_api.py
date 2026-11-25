@@ -112,3 +112,62 @@ def geo_delete(session_id: str, user: Optional[Dict[str, Any]] = Depends(_user))
     if removed and _audit_log is not None:
         _audit_log("geo.remove", session_id, user=who, role=(user or {}).get("role", ""), detail="")
     return {"ok": True, "removed": removed}
+
+
+def _scan_of(session_id: str, scan: Optional[str]) -> str:
+    """The scan a place is about: the one asked, else the one the georeference speaks of, else the reference."""
+    d = _project_dir(session_id)
+    if scan:
+        return scan
+    g = G.load(d)
+    return (g or {}).get("scan") or _project_row(d)["reference"] or ""
+
+
+def _scan_ctx(session_id: str, scan: str):
+    if _resolve_ctx is None:
+        raise HTTPException(500, "geo router not configured")
+    ctx = _resolve_ctx(session_id, scan) if scan else _resolve_ctx(session_id)
+    if not Path(ctx.output_dir).is_dir():
+        raise HTTPException(404, f"{session_id} {scan}: no such scan")
+    return ctx
+
+
+@router.get("/{session_id}/video")
+def geo_from_video(session_id: str, scan: Optional[str] = None):
+    """Where the scan's video says it was taken (its container's GPS tag), or None."""
+    key = _scan_of(session_id, scan)
+    ctx = _scan_ctx(session_id, key)
+    src = Path(getattr(ctx, "source_dir", None) or Path(ctx.output_dir).parent)
+    videos = [p for p in sorted(src.iterdir()) if p.suffix.lower() in (".mp4", ".mov", ".m4v")] if src.is_dir() else []
+    video = next((p for p in videos if p.stem == "source_video"), videos[0] if videos else None)
+    return {"ok": True, "scan": key, "video": video.name if video else None,
+            "location": G.video_location(video) if video else None}
+
+
+_PLANS: Dict[tuple, Dict[str, Any]] = {}
+
+
+@router.get("/{session_id}/plan")
+def geo_plan(session_id: str, scan: Optional[str] = None):
+    """The scan from above (geo.plan_raster) as a PNG data URL with where it lies in the plan's frame. Kept in this
+    process's memory for the cloud as it is (its size and date) — nothing is written in the session."""
+    import base64
+    key = _scan_of(session_id, scan)
+    out = Path(_scan_ctx(session_id, key).output_dir)
+    cloud, ft = out / "cleaned_cloud.ply", out / "floor_transform.npz"
+    if not cloud.is_file():
+        raise HTTPException(404, f"{session_id} {key}: no published cloud")
+    st = cloud.stat()
+    stamp = (str(cloud), st.st_size, st.st_mtime_ns, ft.stat().st_mtime_ns if ft.is_file() else 0)
+    plan = _PLANS.get(stamp)
+    if plan is None:
+        try:
+            r = G.plan_raster(out)
+        except G.GeoError as e:
+            raise HTTPException(500, str(e)) from e
+        plan = {k: v for k, v in r.items() if k != "png"}
+        plan["image"] = "data:image/png;base64," + base64.b64encode(r["png"]).decode("ascii")
+        if len(_PLANS) >= 8:
+            _PLANS.pop(next(iter(_PLANS)))
+        _PLANS[stamp] = plan
+    return {"ok": True, "scan": key, **plan}

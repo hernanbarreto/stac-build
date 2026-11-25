@@ -9,7 +9,8 @@
  * archivo zip"). Presentational: every handler comes from App.
  */
 import { useState } from 'react'
-import { ArrowUpFromLine, Crosshair, Download, FolderOpen, Hammer, Layers, Loader2, Pencil, Play, Plug, Plus, Star, Tag, Trash2, Upload, Check, X } from 'lucide-react'
+import { ArrowUpFromLine, Crosshair, Download, FolderOpen, Hammer, Layers, Loader2, MapPin, Pencil, Play, Plug, Plus, Star, Tag, Trash2, Upload, Check, X } from 'lucide-react'
+import type { Georef } from './globe/geo'
 import { Panel, Row, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
 import { IconButton } from '../components/ui/IconButton'
@@ -83,6 +84,10 @@ interface SessionsPanelProps {
   /** the search box's text — the app's state: STAC sets it by command (sessions.filter) */
   filter: string
   onFilter: (text: string) => void
+  /** the works placed on the globe (USER 2026-11-24: "guardamos y ya queda indicado que ese proyecto tiene asignado el
+   *  punto gps") and the window that places one (features/globe/LocationDialog) */
+  placed?: Record<string, Georef>
+  onLocate?: (id: string) => void
 }
 
 export function SessionsPanel(p: SessionsPanelProps) {
@@ -137,6 +142,12 @@ export function SessionsPanel(p: SessionsPanelProps) {
           <Row className="stac-sessions__meta">
             <span>{t.plural('sessions.frames', s.frameCount)}</span>
             {s.hasCloud && <span>{fmt.bytesMb(s.cloudSizeMb)}</span>}
+            {p.placed?.[s.id] && (
+              <span className="stac-sessions__placed" title={t('location.placedAt', {
+                place: `${p.placed[s.id].lat.toFixed(5)}, ${p.placed[s.id].lon.toFixed(5)}`, source: t(`globe.source_${p.placed[s.id].source}`) })}>
+                <MapPin aria-hidden />
+              </span>
+            )}
             {/* no segmentation / BIM mark per session (USER 2026-11-20: "no hacen falta para cada sesion
                 porque ya se indica la cantidad en la solapa correspondiente, es para que quede mas limpio") */}
           </Row>
@@ -185,6 +196,7 @@ export function SessionsPanel(p: SessionsPanelProps) {
             {loaded && <IconButton size="sm" label={t('sessions.segmentAuto')} icon={<Tag aria-hidden />} onClick={() => p.onSegment(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.segmentManual')} icon={<Crosshair aria-hidden />} onClick={() => p.onOpenManager(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.unload')} icon={<ArrowUpFromLine aria-hidden />} onClick={p.onUnload} />}
+            {p.onLocate && <IconButton size="sm" label={t('location.action')} icon={<MapPin aria-hidden />} onClick={() => p.onLocate?.(s.id)} />}
             {p.canManage && <IconButton size="sm" label={t('sessions.downloadZip')} icon={<Download aria-hidden />} onClick={() => p.onDownloadZip(s.id)} />}
             {p.canManage && <IconButton size="sm" label={t('sessions.rename')} icon={<Pencil aria-hidden />} onClick={() => { setRenaming(s.id); setRenameValue(s.id) }} />}
             {p.canManage && <IconButton size="sm" variant="danger" label={t('sessions.delete')} icon={<Trash2 aria-hidden />} onClick={() => p.onDelete(s.id)} />}

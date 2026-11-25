@@ -76,3 +76,90 @@ def test_the_routes_list_every_project_and_setting_one_needs_a_user(tmp_path):
     assert client.delete("/api/geo/pccr").json()["removed"] is True
     assert client.get("/api/geo/pccr").json()["georef"] is None
     assert audit == ["geo.set", "geo.remove"]
+
+
+def test_the_place_a_video_recorded_is_read_from_its_container(tmp_path):
+    assert G.parse_iso6709("+41.6488-000.8891/") == {"lat": 41.6488, "lon": -0.8891}
+    assert G.parse_iso6709("+40.4168-003.7038+650.000/") == {"lat": 40.4168, "lon": -3.7038, "altitude_m": 650.0}
+    for bad in ("", "north", "+91.0+000.0/", "+40.0+190.0/"):
+        assert G.parse_iso6709(bad) is None, bad
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("no ffmpeg on this machine")
+    with_gps, without = tmp_path / "with.mp4", tmp_path / "without.mp4"
+    for path, extra in ((with_gps, ["-metadata", "location=+41.6488-000.8891/"]), (without, [])):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.2", *extra,
+                        str(path)], check=True)
+    place = G.video_location(with_gps)
+    assert (place["lat"], place["lon"], place["tag"]) == (41.6488, -0.8891, "location")
+    assert G.video_location(without) is None
+
+
+def _ply(path, rows):
+    """A binary PLY with the published cloud's fields: (x, y, z, r, g, b)."""
+    import numpy as np
+    dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1"),
+                   ("confidence", "<f4"), ("frame_global", "<i4"), ("pixel_row", "<i2"), ("pixel_col", "<i2")])
+    a = np.zeros(len(rows), dt)
+    for k, (x, y, z, r, g, b) in enumerate(rows):
+        a[k] = (x, y, z, r, g, b, 1.0, 0, 0, 0)
+    head = ("ply\nformat binary_little_endian 1.0\n"
+            f"element vertex {len(rows)}\n"
+            + "".join(f"property {t} {n}\n" for n, t in (("x", "float"), ("y", "float"), ("z", "float"),
+                                                       ("red", "uchar"), ("green", "uchar"), ("blue", "uchar"),
+                                                       ("confidence", "float"), ("frame_global", "int"),
+                                                       ("pixel_row", "short"), ("pixel_col", "short")))
+            + "end_header\n").encode("ascii")
+    path.write_bytes(head + a.tobytes())
+
+
+def test_the_plan_shows_each_cell_from_above_in_the_georeferences_frame(tmp_path):
+    import io
+
+    import numpy as np
+    from PIL import Image
+    out = tmp_path / "output"
+    out.mkdir()
+    # display frame, y up: the plan is X = x, Y = -z. A low red point and a high blue one in the same cell (x 0,
+    # z 0); a green one 1 m to the plan's +Y (z = -1); a white one 1 m to +X
+    _ply(out / "cleaned_cloud.ply", [(0.02, 0.0, -0.02, 255, 0, 0), (0.02, 2.0, -0.02, 0, 0, 255),
+                                     (0.02, 0.0, -1.02, 0, 255, 0), (1.02, 0.0, -0.02, 255, 255, 255)])
+    r = G.plan_raster(out, min_cell_m=0.05)
+    img = np.asarray(Image.open(io.BytesIO(r["png"])))
+    assert r["cell_m"] == 0.05 and (r["width"], r["height"]) == img.shape[1::-1]
+    def at(x, y):                                   # the cell of plan point (x, y), as the cloud stores it (float32)
+        xf, yf = float(np.float32(x)), -float(np.float32(-y))
+        return img[int((r["y_max"] - yf) // r["cell_m"]), int((xf - r["x_min"]) // r["cell_m"])]
+    assert tuple(at(0.02, 0.02)) == (0, 0, 255, 255)           # the higher point's colour
+    assert tuple(at(0.02, 1.02)) == (0, 255, 0, 255)           # +Y is up in the image (a smaller row)
+    assert tuple(at(1.02, 0.02)) == (255, 255, 255, 255)
+    assert img[..., 3].sum() == 3 * 255                         # nothing else drawn: the imagery shows through
+    # the floor adjustment of the scan is applied (here a quarter turn about the vertical)
+    np.savez(out / "floor_transform.npz", R=np.array([[0.0, 0, 1], [0, 1, 0], [-1, 0, 0]]), s=np.float64(1.0),
+             t=np.zeros(3))
+    turned = G.plan_raster(out, min_cell_m=0.05)
+    assert (turned["width"], turned["height"]) != (r["width"], r["height"]) or turned["x_min"] != r["x_min"]
+
+
+def test_the_plan_and_the_videos_place_through_the_routes(tmp_path):
+    import types
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import geo_api
+
+    d = _project(tmp_path, "grupo_electrogeno")
+    src = d / "scans" / "2026-11-24" / "src_default"
+    _ply(src / "output" / "cleaned_cloud.ply", [(0.0, 0.0, 0.0, 10, 20, 30), (3.0, 1.0, -4.0, 40, 50, 60)])
+    ctx = types.SimpleNamespace(output_dir=src / "output", source_dir=src, session_dir=src)
+    geo_api.configure(resolve_ctx=lambda *a: ctx, projects_dir=lambda: tmp_path)
+    app = FastAPI()
+    app.include_router(geo_api.router)
+    client = TestClient(app)
+    plan = client.get("/api/geo/grupo_electrogeno/plan").json()
+    assert plan["scan"] == "2026-11-24/default" and plan["image"].startswith("data:image/png;base64,")
+    assert plan["points"] == 2 and plan["x_min"] == 0.0 and plan["y_max"] == 4.0
+    assert client.get("/api/geo/grupo_electrogeno/plan").json() == plan           # the same, from memory
+    video = client.get("/api/geo/grupo_electrogeno/video").json()
+    assert video == {"ok": True, "scan": "2026-11-24/default", "video": None, "location": None}

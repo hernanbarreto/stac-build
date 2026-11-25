@@ -77,10 +77,11 @@ import { PhysicsPanel } from './features/PhysicsPanel'
 import { ConsolePanel, JobsPanel, PropertiesPanel, type JobTask } from './features/DockPanels'
 import { setScanContext } from './net/scanHeader'
 import { GlobePanel } from './features/globe/GlobePanel'
-import { fetchGeoProjects, removeGeoref, saveGeoref, type GeoProject } from './features/globe/geo'
+import { fetchGeoProjects, removeGeoref, type GeoProject } from './features/globe/geo'
 
 // the globe and CesiumJS are loaded when the globe is first opened (USER 2026-11-24 — features/globe)
 const GlobeView = lazy(() => import('./features/globe/GlobeView'))
+const LocationDialog = lazy(() => import('./features/globe/LocationDialog').then(m => ({ default: m.LocationDialog })))
 
 /** Translator for callbacks defined before the i18n hook is read. */
 const tt = (key: string, vars?: Record<string, string | number | null | undefined>) => getT()(key, vars)
@@ -1593,7 +1594,7 @@ function App() {
   const [geoProjects, setGeoProjects] = useState<GeoProject[]>([])
   const [geoLoading, setGeoLoading] = useState(false)
   const [geoError, setGeoError] = useState<string | null>(null)
-  const [globePlacing, setGlobePlacing] = useState<string | null>(null)
+  const [locating, setLocating] = useState<string | null>(null)       // the work whose Location window is open
   const [globeFocus, setGlobeFocus] = useState<{ sid: string; n: number } | null>(null)
   const globeOpen = layout.state.leftTab === 'globe'
   const refreshGeo = useCallback(async () => {
@@ -1602,21 +1603,18 @@ function App() {
     catch (e) { setGeoError(e instanceof Error ? e.message : String(e)) }
     finally { setGeoLoading(false) }
   }, [])
-  useEffect(() => { if (globeOpen) void refreshGeo(); else setGlobePlacing(null) }, [globeOpen, refreshGeo])
+  // the places are read when the globe opens and whenever the sessions change (the sessions list marks the placed ones)
+  useEffect(() => { if (globeOpen) void refreshGeo() }, [globeOpen, refreshGeo])
+  const sessionIds = sessions.map(s => s.id).join('|')
+  useEffect(() => { if (sessionIds) void refreshGeo() }, [sessionIds, refreshGeo])
+  const geoPlaced = useMemo(() => Object.fromEntries(geoProjects.filter(p => p.georef).map(p => [p.session_id, p.georef!])),
+    [geoProjects])
   const flyToWork = useCallback((sid: string) => setGlobeFocus(f => ({ sid, n: (f?.n ?? 0) + 1 })), [])
-  const placeWork = useCallback(async (sid: string, at: { lat: number; lon: number; height_m: number }) => {
-    const name = sid                                  // the session's name, as the whole app writes it
-    try {
-      // placed by hand: the heading it had is kept (0 = the plan's up to the north until it is turned)
-      const heading = geoProjects.find(p => p.session_id === sid)?.georef?.heading_deg ?? 0
-      await saveGeoref(sid, { ...at, heading_deg: heading, source: 'manual' }, token)
-      setGlobePlacing(null)
-      await refreshGeo()
-      notify(t('globe.saved', { name }), { tone: 'ok' })
-    } catch (e) {
-      setGeoError(e instanceof Error ? e.message : String(e))
-    }
-  }, [geoProjects, token, refreshGeo, notify, t])
+  const onLocated = useCallback(async (sid: string) => {
+    setLocating(null)
+    await refreshGeo()
+    notify(t('globe.saved', { name: sid }), { tone: 'ok' })
+  }, [refreshGeo, notify, t])
   const removePlace = useCallback(async (sid: string) => {
     try { await removeGeoref(sid, token); await refreshGeo() }
     catch (e) { setGeoError(e instanceof Error ? e.message : String(e)) }
@@ -3560,7 +3558,7 @@ function App() {
         {layout.state.leftTab && (
           <SidePanel>
             {layout.state.leftTab === 'sessions' && (
-              <SessionsPanel filter={sessionFilter} onFilter={setSessionFilter} connected={connected} sessions={sessions} selectedSession={selectedSession} activeSession={activeSession}
+              <SessionsPanel placed={geoPlaced} onLocate={setLocating} filter={sessionFilter} onFilter={setSessionFilter} connected={connected} sessions={sessions} selectedSession={selectedSession} activeSession={activeSession}
                 scansOf={sid => (sid === activeSession && projectScans.length ? projectScans : (allProjectScans[sid] || []))}
                 activeScanKey={activeScanTab} pipelineJobs={pipelineJobs}
                 extracting={extractingSessions} canManage={canManage}
@@ -3583,9 +3581,9 @@ function App() {
             {layout.state.leftTab === 'docs' && <DocumentationPanel />}
             {layout.state.leftTab === 'gantt' && <GanttPanel />}
             {globeOpen && (
-              <GlobePanel projects={geoProjects} loading={geoLoading} error={geoError} placing={globePlacing} canEdit={!!token}
+              <GlobePanel projects={geoProjects} loading={geoLoading} error={geoError} placing={locating} canEdit={!!token}
                 onShow={flyToWork} onOpen={openFromGlobe} onRefresh={() => void refreshGeo()}
-                onPlace={sid => { setGlobePlacing(sid); flyToWork(sid) }} onRemove={sid => void removePlace(sid)} />
+                onPlace={setLocating} onRemove={sid => void removePlace(sid)} />
             )}
             {layout.state.leftTab === 'tickets' && (
               <TicketsPanel sessionId={activeSession} scanKey={activeScanTab} tickets={tickets} counts={ticketCounts}
@@ -3659,8 +3657,14 @@ function App() {
           {globeOpen && (
             // THE GLOBE over the viewer while its section is open; the viewer underneath keeps its state
             <Suspense fallback={<div className="stac-globe-fallback">{t('globe.loading')}</div>}>
-              <GlobeView projects={geoProjects} placing={globePlacing} focus={globeFocus}
-                onPlaced={placeWork} onCancelPlacing={() => setGlobePlacing(null)} onOpen={openFromGlobe} />
+              <GlobeView projects={geoProjects} focus={globeFocus} onOpen={openFromGlobe} />
+            </Suspense>
+          )}
+          {locating && (
+            // THE LOCATION OF A WORK (features/globe/LocationDialog — its map is the globe's, loaded when first opened)
+            <Suspense fallback={null}>
+              <LocationDialog sessionId={locating} token={token} onClose={() => setLocating(null)}
+                onSaved={() => void onLocated(locating)} />
             </Suspense>
           )}
           <Viewport

@@ -10,6 +10,13 @@
   height: var(--icon-sm);
 }
 
+/* a work placed on the globe (features/globe): its pin, in the brand's colour */
+.stac-sessions__placed {
+  display: inline-flex;
+  align-items: center;
+  color: var(--brand-orange);
+}
+
 .stac-sessions__star {
   width: var(--icon-sm);
   height: var(--icon-sm);
