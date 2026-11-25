@@ -2460,33 +2460,80 @@ function App() {
     finally { setSessionLoading(null) }
   }, [interactiveSessionId, reloadSegments, refreshUnsegmentedCount, refreshFloorLevel, report, t])
 
-  /** delete one BIM model from the server; `confirmed`: already confirmed (STAC's spoken confirmation) */
-  /** a tick in the BIM panel: a model listed and not loaded is loaded (as an uploaded one is) and shown; a loaded one
-   *  is hidden or shown again — it stays in memory, a second tick is instant */
-  const toggleBimModel = useCallback(async (name: string, on: boolean) => {
-    const loaded = bimModels.find(m => m.filename === name)
-    if (loaded) {
-      loaded.group.visible = on
-      setBimHidden(h => (on ? h.filter(n => n !== name) : [...h.filter(n => n !== name), name]))
-      return
-    }
-    const item = bimAvailable.find(m => m.name === name)
-    if (!on || !item || bimLoading.includes(name)) return
-    setBimLoading(l => [...l, name])
-    setStatusMessage(t('bim.uploadedLoading', { name }))
+  // THE PROJECT'S IFC MODELS COME WITH THE SESSION, UNTICKED (USER 2026-11-25: "si lo debe mandar al ui, solo que debe
+  // estar destildado, porque cuando lo tildo recien ahi lo trae, no no, ya lo debe enviar solo que destildado para que
+  // no se cargue en el visor"): once the cloud is on screen (USER 2026-11-24: "para que no demore la carga, solo se
+  // carga la nube al abrir la sesion") every listed model is fetched and built in the background, one after another,
+  // and kept HIDDEN; its tick only shows it. A model that fails is said once and loaded again only by its tick.
+  const bimHiddenRef = useRef<string[]>([])
+  useEffect(() => { bimHiddenRef.current = bimHidden }, [bimHidden])
+  const bimSessionRef = useRef<string | null>(activeSession)
+  const bimInFlight = useRef<Set<string>>(new Set())
+  const bimFailed = useRef<Set<string>>(new Set())
+  useEffect(() => { bimSessionRef.current = activeSession; bimFailed.current.clear() }, [activeSession])
+  const [bimPrefetchTick, setBimPrefetchTick] = useState(0)
+  const onBimAvailable = useCallback((models: { name: string; url: string }[]) => {
+    bimHiddenRef.current = models.map(m => m.name)                       // every model arrives unticked
+    setBimHidden(bimHiddenRef.current)
+    setBimAvailable(models)
+  }, [])
+  /** fetch and build one listed model, add it to the scene shown only if its tick is on; null when it is already on
+   *  its way, or when another session was opened meanwhile (then it is dropped) */
+  const loadBimModel = useCallback(async (item: { name: string; url: string }) => {
+    if (bimInFlight.current.has(item.name)) return null
+    bimInFlight.current.add(item.name)
+    const sid = bimSessionRef.current
+    setBimLoading(l => [...l.filter(n => n !== item.name), item.name])
     try {
       const { loadIFC } = await import('./components/IFCLoader')
       const result = await loadIFC(item.url, item.name)
+      if (bimSessionRef.current !== sid) {
+        result.group.traverse(o => (o as { geometry?: { dispose?: () => void } }).geometry?.dispose?.())
+        return null
+      }
+      result.group.visible = !bimHiddenRef.current.includes(item.name)
       viewportRef.current?.addBIMGroup(result.group)
-      setBimModels(prev => [...prev.filter(m => m.filename !== name), result])
-      setBimHidden(h => h.filter(n => n !== name))
-      report(t('bim.loaded', { name, n: result.group.children.length }), 'ok')
+      setBimModels(prev => [...prev.filter(m => m.filename !== item.name), result])
+      return result
+    } finally {
+      bimInFlight.current.delete(item.name)
+      setBimLoading(l => l.filter(n => n !== item.name))
+    }
+  }, [])
+  const cloudOnScreen = pointCount > 0 || cloudEverShown
+  useEffect(() => {
+    if (!cloudOnScreen || bimInFlight.current.size > 0) return
+    const next = bimAvailable.find(m => !bimModels.some(x => x.filename === m.name) && !bimFailed.current.has(m.name))
+    if (!next) return
+    void loadBimModel(next)
+      .catch(err => {
+        bimFailed.current.add(next.name)
+        report(t('bim.uploadFailed', { detail: err instanceof Error ? err.message : String(err) }), 'err')
+      })
+      .finally(() => setBimPrefetchTick(n => n + 1))
+  }, [cloudOnScreen, bimAvailable, bimModels, bimPrefetchTick, loadBimModel, report, t])
+  /** a tick in the BIM panel shows or hides its model — already loaded in the background, hidden; one still on its
+   *  way is shown when it arrives; one that is not loaded (it failed) is loaded now */
+  const toggleBimModel = useCallback(async (name: string, on: boolean) => {
+    bimHiddenRef.current = on ? bimHiddenRef.current.filter(n => n !== name) : [...bimHiddenRef.current.filter(n => n !== name), name]
+    setBimHidden(bimHiddenRef.current)
+    const loaded = bimModels.find(m => m.filename === name)
+    if (loaded) { loaded.group.visible = on; return }
+    const item = bimAvailable.find(m => m.name === name)
+    if (!on || !item || bimInFlight.current.has(name)) return
+    setStatusMessage(t('bim.uploadedLoading', { name }))
+    bimFailed.current.delete(name)
+    try {
+      const result = await loadBimModel(item)
+      if (result) report(t('bim.loaded', { name, n: result.group.children.length }), 'ok')
     } catch (err) {
+      bimFailed.current.add(name)
       report(t('bim.uploadFailed', { detail: err instanceof Error ? err.message : String(err) }), 'err')
     } finally {
-      setBimLoading(l => l.filter(n => n !== name))
+      setBimPrefetchTick(n => n + 1)
     }
-  }, [bimModels, bimAvailable, bimLoading, report, t])
+  }, [bimModels, bimAvailable, loadBimModel, report, t])
+  /** delete one BIM model from the server; `confirmed`: already confirmed (STAC's spoken confirmation) */
   const deleteIfc = useCallback(async (filename: string, confirmed = false): Promise<boolean> => {
     if (!activeSession || !token) return false
     const ok = confirmed || await confirmDanger(t('bim.deleteMessage', { name: filename }), t('bim.deleteTitle'))
@@ -3766,7 +3813,7 @@ function App() {
               try { await fetch('/api/scene/volumes/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: activeSession, volume_id: volumeId }) }) } catch { /* ignore */ }
             }}
             onHasConfidence={setHasConfidence}
-            onBimAvailable={setBimAvailable}   /* the project's IFC models listed, none loaded (USER 2026-11-24); the grid and the axes stay as the user has them (USER 2026-11-19) */
+            onBimAvailable={onBimAvailable}   /* the project's IFC models, loaded in the background once the cloud is on screen, unticked (USER 2026-11-25); the grid and the axes stay as the user has them (USER 2026-11-19) */
             onSabanaLoaded={nPts => { setSabanaLoading(false); setSessionLoading(null); setStatusMessage(t('deviation.loadedPoints', { n: fmt.integer(nPts ?? 0) })) }}
             showCameraPoses={showCameraPoses && !sabanaVisible}
             onCubes={setCubes}

@@ -70,8 +70,8 @@ interface ViewportProps {
     onStatusMessage?: (msg: string) => void
     onSegments?: (segments: SegmentInstance[]) => void
     onPipelineProgress?: (data: Record<string, unknown>) => void
-    /** the project's IFC models, LISTED at a session's open — none is loaded (USER 2026-11-24): the BIM panel
-     *  loads one when it is ticked (addBIMGroup) */
+    /** the project's IFC models, LISTED at a session's open: App loads them in the background once the cloud is on
+     *  screen, unticked — their tick only shows them (USER 2026-11-25; addBIMGroup) */
     onBimAvailable?: (models: { name: string; url: string }[]) => void
     onSabanaLoaded?: (pointCount: number) => void
     onHasConfidence?: (has: boolean) => void
@@ -1504,7 +1504,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
         if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
-        if (bimGroupRef.current) targets.push(bimGroupRef.current)
+        // a model hidden by its tick is not picked (three.js casts rays at invisible objects too)
+        if (bimGroupRef.current?.visible) targets.push(...bimGroupRef.current.children.filter(c => c.visible))
         // evaluation volumes are measurable like the scene (user 2026-08-29)
         if (assistantVizRef.current) targets.push(...assistantVizRef.current.pickableVolumes())
         const intersects = raycaster.intersectObjects(targets)
@@ -1646,7 +1647,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         }
         if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
         if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
-        if (bimGroupRef.current) targets.push(bimGroupRef.current)
+        // a model hidden by its tick is not picked (three.js casts rays at invisible objects too)
+        if (bimGroupRef.current?.visible) targets.push(...bimGroupRef.current.children.filter(c => c.visible))
         // evaluation volumes are measurable like the scene (user 2026-08-29)
         if (assistantVizRef.current) targets.push(...assistantVizRef.current.pickableVolumes())
         const intersects = raycaster.intersectObjects(targets)
@@ -5405,12 +5407,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     cloudBBoxRef.current = bbox.clone()
                     // If BIM already loaded (race: BIM resolved before cloud),
                     // expand bbox to include BIM geometry
-                    const bimGroup = bimGroupRef.current
-                    if (bimGroup && bimGroup.children.length > 0) {
-                        const bimBox = new THREE.Box3().setFromObject(bimGroup)
-                        if (!bimBox.isEmpty()) {
-                            cloudBBoxRef.current.union(bimBox)
-                        }
+                    for (const model of bimGroupRef.current?.children ?? []) {
+                        if (!model.visible) continue        // a model loaded hidden (its tick off) does not frame the view
+                        const bimBox = new THREE.Box3().setFromObject(model)
+                        if (!bimBox.isEmpty()) cloudBBoxRef.current.union(bimBox)
                     }
                     // Frame with combined bbox — only on first load for this session
                     const sid = msg.session_id as string
@@ -5598,10 +5598,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if (onStatusMessage) onStatusMessage(tt('vp.deviationError', { detail: err.message }))
             })
         }
-        // ── BIM: the project's IFC models are LISTED, none is loaded (USER 2026-11-24: "cuando se carga una sesión que
-        //    tenga bim por defecto no aparezca visible, no lo cargue, como con la malla, que solo se vea si el usuario lo
-        //    elige, para que no demore la carga, solo se carga la nube al abrir la sesión"): the BIM panel loads one when it
-        //    is ticked ──
+        // ── BIM: the project's IFC models are LISTED here; App loads them in the background once the cloud is on screen,
+        //    UNTICKED (USER 2026-11-24: "para que no demore la carga, solo se carga la nube al abrir la sesión"; USER
+        //    2026-11-25: "ya lo debe enviar solo que destildado para que no se cargue en el visor") ──
         if (msg.type === 'bim_ready') {
             const models = (msg.models as Array<{ name: string; url: string }> | undefined) ?? []
             onBimAvailable?.(models.filter(m => m && m.name && m.url))
