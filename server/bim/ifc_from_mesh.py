@@ -406,11 +406,30 @@ def elements_of(output_dir: Path | str, mesh_path: Path | str, *, keep: float, m
     return elements, report
 
 
+# the two corners of the colour cube at 5 bits a channel: every channel under 8, every channel 248 or more
+_CLIPPED_BINS = np.array([0, (1 << 15) - 1])
+
+
+def _dominant_bin(weight: np.ndarray) -> int:
+    """The most common colour bin of one element's samples (``weight``: their weight per 5-bit bin). The two corners
+    of the colour cube are where an under- or over-exposed photograph's colours COLLAPSE into one bin, while the rest
+    of a surface spreads over many: they win only when they are most of the element (an object that is black stays
+    black; a floor partly in the dark does not). Measured on pccr 2026-08-31's floor#72: 19 % of its points under a
+    brightness of 16, 11.5 % in the dark corner — the plain mode was that corner, (3, 4, 3), where the median of its
+    points is (92, 87, 77)."""
+    total = float(weight.sum())
+    if total > 0 and float(weight[_CLIPPED_BINS].sum()) < total / 2:
+        weight = weight.copy()
+        weight[_CLIPPED_BINS] = 0
+    return int(np.argmax(weight))
+
+
 def element_colours(elements: List[Dict[str, Any]], texture: Optional[Dict[str, Any]]) -> None:
     """Each textured element's DOMINANT colour, set as ``e["colour"]`` (r, g, b in 0..1): the colour of its triangles in
-    the image at their centres, the most common one at 5 bits a channel, each triangle weighing its area (USER
-    2026-11-24: "pintar cada elemento por el color dominante del elemento, un color plano con el color del elemento").
-    The images are decoded one at a time."""
+    the image at their centres, the most common one at 5 bits a channel (_dominant_bin: an exposure's dark or bright
+    corner only when it is most of the element), each triangle weighing its area (USER 2026-11-24: "pintar cada
+    elemento por el color dominante del elemento, un color plano con el color del elemento"). The images are decoded
+    one at a time."""
     if not texture:
         return
     from PIL import Image
@@ -442,7 +461,7 @@ def element_colours(elements: List[Dict[str, Any]], texture: Optional[Dict[str, 
         bins = np.concatenate([g[0] for g in got]); area = np.concatenate([g[1] for g in got])
         rgb = np.concatenate([g[2] for g in got]).astype(np.float64)
         weight = np.bincount(bins, weights=area, minlength=1 << 15)
-        top = int(np.argmax(weight))
+        top = _dominant_bin(weight)
         sel = bins == top
         wsum = float(area[sel].sum())
         mean = (rgb[sel] * area[sel, None]).sum(axis=0) / wsum if wsum > 0 else rgb[sel].mean(axis=0)
@@ -451,8 +470,9 @@ def element_colours(elements: List[Dict[str, Any]], texture: Optional[Dict[str, 
 
 def object_colours_from_cloud(output_dir: Path | str) -> Dict[int, Tuple[float, float, float]]:
     """Each object's DOMINANT colour from its own cloud points (their photographs' colours): the most common colour at
-    5 bits a channel, then the mean of the points in it — for a mesh written simplified, whose triangles carry no
-    texture (the IFC the viewer loads light: USER 2026-11-18 "de momento dejemos el liviano")."""
+    5 bits a channel (an exposure's dark or bright corner only when it is most of the object: _dominant_bin), then the
+    mean of the points in it — for a mesh written simplified, whose triangles carry no texture (the IFC the viewer
+    loads light: USER 2026-11-18 "de momento dejemos el liviano")."""
     from exporter import cloud as C
     out = Path(output_dir)
     cloud = C.open_ply(out / "cleaned_cloud.ply")
@@ -462,7 +482,13 @@ def object_colours_from_cloud(output_dir: Path | str) -> Dict[int, Tuple[float, 
     uniq, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
     sums = np.stack([np.bincount(inv.ravel(), weights=rgb[:, c], minlength=len(uniq)) for c in range(3)], axis=1)
     obj = uniq >> 15
-    order = np.lexsort((counts, obj))                             # by object, then by count: each object's last = its mode
+    corner = np.isin(uniq & ((1 << 15) - 1), _CLIPPED_BINS)
+    objects, at = np.unique(obj, return_inverse=True)
+    total = np.bincount(at, weights=counts)
+    clipped = np.bincount(at, weights=np.where(corner, counts, 0))
+    vote = ~corner | (clipped >= total / 2)[at]                   # the corners vote only where they are most of the object
+    cand = np.flatnonzero(vote)
+    order = cand[np.lexsort((counts[cand], obj[cand]))]           # by object, then by count: each object's last = its mode
     last = order[np.r_[np.flatnonzero(np.diff(obj[order])), len(order) - 1]]
     return {int(obj[k]): tuple(float(x) for x in np.clip(sums[k] / counts[k] / 255.0, 0.0, 1.0)) for k in last}
 

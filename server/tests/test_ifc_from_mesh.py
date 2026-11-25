@@ -284,3 +284,35 @@ def test_a_simplified_mesh_takes_each_objects_colour_from_its_cloud_points(tmp_p
     M.build(elements, session="s", scan_key="2026-01-01/default", geometry_epoch="0", described="test").write(str(path))
     f = ifcopenshell.open(str(path))
     assert not f.by_type("IfcIndexedTriangleTextureMap") and len(f.by_type("IfcSurfaceStyleShading")) == len(elements)
+
+
+def test_an_exposures_dark_or_bright_corner_is_the_colour_only_when_it_is_most_of_the_element(tmp_path):
+    """pccr's floor#72 came out black: 19 % of its points under-exposed collapse into ONE bin while the rest of the
+    floor spreads over many. Those corners win only where they are most of the object."""
+    w = np.zeros(1 << 15)
+    w[0] = 20.0                                             # the dark corner
+    w[(25 << 10) | (5 << 5) | 3] = 15.0                     # the surface, spread over several bins
+    w[(26 << 10) | (5 << 5) | 3] = 14.0
+    w[(25 << 10) | (6 << 5) | 3] = 14.0
+    w[(1 << 15) - 1] = 18.0                                 # the bright corner
+    assert M._dominant_bin(w) == (25 << 10) | (5 << 5) | 3
+    w[0] = 60.0
+    assert M._dominant_bin(w) == 0                          # most of it is dark: it is dark
+    out, glb = _textured_scan(tmp_path)
+    from exporter import cloud as C
+    data = C.open_ply(out / "cleaned_cloud.ply")
+    ids = np.load(out / "instance_ids.npy")
+    raw = (out / "cleaned_cloud.ply").read_bytes()
+    head, _ = raw.split(b"end_header\n", 1)
+    rec = np.array(data)
+    k = np.arange(len(rec))
+    wall, chair = ids == 1, ids != 1
+    dark_wall = wall & (k % 4 == 0)                         # a quarter of the wall in the dark
+    dark_chair = chair & (k % 10 < 7)                       # most of the chair dark
+    rec["red"] = np.where(wall, 210, 20); rec["green"] = np.where(wall, 40, 170); rec["blue"] = 30
+    for c in ("red", "green", "blue"):
+        rec[c][dark_wall | dark_chair] = 2
+    (out / "cleaned_cloud.ply").write_bytes(head + b"end_header\n" + rec.tobytes())
+    colours = M.object_colours_from_cloud(out)
+    assert np.allclose(colours[1], (210 / 255, 40 / 255, 30 / 255), atol=1e-6)
+    assert np.allclose(colours[int(ids[chair][0])], (2 / 255, 2 / 255, 2 / 255), atol=1e-6)
