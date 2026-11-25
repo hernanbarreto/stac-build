@@ -259,3 +259,28 @@ def test_a_simplified_mesh_carries_no_texture(tmp_path):
     out, glb = _textured_scan(tmp_path)
     elements, report = M.elements_of(out, glb, keep=0.5, max_distance=0.05)
     assert report["texture"] is None and not any("uv" in e for e in elements)
+
+
+def test_a_simplified_mesh_takes_each_objects_colour_from_its_cloud_points(tmp_path):
+    """The IFC the viewer loads is the light one (USER 2026-11-18): its triangles carry no texture, its elements get
+    their objects' dominant colour from their own points."""
+    out, glb = _textured_scan(tmp_path)
+    from exporter import cloud as C
+    data = C.open_ply(out / "cleaned_cloud.ply")
+    ids = np.load(out / "instance_ids.npy")
+    raw = (out / "cleaned_cloud.ply").read_bytes()
+    head, _ = raw.split(b"end_header\n", 1)
+    rec = np.array(data)
+    rec["red"], rec["green"], rec["blue"] = np.where(ids == 1, 210, 20), np.where(ids == 1, 40, 170), 30
+    rec["red"][::50] = 255                                                          # a few points of another colour
+    (out / "cleaned_cloud.ply").write_bytes(head + b"end_header\n" + rec.tobytes())
+    elements, report = M.elements_of(out, glb, keep=0.5, max_distance=0.05)
+    assert report["texture"] is None
+    assert M.colour_elements(elements, None, out) == "cloud"
+    colour = {e["label"]: e["colour"] for e in elements}
+    assert np.allclose(colour["wall"], (210 / 255, 40 / 255, 30 / 255), atol=1e-6)
+    assert np.allclose(colour["chair"], (20 / 255, 170 / 255, 30 / 255), atol=1e-6)
+    path = tmp_path / "light.ifc"
+    M.build(elements, session="s", scan_key="2026-01-01/default", geometry_epoch="0", described="test").write(str(path))
+    f = ifcopenshell.open(str(path))
+    assert not f.by_type("IfcIndexedTriangleTextureMap") and len(f.by_type("IfcSurfaceStyleShading")) == len(elements)

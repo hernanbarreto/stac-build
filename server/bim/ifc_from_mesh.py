@@ -449,6 +449,38 @@ def element_colours(elements: List[Dict[str, Any]], texture: Optional[Dict[str, 
         elements[k]["colour"] = tuple(float(x) for x in np.clip(mean / 255.0, 0.0, 1.0))
 
 
+def object_colours_from_cloud(output_dir: Path | str) -> Dict[int, Tuple[float, float, float]]:
+    """Each object's DOMINANT colour from its own cloud points (their photographs' colours): the most common colour at
+    5 bits a channel, then the mean of the points in it — for a mesh written simplified, whose triangles carry no
+    texture (the IFC the viewer loads light: USER 2026-11-18 "de momento dejemos el liviano")."""
+    from exporter import cloud as C
+    out = Path(output_dir)
+    cloud = C.open_ply(out / "cleaned_cloud.ply")
+    ids = np.load(out / "instance_ids.npy").astype(np.int64)
+    rgb = np.column_stack([np.asarray(cloud[c], np.int64) for c in ("red", "green", "blue")])
+    key = ids << 15 | (rgb[:, 0] >> 3) << 10 | (rgb[:, 1] >> 3) << 5 | (rgb[:, 2] >> 3)
+    uniq, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
+    sums = np.stack([np.bincount(inv.ravel(), weights=rgb[:, c], minlength=len(uniq)) for c in range(3)], axis=1)
+    obj = uniq >> 15
+    order = np.lexsort((counts, obj))                             # by object, then by count: each object's last = its mode
+    last = order[np.r_[np.flatnonzero(np.diff(obj[order])), len(order) - 1]]
+    return {int(obj[k]): tuple(float(x) for x in np.clip(sums[k] / counts[k] / 255.0, 0.0, 1.0)) for k in last}
+
+
+def colour_elements(elements: List[Dict[str, Any]], texture: Optional[Dict[str, Any]], output_dir: Path | str) -> str:
+    """Each element's dominant colour: from the texture when its triangles carry one (the mesh written whole), else
+    from its object's own cloud points. Returns where the colours came from."""
+    element_colours(elements, texture)
+    missing = [e for e in elements if "colour" not in e]
+    if not missing:
+        return "texture"
+    by_object = object_colours_from_cloud(output_dir)
+    for e in missing:
+        if e["id"] in by_object:
+            e["colour"] = by_object[e["id"]]
+    return "cloud" if len(missing) == len(elements) else "texture, the rest from the cloud"
+
+
 def write_textures(elements: List[Dict[str, Any]], texture: Optional[Dict[str, Any]], folder: Path) -> Dict[int, str]:
     """The base-colour images the elements use, copied out of the GLB AS THEY ARE (no re-encoding) into ``folder``;
     returns each material's URL as the IFC beside the folder refers to it (``<folder name>/m<material>.<ext>``)."""
@@ -590,7 +622,7 @@ def mesh_of(output_dir: Path | str) -> Path:
 
 
 def write(session: str, scan_key: str, *, keep: float, neighbours: int = 0, max_edge_voxels: float = 0.0,
-          out: Path | str | None = None, measure: bool = True,
+          out: Path | str | None = None, measure: bool = True, with_textures: bool = True,
           log: Callable[[str], Any] = print) -> Dict[str, Any]:
     """Build the scan's IFC from its GenRecon mesh and write it (default: the project's IFC
     directory). Returns the report: elements, triangles, the simplification's measured deviation."""
@@ -608,8 +640,9 @@ def write(session: str, scan_key: str, *, keep: float, neighbours: int = 0, max_
                                    neighbours=neighbours, max_edge=max_edge_voxels * voxel_of() or None,
                                    measure=measure, log=log)
     out = Path(out) if out is not None else Path(ctx.ifcs_dir) / f"{session}_{scan_key.replace('/', '_')}_from_mesh.ifc"
-    element_colours(elements, report.get("texture"))
-    urls = write_textures(elements, report.get("texture"), out.parent / f"{out.stem}_textures")
+    report["colours_from"] = colour_elements(elements, report.get("texture"), output_dir)
+    # the IFC the viewer loads carries the colours alone (its web-ifc reads no IFC texture); the export's carries both
+    urls = write_textures(elements, report.get("texture"), out.parent / f"{out.stem}_textures") if with_textures else {}
     dev = report.get("deviation_m")
     described = (f"STAC Build — built from the GenRecon mesh of the scan {session} {scan_key}, geometry epoch {epoch}, "
                  f"cut by its segmentation: each element is its object's part of the mesh. Triangles kept: "
@@ -640,9 +673,13 @@ def main(argv: List[str]) -> int:
     ap.add_argument("--max-edge-voxels", type=float, default=0.0,
                     help="split the triangles whose longest edge is over this many GenRecon voxels (0: none)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--no-textures", action="store_true",
+                    help="each element's dominant colour only: no texture maps, no images beside the IFC (the viewer's)")
     a = ap.parse_args(argv)
-    print(json.dumps(write(a.session, a.scan, keep=a.keep, neighbours=a.neighbours, max_edge_voxels=a.max_edge_voxels,
-                           out=a.out), default=float))
+    r = write(a.session, a.scan, keep=a.keep, neighbours=a.neighbours, max_edge_voxels=a.max_edge_voxels, out=a.out,
+              with_textures=not a.no_textures)
+    r.pop("texture", None)                                  # (where the images lie in the GLB: not for the console)
+    print(json.dumps(r, default=float))
     return 0
 
 

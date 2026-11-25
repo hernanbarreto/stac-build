@@ -352,7 +352,7 @@ def _produce(session: str, scan_key: Optional[str], items: List[str], *, confide
         # the texture (USER 2026-11-24: "proba mejor con la textura real primero si no sale vamos por el color
         # dominante"): its images beside the IFC, and each element's dominant colour under it
         at("ifc", 0.8, "the texture's images and each element's colour")
-        ifc_from_mesh.element_colours(elements, cut.get("texture"))
+        ifc_from_mesh.colour_elements(elements, cut.get("texture"), out)    # (a simplified mesh: from the cloud)
         tex_dir = work / f"{path.stem}_textures"
         urls = ifc_from_mesh.write_textures(elements, cut.get("texture"), tex_dir)
         ifc_from_mesh.build(elements, session=session, scan_key=scan_key or "",
