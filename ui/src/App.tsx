@@ -2471,7 +2471,6 @@ function App() {
   const bimInFlight = useRef<Set<string>>(new Set())
   const bimFailed = useRef<Set<string>>(new Set())
   useEffect(() => { bimSessionRef.current = activeSession; bimFailed.current.clear() }, [activeSession])
-  const [bimPrefetchTick, setBimPrefetchTick] = useState(0)
   const onBimAvailable = useCallback((models: { name: string; url: string }[]) => {
     bimHiddenRef.current = models.map(m => m.name)                       // every model arrives unticked
     setBimHidden(bimHiddenRef.current)
@@ -2500,18 +2499,9 @@ function App() {
       setBimLoading(l => l.filter(n => n !== item.name))
     }
   }, [])
-  const cloudOnScreen = pointCount > 0 || cloudEverShown
-  useEffect(() => {
-    if (!cloudOnScreen || bimInFlight.current.size > 0) return
-    const next = bimAvailable.find(m => !bimModels.some(x => x.filename === m.name) && !bimFailed.current.has(m.name))
-    if (!next) return
-    void loadBimModel(next)
-      .catch(err => {
-        bimFailed.current.add(next.name)
-        report(t('bim.uploadFailed', { detail: err instanceof Error ? err.message : String(err) }), 'err')
-      })
-      .finally(() => setBimPrefetchTick(n => n + 1))
-  }, [cloudOnScreen, bimAvailable, bimModels, bimPrefetchTick, loadBimModel, report, t])
+  // ⚠ INTERIM (USER 2026-11-25, on the background load: "no termina de mostrar la nube ni tampoco termina de cargar el
+  // IFC, ninguna de las dos" — web-ifc parses on the page's thread): until the IFC is built in a worker, by parts,
+  // a model is fetched by its tick
   /** a tick in the BIM panel shows or hides its model — already loaded in the background, hidden; one still on its
    *  way is shown when it arrives; one that is not loaded (it failed) is loaded now */
   const toggleBimModel = useCallback(async (name: string, on: boolean) => {
@@ -2529,8 +2519,6 @@ function App() {
     } catch (err) {
       bimFailed.current.add(name)
       report(t('bim.uploadFailed', { detail: err instanceof Error ? err.message : String(err) }), 'err')
-    } finally {
-      setBimPrefetchTick(n => n + 1)
     }
   }, [bimModels, bimAvailable, loadBimModel, report, t])
   /** delete one BIM model from the server; `confirmed`: already confirmed (STAC's spoken confirmation) */
