@@ -25,3 +25,13 @@
   .stac-location { grid-template-columns: 1fr; grid-template-rows: auto minmax(300px, 1fr); height: auto; }
   .stac-location__map { height: 55vh; }
 }
+/* the three steps (USER 2026-11-24: "que la ubicacion sea absolutamente amigable para el usuario") */
+.stac-location__step { display: flex; flex-direction: column; gap: var(--sp-2); padding-bottom: var(--sp-3); border-bottom: 1px solid var(--border-1); }
+.stac-location__step:last-of-type { border-bottom: 0; }
+.stac-location__step h3 { display: flex; align-items: center; gap: var(--sp-2); margin: 0; font-size: var(--fs-2); font-weight: 600; color: var(--text-1); }
+.stac-location__step h3 span {
+  display: grid; place-items: center; width: 20px; height: 20px; border-radius: var(--r-circle);
+  background: var(--brand-orange); color: var(--surface-0); font-size: var(--fs-0); font-weight: 700;
+}
+.stac-location__coords { display: flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-2); font-weight: 600; }
+.stac-location__decimal { color: var(--text-2); }

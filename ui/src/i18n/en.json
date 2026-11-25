@@ -1620,7 +1620,6 @@
     "notPlaced": "Not placed",
     "nonePlaced": "No work is placed yet.",
     "show": "Go to the work on the globe",
-    "open": "Open",
     "place": "Place",
     "placeAgain": "Place again",
     "remove": "Remove the place",
@@ -1649,7 +1648,7 @@
     "videoNone": "The video recorded no GPS: mark the work on the map.",
     "byHand": "By hand",
     "byPoints": "By 2 points",
-    "handHint": "Click on the map where the work's centre is; then turn the plan until it lies on the imagery.",
+    "handHint": "Drag the plan with the mouse or a finger until it lies on the imagery, and turn it with the slider or the buttons.",
     "heading": "Heading of the plan (°)",
     "step_p1": "1/4 — Mark a point on the plan",
     "step_m1": "2/4 — Mark the same point on the map",
@@ -1663,7 +1662,24 @@
     "nothingYet": "No location yet.",
     "pointsTooClose": "The two points are too close: mark points further apart.",
     "action": "Location on the globe",
-    "placedAt": "Placed: {place} · {source}"
+    "placedAt": "Placed: {place} · {source}",
+    "step1": "Where is the work?",
+    "step1Hint": "Search a place or an address, or paste coordinates (for example 19°23'53.8\"N 99°11'58.4\"W). You can also touch the map.",
+    "step2": "Lay the plan",
+    "step3": "Check and save",
+    "copy": "Copy the coordinates",
+    "copied": "Copied"
+  },
+  "place": {
+    "placeholder": "Search a place, an address or coordinates",
+    "results": "Results",
+    "goToCoords": "Go to {place}",
+    "failed": "The search failed: {detail}",
+    "notFound": "“{q}” was not found",
+    "myLocation": "My location",
+    "myLocationAt": "My location: {place} (±{acc} m)",
+    "noGeolocation": "This browser does not give the device's location",
+    "geolocationFailed": "The location could not be obtained: {detail}"
   },
   "download": {
     "title": "Download",

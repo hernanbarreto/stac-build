@@ -2,29 +2,36 @@
  * THE LOCATION OF A WORK (USER 2026-11-24: "para asignarle a cada sesión, debe abrir un modal donde le puedo cargar
  * la información si no la tiene del video, si la tiene la muestra y permite ajustarla, en el mapa, si no tiene nada,
  * seleccionamos en el mapa donde está la obra a mano. guardamos y ya queda indicado que ese proyecto tiene asignado
- * el punto gps" / "necesita el punto gps real y la orientación verdad?").
+ * el punto gps" / "necesita el punto gps real y la orientación verdad?" / and, having tried it: "para ubicar el punto
+ * GPS agrega varias herramientas para buscar ciudad, por ejemplo, como google maps tiene, de hecho quise agregar este
+ * punto 19°23'53.8"N 99°11'58.4"W y me fue imposible, debe ser mas amigable … sobre todo que la ubicacion sea
+ * absolutamente amigable para el usuario").
  *
- * The map is the globe's (CesiumJS, Esri's public imagery and relief, no account). On it the scan's PLAN — the
- * published cloud from above (server geo.plan_raster) — is laid where the work stands, turned by its heading:
- *  - by hand: a click puts the plan's centre there; the heading turns it (slider, ±1°, ±5°) until it lies on the
- *    imagery. The plan is turned HERE, on a canvas, then laid north-up: the heading saved is exactly the one seen;
- *  - two points: a point of the plan, the same point on the map, twice — the place and the heading follow, and the
- *    scale between plan and map is shown (a check of the scan's metre against the imagery);
- *  - the video's own GPS, when it recorded one, is offered first.
+ * THREE STEPS ON SCREEN: 1 find the work — a name, an address, coordinates in any form (PlaceSearch), the device's
+ * own position, the video's GPS — or a touch on the map; 2 lay the plan on it — the scan's published cloud from above
+ * (server geo.plan_raster), DRAGGED with the mouse or a finger, TURNED with the slider or ±1° / ±5°; or by 2 points: a
+ * point of the plan, the same point on the map, twice (the place, the heading, and the plan-to-map scale shown as a
+ * check); 3 save. The map is the globe's (CesiumJS, Esri's public imagery, relief and labels — no account).
+ * The plan is turned HERE, on a canvas, then laid north-up: the heading saved is the one seen.
  * Saved: the scan's ORIGIN (lat, lon, the relief's height there) and the heading, with where they came from.
  */
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
 import type * as CesiumNS from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
-import { MapPin, RotateCcw, RotateCw } from 'lucide-react'
+import { Copy, MapPin, RotateCcw, RotateCw } from 'lucide-react'
 import { Button } from '../../components/ui/Button'
 import { Dialog } from '../../components/ui/Dialog'
+import { IconButton } from '../../components/ui/IconButton'
 import { useT } from '../../i18n'
 import { saveGeoref, type Georef, type GeoSource } from './geo'
+import { PlaceSearch } from './PlaceSearch'
+import { formatDms, type Place } from './places'
 import './location.css'
 
 const ESRI_IMAGERY = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
 const ESRI_RELIEF = 'https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer'
+const ESRI_LABELS = ['https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer',
+  'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer']
 const PIN = '#f28b34'
 
 interface Plan { image: string; cell_m: number; x_min: number; x_max: number; y_min: number; y_max: number; width: number; height: number; scan: string }
@@ -63,6 +70,7 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
   const viewerRef = useRef<CesiumNS.Viewer | null>(null)
   const cesiumRef = useRef<typeof CesiumNS | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
+  const [imgReady, setImgReady] = useState(0)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
@@ -74,26 +82,32 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
   const [pts, setPts] = useState<{ p1?: PlanPt; m1?: LatLon; p2?: PlanPt; m2?: LatLon }>({})
   const [scale, setScale] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
+  const [copied, setCopied] = useState(false)
   const modeRef = useRef(mode)
   modeRef.current = mode
   const ptsRef = useRef(pts)
   ptsRef.current = pts
+  const centerRef = useRef(center)
+  centerRef.current = center
+  // the plan on the map: its rectangle and height read by the map every frame (a drag moves it without a rebuild)
+  const planGeo = useRef<{ rect?: CesiumNS.Rectangle; height: number }>({ height: 0 })
 
   const cx = plan ? (plan.x_min + plan.x_max) / 2 : 0
   const cy = plan ? (plan.y_min + plan.y_max) / 2 : 0
   /** where the scan's origin stands: the plan's centre less the centre's own offset, turned */
-  const origin = (c: LatLon | null, h: number): LatLon | null => {
+  const originOf = useCallback((c: LatLon | null, h: number): LatLon | null => {
     if (!c) return null
     const o = planToEnu(-cx, -cy, h)
     return offset(c, o.e, o.n)
-  }
-  const originNow = origin(center, heading)
+  }, [cx, cy])
+  const originNow = originOf(center, heading)
 
   // what the work already has, its plan, its video's GPS
   useEffect(() => {
     if (!sessionId) return
     let gone = false
     setPlan(null); setVideo(undefined); setCenter(null); setHeading(0); setSource('manual'); setPts({}); setScale(null); setError(null)
+    imgRef.current = null
     void (async () => {
       try {
         const sid = encodeURIComponent(sessionId)
@@ -106,7 +120,7 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
         const pl = p as Plan
         setPlan(pl)
         const img = new Image()
-        img.onload = () => { imgRef.current = img; setPlan(x => (x ? { ...x } : x)) }
+        img.onload = () => { imgRef.current = img; setImgReady(n => n + 1) }
         img.src = pl.image
         setVideo((v?.location as VideoPlace | null) ?? null)
         const pcx = (pl.x_min + pl.x_max) / 2, pcy = (pl.y_min + pl.y_max) / 2
@@ -126,10 +140,11 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
     return () => { gone = true }
   }, [sessionId])
 
-  // THE MAP, while the window is open
+  // THE MAP, while the window is open: imagery, relief, places and roads; a touch places the work, a drag moves its plan
   useEffect(() => {
     if (!sessionId) return
     let gone = false
+    let offWindow = () => {}
     ;(window as unknown as { CESIUM_BASE_URL: string }).CESIUM_BASE_URL = '/cesium/'
     void (async () => {
       try {
@@ -150,13 +165,50 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
         })
         v.scene.globe.depthTestAgainstTerrain = true
         viewerRef.current = v
-        const clicks = new C.ScreenSpaceEventHandler(v.scene.canvas)
-        clicks.setInputAction((e: { position: CesiumNS.Cartesian2 }) => {
-          const ray = v.camera.getPickRay(e.position)
+        for (const url of ESRI_LABELS) {             // the names of places and the roads over the imagery
+          C.ArcGisMapServerImageryProvider.fromUrl(url).then(p => { if (!gone) v.imageryLayers.addImageryProvider(p) }).catch(() => undefined)
+        }
+        const ground = (pos: CesiumNS.Cartesian2): LatLon | null => {
+          const ray = v.camera.getPickRay(pos)
           const at = ray ? v.scene.globe.pick(ray, v.scene) : undefined
-          if (!at) return
+          if (!at) return null
           const c = C.Cartographic.fromCartesian(at)
-          const here = { lat: c.latitude / D, lon: c.longitude / D }
+          return { lat: c.latitude / D, lon: c.longitude / D }
+        }
+        // a DRAG of the plan moves it (the map does not pan meanwhile)
+        let drag: { from: LatLon; start: LatLon; moved: boolean } | null = null
+        let dragged = false
+        const ev = new C.ScreenSpaceEventHandler(v.scene.canvas)
+        ev.setInputAction((e: { position: CesiumNS.Cartesian2 }) => {
+          if (modeRef.current !== 'hand' || !centerRef.current) return
+          const picked = v.scene.pick(e.position) as { id?: { id?: unknown } } | undefined
+          if (picked?.id?.id !== 'plan' && picked?.id?.id !== 'origin') return
+          const at = ground(e.position)
+          if (!at) return
+          drag = { from: at, start: centerRef.current, moved: false }
+          v.scene.screenSpaceCameraController.enableInputs = false
+        }, C.ScreenSpaceEventType.LEFT_DOWN)
+        ev.setInputAction((e: { endPosition: CesiumNS.Cartesian2 }) => {
+          if (!drag) return
+          const at = ground(e.endPosition)
+          if (!at) return
+          const d = enuOf(drag.from, at)
+          drag.moved = true
+          setCenter(offset(drag.start, d.e, d.n)); setSource('manual')
+        }, C.ScreenSpaceEventType.MOUSE_MOVE)
+        const endDrag = () => {
+          if (!drag) return
+          dragged = drag.moved
+          drag = null
+          v.scene.screenSpaceCameraController.enableInputs = true
+        }
+        ev.setInputAction(endDrag, C.ScreenSpaceEventType.LEFT_UP)
+        window.addEventListener('pointerup', endDrag)        // released outside the map: the map pans again
+        offWindow = () => window.removeEventListener('pointerup', endDrag)
+        ev.setInputAction((e: { position: CesiumNS.Cartesian2 }) => {
+          if (dragged) { dragged = false; return }
+          const here = ground(e.position)
+          if (!here) return
           if (modeRef.current === 'hand') { setCenter(here); setSource('manual'); return }
           const p = ptsRef.current            // two points: a map point after its plan point
           if (p.p1 && !p.m1) setPts({ ...p, m1: here })
@@ -167,7 +219,7 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
         if (!gone) setError(e instanceof Error ? e.message : String(e))
       }
     })()
-    return () => { gone = true; setReady(false); viewerRef.current?.destroy(); viewerRef.current = null }
+    return () => { gone = true; offWindow(); setReady(false); viewerRef.current?.destroy(); viewerRef.current = null }
   }, [sessionId])
 
   // the camera: on the work when it has a place, once
@@ -177,8 +229,21 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
     const v = viewerRef.current, C = cesiumRef.current
     if (!ready || !v || !C || !center || flown.current) return
     flown.current = true
-    v.camera.flyTo({ destination: C.Cartesian3.fromDegrees(center.lon, center.lat, 180), duration: 0 })
+    v.camera.flyTo({ destination: C.Cartesian3.fromDegrees(center.lon, center.lat, 220), duration: 0 })
   }, [ready, center])
+
+  // a place found: the map goes there; a precise one (an address, a point, coordinates) puts the work there too
+  const goTo = (p: Place) => {
+    const v = viewerRef.current, C = cesiumRef.current
+    const wide = p.extent ? enuOf({ lat: p.extent.south, lon: p.extent.west }, { lat: p.extent.north, lon: p.extent.east }) : null
+    const broad = !!wide && Math.hypot(wide.e, wide.n) > 1500       // a city, a region: the user touches the spot
+    if (v && C) {
+      flown.current = true
+      if (broad && p.extent) v.camera.flyTo({ destination: C.Rectangle.fromDegrees(p.extent.west, p.extent.south, p.extent.east, p.extent.north), duration: 1.5 })
+      else v.camera.flyTo({ destination: C.Cartesian3.fromDegrees(p.lon, p.lat, 260), duration: 1.5 })
+    }
+    if (!broad) { setCenter({ lat: p.lat, lon: p.lon }); setSource('manual'); setMode('hand') }
+  }
 
   // two points: the place and the heading from P1 → M1, P2 → M2 (scale shown, never applied)
   useEffect(() => {
@@ -194,32 +259,58 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
     setHeading(Number(h.toFixed(2))); setCenter(offset(o, c.e, c.n)); setSource('points'); setScale(lw / lv)
   }, [pts, cx, cy, t])
 
-  // THE PLAN ON THE MAP: turned on a canvas, laid north-up on the relief; the origin and the two points' marks
-  const draw = useCallback(() => {
-    const v = viewerRef.current, C = cesiumRef.current, img = imgRef.current
-    if (!v || !C) return
-    for (const id of ['plan', 'origin', 'm1', 'm2']) { const e = v.entities.getById(id); if (e) v.entities.remove(e) }
-    if (plan && img && center) {
-      const r = heading * D, cos = Math.abs(Math.cos(r)), sin = Math.abs(Math.sin(r))
-      const W = Math.ceil(cos * plan.width + sin * plan.height), H = Math.ceil(sin * plan.width + cos * plan.height)
-      const canvas = document.createElement('canvas')
-      canvas.width = Math.max(1, W); canvas.height = Math.max(1, H)
-      const g = canvas.getContext('2d')
-      if (g) {
-        g.translate(W / 2, H / 2)
-        g.rotate(r)                                   // clockwise on the screen = clockwise from north
-        g.drawImage(img, -plan.width / 2, -plan.height / 2)
-      }
-      const hx = W * plan.cell_m / 2, hy = H * plan.cell_m / 2
-      const sw = offset(center, -hx, -hy), ne = offset(center, hx, hy)
+  // THE PLAN ON THE MAP — the entity once; its rectangle and height follow the centre and the heading every frame;
+  // its picture, turned on a canvas, is made again only when the heading changes
+  useEffect(() => {
+    const v = viewerRef.current, C = cesiumRef.current
+    if (!ready || !v || !C || !plan) return
+    if (!v.entities.getById('plan')) {
       v.entities.add({
         id: 'plan',
         rectangle: {
-          coordinates: C.Rectangle.fromDegrees(sw.lon, sw.lat, ne.lon, ne.lat),
-          material: new C.ImageMaterialProperty({ image: canvas, transparent: true, color: C.Color.WHITE.withAlpha(0.8) }),
+          coordinates: new C.CallbackProperty(() => planGeo.current.rect, false) as unknown as CesiumNS.Property,
+          height: new C.CallbackProperty(() => planGeo.current.height, false) as unknown as CesiumNS.Property,
         },
       })
     }
+  }, [ready, plan])
+  useEffect(() => {
+    const v = viewerRef.current, C = cesiumRef.current
+    if (!ready || !v || !C || !plan) return
+    const ent = v.entities.getById('plan')
+    if (!center) { planGeo.current.rect = undefined; v.scene.requestRender(); return }
+    const r = heading * D, cos = Math.abs(Math.cos(r)), sin = Math.abs(Math.sin(r))
+    const W = Math.ceil(cos * plan.width + sin * plan.height), H = Math.ceil(sin * plan.width + cos * plan.height)
+    const hx = W * plan.cell_m / 2, hy = H * plan.cell_m / 2
+    const sw = offset(center, -hx, -hy), ne = offset(center, hx, hy)
+    planGeo.current.rect = C.Rectangle.fromDegrees(sw.lon, sw.lat, ne.lon, ne.lat)
+    const g = v.scene.globe.getHeight(C.Cartographic.fromDegrees(center.lon, center.lat))
+    planGeo.current.height = (g ?? 0) + 0.3
+    if (ent?.rectangle) ent.show = true
+    v.scene.requestRender()
+  }, [ready, plan, center, heading])
+  useEffect(() => {
+    const v = viewerRef.current, C = cesiumRef.current, img = imgRef.current
+    const ent = v?.entities.getById('plan')
+    if (!ready || !v || !C || !plan || !img || !ent?.rectangle) return
+    const r = heading * D, cos = Math.abs(Math.cos(r)), sin = Math.abs(Math.sin(r))
+    const W = Math.ceil(cos * plan.width + sin * plan.height), H = Math.ceil(sin * plan.width + cos * plan.height)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, W); canvas.height = Math.max(1, H)
+    const g = canvas.getContext('2d')
+    if (g) {
+      g.translate(W / 2, H / 2)
+      g.rotate(r)                                     // clockwise on the screen = clockwise from north
+      g.drawImage(img, -plan.width / 2, -plan.height / 2)
+    }
+    ent.rectangle.material = new C.ImageMaterialProperty({ image: canvas, transparent: true, color: C.Color.WHITE.withAlpha(0.8) })
+    v.scene.requestRender()
+  }, [ready, plan, heading, imgReady])
+  // the origin and the two points' marks
+  useEffect(() => {
+    const v = viewerRef.current, C = cesiumRef.current
+    if (!ready || !v || !C) return
+    for (const id of ['origin', 'm1', 'm2']) { const e = v.entities.getById(id); if (e) v.entities.remove(e) }
     const mark = (id: string, p: LatLon | null | undefined, size: number, label?: string) => {
       if (!p) return
       v.entities.add({
@@ -231,12 +322,11 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
                          heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY } : undefined,
       })
     }
-    mark('origin', origin(center, heading), 9)
+    mark('origin', originNow, 9)
     mark('m1', pts.m1, 12, '1'); mark('m2', pts.m2, 12, '2')
     v.scene.requestRender()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan, center, heading, pts])
-  useEffect(() => { if (ready) draw() }, [ready, draw])
+  }, [ready, center, heading, pts, cx, cy])
 
   // a click on the plan (two points): where on the plan, in metres
   const onPlanClick = (e: MouseEvent<HTMLImageElement>) => {
@@ -277,6 +367,9 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
   }
 
   const turn = (d: number) => { setHeading(h => Number(norm360(h + d).toFixed(2))); if (source !== 'manual') setSource('manual') }
+  const copy = (text: string) => {
+    void navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => undefined)
+  }
 
   return (
     <Dialog open={!!sessionId} size="full" icon={<MapPin aria-hidden />} title={t('location.title', { name: sessionId ?? '' })}
@@ -290,57 +383,73 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
       )}>
       <div className="stac-location">
         <div className="stac-location__side">
-          {video === undefined ? <p className="stac-location__note">{t('location.reading')}</p>
-            : video ? (
-              <div className="stac-location__video">
-                <p>{t('location.videoHas', { place: `${video.lat.toFixed(5)}, ${video.lon.toFixed(5)}` })}
-                  {video.accuracy_m != null ? ` (±${Math.round(video.accuracy_m)} m)` : ''}</p>
-                <Button size="sm" variant="secondary" onClick={() => {
-                  const c = planToEnu(cx, cy, heading); setCenter(offset({ lat: video.lat, lon: video.lon }, c.e, c.n)); setSource('video')
-                }}>{t('location.useVideo')}</Button>
-              </div>
-            ) : <p className="stac-location__note">{t('location.videoNone')}</p>}
-
-          <div className="stac-location__modes" role="tablist">
-            <Button size="sm" variant={mode === 'hand' ? 'primary' : 'ghost'} onClick={() => setMode('hand')}>{t('location.byHand')}</Button>
-            <Button size="sm" variant={mode === 'points' ? 'primary' : 'ghost'} onClick={() => { setMode('points'); setPts({}); setScale(null) }}>{t('location.byPoints')}</Button>
-          </div>
-
-          {mode === 'hand' ? (
-            <>
-              <p className="stac-location__note">{t('location.handHint')}</p>
-              <label className="stac-location__label" htmlFor="stac-location-heading">{t('location.heading')}</label>
-              <div className="stac-location__heading">
-                <Button size="sm" variant="ghost" icon={<RotateCcw aria-hidden />} onClick={() => turn(-5)}>5°</Button>
-                <Button size="sm" variant="ghost" onClick={() => turn(-1)}>−1°</Button>
-                <input id="stac-location-heading" type="number" min={0} max={359.99} step={0.1} value={heading}
-                  onChange={e => { const n = Number(e.target.value); if (Number.isFinite(n)) { setHeading(norm360(n)); setSource('manual') } }} />
-                <Button size="sm" variant="ghost" onClick={() => turn(1)}>+1°</Button>
-                <Button size="sm" variant="ghost" icon={<RotateCw aria-hidden />} onClick={() => turn(5)}>5°</Button>
-              </div>
-              <input className="stac-location__slider" type="range" min={0} max={359.9} step={0.1} value={heading}
-                aria-label={t('location.heading')} onChange={e => { setHeading(Number(e.target.value)); setSource('manual') }} />
-            </>
-          ) : (
-            <>
-              <p className="stac-location__note">{t(`location.step_${step}`)}</p>
-              {plan && (
-                <div className="stac-location__plan">
-                  <img src={plan.image} alt={t('location.planAlt')} onClick={onPlanClick} draggable={false} />
-                  {pts.p1 && <span className="stac-location__dot" style={planDot(pts.p1)}>1</span>}
-                  {pts.p2 && <span className="stac-location__dot" style={planDot(pts.p2)}>2</span>}
+          <section className="stac-location__step">
+            <h3><span>1</span> {t('location.step1')}</h3>
+            <PlaceSearch onPick={goTo} autoFocus />
+            {video === undefined ? <p className="stac-location__note">{t('location.reading')}</p>
+              : video && (
+                <div className="stac-location__video">
+                  <p>{t('location.videoHas', { place: formatDms(video.lat, video.lon) })}
+                    {video.accuracy_m != null ? ` (±${Math.round(video.accuracy_m)} m)` : ''}</p>
+                  <Button size="sm" variant="secondary" onClick={() => {
+                    const c = planToEnu(cx, cy, heading); setCenter(offset({ lat: video.lat, lon: video.lon }, c.e, c.n)); setSource('video')
+                    goTo({ lat: video.lat, lon: video.lon, label: '' })
+                  }}>{t('location.useVideo')}</Button>
                 </div>
               )}
-              {scale != null && <p className="stac-location__note">{t('location.scale', { s: scale.toFixed(3) })}</p>}
-            </>
-          )}
+            <p className="stac-location__note">{t('location.step1Hint')}</p>
+          </section>
 
-          <div className="stac-location__result">
-            {originNow ? <>
-              <div>{t('location.origin')}: {originNow.lat.toFixed(6)}, {originNow.lon.toFixed(6)}</div>
-              <div>{t('location.headingIs', { h: heading.toFixed(1) })} · {t(`globe.source_${source}`)}</div>
-            </> : <div className="stac-location__note">{t('location.nothingYet')}</div>}
-          </div>
+          <section className="stac-location__step">
+            <h3><span>2</span> {t('location.step2')}</h3>
+            <div className="stac-location__modes" role="tablist">
+              <Button size="sm" variant={mode === 'hand' ? 'primary' : 'ghost'} onClick={() => setMode('hand')}>{t('location.byHand')}</Button>
+              <Button size="sm" variant={mode === 'points' ? 'primary' : 'ghost'} onClick={() => { setMode('points'); setPts({}); setScale(null) }}>{t('location.byPoints')}</Button>
+            </div>
+            {mode === 'hand' ? (
+              <>
+                <p className="stac-location__note">{t('location.handHint')}</p>
+                <label className="stac-location__label" htmlFor="stac-location-heading">{t('location.heading')}</label>
+                <div className="stac-location__heading">
+                  <Button size="sm" variant="ghost" icon={<RotateCcw aria-hidden />} onClick={() => turn(-5)}>5°</Button>
+                  <Button size="sm" variant="ghost" onClick={() => turn(-1)}>−1°</Button>
+                  <input id="stac-location-heading" type="number" min={0} max={359.99} step={0.1} value={heading}
+                    onChange={e => { const n = Number(e.target.value); if (Number.isFinite(n)) { setHeading(norm360(n)); setSource('manual') } }} />
+                  <Button size="sm" variant="ghost" onClick={() => turn(1)}>+1°</Button>
+                  <Button size="sm" variant="ghost" icon={<RotateCw aria-hidden />} onClick={() => turn(5)}>5°</Button>
+                </div>
+                <input className="stac-location__slider" type="range" min={0} max={359.9} step={0.1} value={heading}
+                  aria-label={t('location.heading')} onChange={e => { setHeading(Number(e.target.value)); setSource('manual') }} />
+              </>
+            ) : (
+              <>
+                <p className="stac-location__note">{t(`location.step_${step}`)}</p>
+                {plan && (
+                  <div className="stac-location__plan">
+                    <img src={plan.image} alt={t('location.planAlt')} onClick={onPlanClick} draggable={false} />
+                    {pts.p1 && <span className="stac-location__dot" style={planDot(pts.p1)}>1</span>}
+                    {pts.p2 && <span className="stac-location__dot" style={planDot(pts.p2)}>2</span>}
+                  </div>
+                )}
+                {scale != null && <p className="stac-location__note">{t('location.scale', { s: scale.toFixed(3) })}</p>}
+              </>
+            )}
+          </section>
+
+          <section className="stac-location__step">
+            <h3><span>3</span> {t('location.step3')}</h3>
+            <div className="stac-location__result">
+              {originNow ? <>
+                <div className="stac-location__coords">
+                  <span>{formatDms(originNow.lat, originNow.lon)}</span>
+                  <IconButton size="sm" label={copied ? t('location.copied') : t('location.copy')} icon={<Copy aria-hidden />}
+                    onClick={() => copy(formatDms(originNow.lat, originNow.lon))} />
+                </div>
+                <div className="stac-location__decimal">{originNow.lat.toFixed(6)}, {originNow.lon.toFixed(6)}</div>
+                <div>{t('location.headingIs', { h: heading.toFixed(1) })} · {t(`globe.source_${source}`)}</div>
+              </> : <div className="stac-location__note">{t('location.nothingYet')}</div>}
+            </div>
+          </section>
           {error && <p className="stac-location__error" role="alert">{error}</p>}
         </div>
         <div ref={host} className="stac-location__map">

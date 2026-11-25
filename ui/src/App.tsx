@@ -3618,7 +3618,7 @@ function App() {
             {layout.state.leftTab === 'gantt' && <GanttPanel />}
             {globeOpen && (
               <GlobePanel projects={geoProjects} loading={geoLoading} error={geoError} placing={locating} canEdit={!!token}
-                onShow={flyToWork} onOpen={openFromGlobe} onRefresh={() => void refreshGeo()}
+                onShow={flyToWork} onRefresh={() => void refreshGeo()}
                 onPlace={setLocating} onRemove={sid => void removePlace(sid)} ifcOn={globeIfc}
                 onToggleIfc={sid => { setGlobeIfc(l => (l.includes(sid) ? l.filter(x => x !== sid) : [...l, sid])); flyToWork(sid) }} />
             )}

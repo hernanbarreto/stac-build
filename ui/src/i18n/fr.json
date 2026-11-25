@@ -1620,7 +1620,6 @@
     "notPlaced": "Non placés",
     "nonePlaced": "Aucun chantier n'est encore placé.",
     "show": "Aller au chantier sur le globe",
-    "open": "Ouvrir",
     "place": "Placer",
     "placeAgain": "Replacer",
     "remove": "Retirer l'emplacement",
@@ -1649,7 +1648,7 @@
     "videoNone": "La vidéo n'a pas de GPS : marquez le chantier sur la carte.",
     "byHand": "À la main",
     "byPoints": "Par 2 points",
-    "handHint": "Cliquez sur la carte au centre du chantier, puis tournez le plan jusqu'à ce qu'il coïncide avec l'image.",
+    "handHint": "Faites glisser le plan à la souris ou au doigt jusqu'à ce qu'il coïncide avec l'image, et tournez-le avec le curseur ou les boutons.",
     "heading": "Orientation du plan (°)",
     "step_p1": "1/4 — Marquez un point sur le plan",
     "step_m1": "2/4 — Marquez le même point sur la carte",
@@ -1663,7 +1662,24 @@
     "nothingYet": "Pas encore d'emplacement.",
     "pointsTooClose": "Les deux points sont trop proches : marquez des points plus éloignés.",
     "action": "Emplacement sur le globe",
-    "placedAt": "Placé : {place} · {source}"
+    "placedAt": "Placé : {place} · {source}",
+    "step1": "Où est le chantier ?",
+    "step1Hint": "Cherchez un lieu ou une adresse, ou collez des coordonnées (par exemple 19°23'53.8\"N 99°11'58.4\"W). Vous pouvez aussi toucher la carte.",
+    "step2": "Posez le plan",
+    "step3": "Vérifiez et enregistrez",
+    "copy": "Copier les coordonnées",
+    "copied": "Copiées"
+  },
+  "place": {
+    "placeholder": "Rechercher un lieu, une adresse ou des coordonnées",
+    "results": "Résultats",
+    "goToCoords": "Aller à {place}",
+    "failed": "La recherche a échoué : {detail}",
+    "notFound": "« {q} » introuvable",
+    "myLocation": "Ma position",
+    "myLocationAt": "Ma position : {place} (±{acc} m)",
+    "noGeolocation": "Ce navigateur ne donne pas la position de l'appareil",
+    "geolocationFailed": "La position n'a pas pu être obtenue : {detail}"
   },
   "download": {
     "title": "Télécharger",

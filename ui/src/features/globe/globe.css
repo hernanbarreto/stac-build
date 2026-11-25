@@ -21,3 +21,4 @@
   border: 1px solid var(--border-2); background: var(--surface-2); color: var(--err-fg); font: inherit; font-size: var(--fs-1);
   cursor: pointer;
 }
+.stac-globe__search { position: absolute; top: var(--sp-3); left: var(--sp-3); z-index: 3; width: min(360px, calc(100% - 2 * var(--sp-3) - 48px)); }

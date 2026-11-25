@@ -1620,7 +1620,6 @@
     "notPlaced": "Sin ubicación",
     "nonePlaced": "Ninguna obra tiene ubicación todavía.",
     "show": "Ir a la obra en el globo",
-    "open": "Abrir",
     "place": "Ubicar",
     "placeAgain": "Reubicar",
     "remove": "Quitar la ubicación",
@@ -1649,7 +1648,7 @@
     "videoNone": "El video no trae GPS: marcá la obra en el mapa.",
     "byHand": "A mano",
     "byPoints": "Por 2 puntos",
-    "handHint": "Hacé clic en el mapa donde está el centro de la obra; después girá la planta hasta que calce con el satélite.",
+    "handHint": "Arrastrá la planta con el mouse o el dedo hasta que calce con el satélite, y girala con la barra o los botones.",
     "heading": "Rumbo de la planta (°)",
     "step_p1": "1/4 — Marcá un punto en la planta",
     "step_m1": "2/4 — Marcá el mismo punto en el mapa",
@@ -1663,7 +1662,24 @@
     "nothingYet": "Todavía no hay ubicación.",
     "pointsTooClose": "Los dos puntos están demasiado cerca: marcá puntos más separados.",
     "action": "Ubicación en el globo",
-    "placedAt": "Ubicada: {place} · {source}"
+    "placedAt": "Ubicada: {place} · {source}",
+    "step1": "¿Dónde está la obra?",
+    "step1Hint": "Buscá un lugar o una dirección, o pegá coordenadas (por ejemplo 19°23'53.8\"N 99°11'58.4\"W). También podés tocar el mapa.",
+    "step2": "Apoyá la planta",
+    "step3": "Revisá y guardá",
+    "copy": "Copiar las coordenadas",
+    "copied": "Copiadas"
+  },
+  "place": {
+    "placeholder": "Buscar lugar, dirección o coordenadas",
+    "results": "Resultados",
+    "goToCoords": "Ir a {place}",
+    "failed": "No se pudo buscar: {detail}",
+    "notFound": "No encontré «{q}»",
+    "myLocation": "Mi ubicación",
+    "myLocationAt": "Mi ubicación: {place} (±{acc} m)",
+    "noGeolocation": "Este navegador no da la ubicación del dispositivo",
+    "geolocationFailed": "No se pudo obtener la ubicación: {detail}"
   },
   "download": {
     "title": "Descargar",

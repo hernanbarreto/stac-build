@@ -18,11 +18,15 @@ import type * as CesiumNS from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import { useT } from '../../i18n'
 import type { GeoProject, Georef } from './geo'
+import { PlaceSearch } from './PlaceSearch'
+import type { Place } from './places'
 import './globe.css'
 
 const ESRI_IMAGERY = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
 const ESRI_RELIEF = 'https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer'
 const PIN = '#f28b34'                       // --brand-orange
+const ESRI_LABELS = ['https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer',
+  'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer']
 
 export interface GlobeViewProps {
   projects: GeoProject[]
@@ -132,6 +136,9 @@ export default function GlobeView({ projects, focus, onOpen, ifcOn }: GlobeViewP
         })
         viewer.scene.globe.depthTestAgainstTerrain = true
         viewerRef.current = viewer
+        for (const url of ESRI_LABELS) {             // the names of places and the roads over the imagery
+          C.ArcGisMapServerImageryProvider.fromUrl(url).then(p => { if (!gone) viewer.imageryLayers.addImageryProvider(p) }).catch(() => undefined)
+        }
         const clicks = new C.ScreenSpaceEventHandler(viewer.scene.canvas)
         clicks.setInputAction((e: { position: CesiumNS.Cartesian2 }) => {
           const v = viewerRef.current
@@ -254,9 +261,18 @@ export default function GlobeView({ projects, focus, onOpen, ifcOn }: GlobeViewP
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, ifcOn, projects])
 
+  // a place found by the search: the camera goes there (a region: its whole extent)
+  const goTo = (p: Place) => {
+    const v = viewerRef.current, C = cesiumRef.current
+    if (!v || !C) return
+    if (p.extent) v.camera.flyTo({ destination: C.Rectangle.fromDegrees(p.extent.west, p.extent.south, p.extent.east, p.extent.north), duration: 2 })
+    else v.camera.flyTo({ destination: C.Cartesian3.fromDegrees(p.lon, p.lat, 600), duration: 2 })
+  }
+
   return (
     <div className="stac-globe" aria-label={t('globe.title')}>
       <div ref={host} className="stac-globe__canvas" />
+      {ready && <div className="stac-globe__search"><PlaceSearch onPick={goTo} /></div>}
       {!ready && !error && <div className="stac-globe__status">{t('globe.loading')}</div>}
       {error && <div className="stac-globe__status stac-globe__status--error" role="alert">{t('globe.failed', { detail: error })}</div>}
       {notice && <button type="button" className="stac-globe__notice" onClick={() => setNotice(null)}>{notice}</button>}

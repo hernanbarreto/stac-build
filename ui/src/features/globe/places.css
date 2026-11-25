@@ -1,0 +1,18 @@
+/* The place search (PlaceSearch.tsx): one box, its suggestions under it */
+.stac-place { position: relative; display: flex; flex-direction: column; gap: var(--sp-1); min-width: 0; }
+.stac-place__row { display: flex; align-items: center; gap: var(--sp-1); }
+.stac-place__row > :first-child { flex: 1; min-width: 0; }
+.stac-place__busy { width: var(--icon-sm); height: var(--icon-sm); margin: 0 var(--sp-2); color: var(--text-2); }
+.stac-place__list {
+  position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 5; margin: 0; padding: var(--sp-1) 0;
+  list-style: none; border: 1px solid var(--border-2); border-radius: var(--r-2); background: var(--surface-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); max-height: 50vh; overflow: auto;
+}
+.stac-place__list button {
+  display: flex; align-items: center; gap: var(--sp-2); width: 100%; padding: var(--sp-2) var(--sp-3); border: 0;
+  background: none; color: var(--text-1); font: inherit; font-size: var(--fs-1); text-align: left; cursor: pointer;
+}
+.stac-place__list button:hover, .stac-place__list button:focus-visible { background: var(--surface-3); outline: none; }
+.stac-place__list svg { flex: none; width: var(--icon-sm); height: var(--icon-sm); color: var(--brand-orange); }
+.stac-place__list span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stac-place__error { color: var(--err-fg); font-size: var(--fs-1); }
