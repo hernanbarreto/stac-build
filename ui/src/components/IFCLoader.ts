@@ -254,7 +254,10 @@ export function collectMeshNames(node: IFCTreeNode): string[] {
 export async function loadIFC(url: string, name: string): Promise<IFCLoadResult> {
     const api = await ensureInit()
 
-    const response = await fetch(url)
+    // ALWAYS REVALIDATED (USER 2026-11-25, the IFCs regenerated in place with their colours): an IFC is rewritten under
+    // its own name, and a copy the browser had kept as fresh would show the previous model; the server answers 304
+    // when the file did not change, so a model already downloaded is not sent again.
+    const response = await fetch(url, { cache: 'no-cache' })
     if (!response.ok) throw new Error(`Failed to fetch IFC: ${response.status}`)
     const buffer = await response.arrayBuffer()
     const data = new Uint8Array(buffer)

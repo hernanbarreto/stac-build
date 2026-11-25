@@ -1475,8 +1475,14 @@ async def serve_sabana_potree_files(session_id: str, file_path: str):
     )
 
 @app.get("/api/sessions/{session_id}/bim/{filename}")
-async def serve_bim_file(session_id: str, filename: str):
-    """Serve BIM GLB/JSON files for a session."""
+async def serve_bim_file(session_id: str, filename: str, request: Request):
+    """Serve BIM GLB/JSON files for a session.
+
+    ALWAYS REVALIDATED, 304 WHEN UNCHANGED: an IFC is rewritten in place under its own name (regenerated — USER
+    2026-11-25, "Generale el ifc con el color dominante … Generala para las sesiones que tengan ifc generado" — or
+    uploaded again), and the old `public, max-age=3600` let a browser show the previous one for an hour (the octree's
+    route had the same defect, 2026-08-30). Starlette's FileResponse does not answer a conditional request by itself:
+    its own ETag (the file's date and size) is compared here, so a model that did not change is not sent again."""
     from fastapi.responses import FileResponse
     ctx = _ctx(session_id)
     # Check ifcs_dir first (migrated IFCs), then project_dir, then bim_comparison_dir
@@ -1493,11 +1499,13 @@ async def serve_bim_file(session_id: str, filename: str):
         content_type = "application/octet-stream"
     else:
         content_type = "application/json"
-    return FileResponse(
-        str(full_path),
-        media_type=content_type,
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    response = FileResponse(str(full_path), media_type=content_type, stat_result=full_path.stat(),
+                            headers={"Cache-Control": "no-cache"})
+    etag = response.headers.get("etag")
+    asked = [t.strip() for t in request.headers.get("if-none-match", "").split(",")]
+    if etag and (etag in asked or f"W/{etag}" in asked):
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+    return response
 
 
 @app.get("/api/sessions/{session_id}/video")
