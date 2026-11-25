@@ -1005,6 +1005,45 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   the same; §7, the list of 2026-11-19, point 9).
 
 ## 7 · PENDING
+- ⭐⭐ 2026-11-24 / 25 — THE EVENING'S WORK, ALL WAITING FOR HIS EYE IN THE BROWSER (nothing of the interface was
+  opened by the assistant; each block committed, nothing pushed):
+  · THE VOICE (a29b453): a transcription that repeats itself (Whisper's own compression-ratio test, 2.4 —
+    `voice.stt.compression_ratio_threshold`) is written again without the vocabulary, then dropped. Traced on the
+    recording: the vocabulary "STAC, STAC Build." made a weak recording loop "STAC, " to the token bound (log-prob
+    −0.05) and hands-free took it for an order. USER: "aun con un solo dispositivo salio stac stac stac, es un error".
+    He uses STAC from SEVERAL DEVICES AT ONCE ("son varias sesiones desde diferentes dispositivos"): a doubled
+    utterance is that, not a page bug. The utterance trace: logs/voice_utterances/ (the last 20, git-ignored).
+  · SHOW ME / SELECT <an object of the scan> is decided by the sentence, before the model (phase5_qa/selection.py,
+    b78d2cd): selected as a touch selects (box, dimensions, camera; several of one label: the nearest the camera,
+    all framed; a hidden one shown first). Traced: the same sentence reached different commands (the model sees the
+    last 6 turns) — "Select floor." three times reached instances.set_floor_level (held by its spoken confirmation,
+    the scan untouched). USER: "lo mas importante es que la lista de comandos sea clara … parece que no responde
+    siempre igual a los mismos comandos".
+  · EACH DEVICE ITS OWN SCAN (request_scan.py, 340e20a): every request says its session and scan (X-STAC-Scan, or
+    stac_scan= in a URL, which wins); resolve_session takes it when a route names no scan; the viewer socket keeps its
+    own session (the page's "Segment" acted on the LAST session ANY device had opened). USER: "debe mantener el
+    contexto y la conversacion para cada sesion de usuario que esta trabajando, OJO con eso!!!". The chat's
+    conversation was already per page (history, name, pending confirmation sent with each question).
+  · A SESSION OPENS WITH ITS CLOUD ALONE (865a123): the project's IFCs are listed in the BIM panel, a tick loads one.
+    USER: "cuando se carga una sesion que tenga bim por defecto no aparezca visible, no lo cargue, como con la malla".
+  · THE GLOBE, CesiumJS 1.147 WITH NO ACCOUNT (USER: "cesium siempre sin cuenta, baja la mejor calidad que se pueda
+    tener, no tenemos cuenta, veamos de conseguir relieves si o si" / "cesium si esta bien en 3 etapas"): Esri's public
+    World Imagery + World Elevation 3D (both answer with no key; for a commercial product Esri asks a key — told to
+    him). 1cdd0fc, 2d609ca, 193b73a: ONE georeference per project (<project>/georef.json — the scan origin's WGS84
+    lat / lon / height, the plan's heading, its source manual | video | points, its stated accuracy); the left rail's
+    globe (the works as pins; a pin flies there and opens the session); a session row's pin button = the Location
+    window (the plan — the cloud from above — laid on the imagery, turned by hand or by 2 points with the plan-to-map
+    scale shown as a check; the video's GPS offered first — NONE of his six videos carries one); each placed work's
+    GenRecon mesh (else a million points of its cloud) stands on the globe, its IFC on demand (web-ifc → glTF in the
+    page). Frames: the plan = the display frame written Z-up (X = x, Y = −z); the mesh tiles are glTF Y-up with
+    gltfUpAxis Z. ui/public/cesium links node_modules' build; vite pre-bundles cesium.
+  · HIS QUESTION, ANSWERED, HIS DECISION PENDING: an IFC with GenRecon's texture — possible (IFC4
+    IfcIndexedTriangleTextureMap + IfcImageTexture; the cut keeps the triangles; today the exporter welds vertices
+    and writes no colour), but almost no BIM program shows IFC textures (Revit ignores them, Bonsai reads them; our
+    viewer's web-ifc 0.0.75 gives one colour per geometry). Proposed: the real texture (UVs + the atlas images in the
+    export ZIP) AND a colour per element (every program shows it).
+  · NOT TOUCHED: init_pod.sh's uncommitted line (his own SSH command, with his PC's path and an old pod address —
+    the repo is public).
 - ⭐ 2026-11-23 — HIS DECISION SUPERSEDES THE "RESUME HERE" MARKS BELOW: the validated pipeline stays, with the three
   changes of §0 (*"nos quedamos con lo que teniamos que funciono perfecto"*). The architectures and trials of 2026-11-19
   … 23 below are the record of what was tried, not work to resume without his word.
@@ -2376,7 +2415,7 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   diciembre uno de los puntos a mejorar es justamente la velocidad"). Reference: pccr 2408 (2765 kf, 150 concepts)
   VLM 48.5 min + SAM3 ~10.5 h at ~4.1 min / concept even with the shared backbone (3ccb7c6); pccr 3108 (547 kf,
   87 concepts) SAM3 1 h 43 min. Robustness stays the bar: speed is never bought with a lost mask or a looser geometry.
-- ⭐ THE GLOBE (CESIUM) — AN IDEA OF HIS, NOT STARTED (USER 2026-11-20: "esperemos que termine esto y veamos si le
+- ⭐ THE GLOBE (CESIUM) — BUILT 2026-11-24 / 25 IN THREE STAGES (the block at the top of §7); its background (USER 2026-11-20: "esperemos que termine esto y veamos si le
   falta algo que querramos mostrar el 15/12, al menos una feature tipo place holder como los documentos o el gantt,
   estaba pensando en incluir cesium para ubicar las obras en el lugar georreferenciado, y ver de convertir todas
   las mediciones en mediciones geoespaciales, y tener otra manera de ver las obras que es en el globo, como lo
