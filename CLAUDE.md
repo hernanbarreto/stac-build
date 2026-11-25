@@ -1029,9 +1029,18 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     CORRECTED BY HIM (e8dada8; USER 2026-11-25: "si lo debe mandar al ui, solo que debe estar destildado, porque cuando lo
     tildo recien ahi lo trae, no no, ya lo debe enviar solo que destildado para que no se cargue en el visor"): once the
     cloud is on screen every IFC is fetched and built in the background, one after another, HIDDEN and unticked; the
-    tick only shows it. A hidden model is neither picked (three.js casts rays at invisible objects) nor framed. Expected,
-    not measured: web-ifc parses on the page's thread — the 260 MB IFC of grupo_electrogeno may stall the view seconds
-    after the cloud appears. HIS EYE: pending.
+    tick only shows it. A hidden model is neither picked (three.js casts rays at invisible objects) nor framed. It
+    STALLED ("no termina de mostrar la nube ni tampoco termina de cargar el IFC"): web-ifc parsed on the page's thread.
+    NOW BY PARTS (ca954d5; "te dije si a esto del IFC"): web-ifc reads the IFC in a worker (ifcWorker.ts, fetched at a low
+    priority), its parts built into the scene ~8 ms a frame, the group in the scene from the start; the read held
+    IDENTICAL to the former loader on pccr's and bufferStop's IFCs (ui/scripts/check-ifc-read.ts). NOT TRIED IN A
+    BROWSER — HIS EYE: pending. THAT NIGHT his internet was down ("ni siquiera abre youtube"); from the pod the public
+    tunnel gave 1.9 MB/s (10 MB of bufferStop's cloud in 5.5 s), the server 165 MB/s.
+  · A SESSION ROW'S SEGMENTATION ICON (5f2a78c, 7ec70e2; USER 2026-11-25: "si toco el boton de segmentacion como mucho …
+    deberia abrir el segmentation manager, no mandar el autosegment"): the icon that sent `set_prompt 'auto'` (the
+    server's retroactive segmentation — on a session where it finds a reconstruction it segments on the card and writes
+    over the output) is gone; the cross-hair one opens the Segmentation Manager. The spoken sessions.segment_auto keeps
+    its spoken confirmation.
   · THE GLOBE, CesiumJS 1.147 WITH NO ACCOUNT (USER: "cesium siempre sin cuenta, baja la mejor calidad que se pueda
     tener, no tenemos cuenta, veamos de conseguir relieves si o si" / "cesium si esta bien en 3 etapas"): Esri's public
     World Imagery + World Elevation 3D (both answer with no key; for a commercial product Esri asks a key — told to
