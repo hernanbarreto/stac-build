@@ -297,7 +297,6 @@
     "reconstruct": "Reconstruct geometry",
     "fuse": "Fuse {@scans}",
     "uploadVideo": "No frames yet: upload a video to extract them",
-    "segmentAuto": "Segment objects",
     "segmentManual": "Interactive segmentation",
     "unload": "Unload {@session}",
     "rename": "Rename",

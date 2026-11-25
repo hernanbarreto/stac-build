@@ -9,7 +9,7 @@
  * archivo zip"). Presentational: every handler comes from App.
  */
 import { useState } from 'react'
-import { ArrowUpFromLine, Crosshair, Download, FolderOpen, Hammer, Layers, Loader2, MapPin, Pencil, Play, Plug, Plus, Star, Tag, Trash2, Upload, Check, X } from 'lucide-react'
+import { ArrowUpFromLine, Crosshair, Download, FolderOpen, Hammer, Layers, Loader2, MapPin, Pencil, Play, Plug, Plus, Star, Trash2, Upload, Check, X } from 'lucide-react'
 import type { Georef } from './globe/geo'
 import { Panel, Row, Stack } from '../components/ui/Panel'
 import { Tree, type TreeNodeData } from '../components/ui/Tree'
@@ -192,9 +192,6 @@ export function SessionsPanel(p: SessionsPanelProps) {
               <IconButton size="sm" label={t('sessions.uploadVideo')} icon={<Plus aria-hidden />} onClick={() => p.onPickVideo(s.id)} />
             ) : null}
             {canFuse && <IconButton size="sm" label={t('sessions.fuse')} icon={<Layers aria-hidden />} onClick={() => p.onFuse(s.id)} />}
-            {/* at most it OPENS the Segmentation Manager — a touch never launches a segmentation (USER 2026-11-25: "si toco el
-                boton de segmentacion como mucho … deberia abrir el segmentation manager, no mandar el autosegment") */}
-            {loaded && <IconButton size="sm" label={t('sessions.segmentAuto')} icon={<Tag aria-hidden />} onClick={() => p.onOpenManager(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.segmentManual')} icon={<Crosshair aria-hidden />} onClick={() => p.onOpenManager(s.id)} />}
             {loaded && <IconButton size="sm" label={t('sessions.unload')} icon={<ArrowUpFromLine aria-hidden />} onClick={p.onUnload} />}
             {p.onLocate && <IconButton size="sm" label={t('location.action')} icon={<MapPin aria-hidden />} onClick={() => p.onLocate?.(s.id)} />}

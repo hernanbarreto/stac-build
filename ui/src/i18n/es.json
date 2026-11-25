@@ -297,7 +297,6 @@
     "reconstruct": "Reconstruir geometría",
     "fuse": "Fusionar {@scans}",
     "uploadVideo": "Sin cuadros: subí un video para extraerlos",
-    "segmentAuto": "Segmentar objetos",
     "segmentManual": "Segmentación interactiva",
     "unload": "Descargar {@session}",
     "rename": "Renombrar",

@@ -297,7 +297,6 @@
     "reconstruct": "Reconstruire la géométrie",
     "fuse": "Fusionner les {@scans}",
     "uploadVideo": "Pas encore d'images : téléversez une vidéo pour les extraire",
-    "segmentAuto": "Segmenter les objets",
     "segmentManual": "Segmentation interactive",
     "unload": "Décharger la {@session}",
     "rename": "Renommer",
