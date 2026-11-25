@@ -2462,53 +2462,79 @@ function App() {
 
   // THE PROJECT'S IFC MODELS COME WITH THE SESSION, UNTICKED (USER 2026-11-25: "si lo debe mandar al ui, solo que debe
   // estar destildado, porque cuando lo tildo recien ahi lo trae, no no, ya lo debe enviar solo que destildado para que
-  // no se cargue en el visor"): once the cloud is on screen (USER 2026-11-24: "para que no demore la carga, solo se
-  // carga la nube al abrir la sesion") every listed model is fetched and built in the background, one after another,
-  // and kept HIDDEN; its tick only shows it. A model that fails is said once and loaded again only by its tick.
+  // no se cargue en el visor"), BY PARTS, WITHOUT STALLING THE PAGE (USER 2026-11-25: "no hay manera de ue el IFC se
+  // cargue de a partes mientras se muestra la nube?" → "te dije si a esto del IFC"): once the cloud is on screen (USER
+  // 2026-11-24: "para que no demore la carga, solo se carga la nube al abrir la sesion") every listed model is read in
+  // a worker at a low priority, one after another; its group enters the scene at once — HIDDEN unless ticked — and
+  // fills in as its parts are built; its tick only shows it. A model that fails is said once and loaded again only by
+  // its tick; opening another session stops what is on its way.
   const bimHiddenRef = useRef<string[]>([])
   useEffect(() => { bimHiddenRef.current = bimHidden }, [bimHidden])
-  const bimSessionRef = useRef<string | null>(activeSession)
   const bimInFlight = useRef<Set<string>>(new Set())
   const bimFailed = useRef<Set<string>>(new Set())
-  useEffect(() => { bimSessionRef.current = activeSession; bimFailed.current.clear() }, [activeSession])
+  const bimPending = useRef<Map<string, { visible: boolean }>>(new Map())     // groups in the scene, still filling in
+  const bimAbort = useRef<AbortController>(new AbortController())
+  useEffect(() => {
+    bimFailed.current.clear()
+    bimAbort.current.abort()                                                 // another session: its models stop
+    bimAbort.current = new AbortController()
+  }, [activeSession])
   const onBimAvailable = useCallback((models: { name: string; url: string }[]) => {
     bimHiddenRef.current = models.map(m => m.name)                       // every model arrives unticked
     setBimHidden(bimHiddenRef.current)
     setBimAvailable(models)
   }, [])
-  /** fetch and build one listed model, add it to the scene shown only if its tick is on; null when it is already on
-   *  its way, or when another session was opened meanwhile (then it is dropped) */
+  /** read one listed model in the IFC worker: its group enters the scene at once, shown only if its tick is on, and
+   *  fills in by parts; null when it is already on its way, or when another session was opened meanwhile */
   const loadBimModel = useCallback(async (item: { name: string; url: string }) => {
-    if (bimInFlight.current.has(item.name)) return null
+    const signal = bimAbort.current.signal                               // this session's
+    if (signal.aborted || bimInFlight.current.has(item.name)) return null
     bimInFlight.current.add(item.name)
-    const sid = bimSessionRef.current
     setBimLoading(l => [...l.filter(n => n !== item.name), item.name])
     try {
       const { loadIFC } = await import('./components/IFCLoader')
-      const result = await loadIFC(item.url, item.name)
-      if (bimSessionRef.current !== sid) {
-        result.group.traverse(o => (o as { geometry?: { dispose?: () => void } }).geometry?.dispose?.())
-        return null
-      }
-      result.group.visible = !bimHiddenRef.current.includes(item.name)
-      viewportRef.current?.addBIMGroup(result.group)
+      const result = await loadIFC(item.url, item.name, {
+        signal,
+        onGroup: group => {
+          group.visible = !bimHiddenRef.current.includes(item.name)
+          bimPending.current.set(item.name, group)
+          viewportRef.current?.addBIMGroup(group)
+        },
+      })
       setBimModels(prev => [...prev.filter(m => m.filename !== item.name), result])
       return result
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return null      // another session opened
+      viewportRef.current?.removeBIMGroup(item.name)                                   // what it had built goes
+      throw err
     } finally {
+      bimPending.current.delete(item.name)
       bimInFlight.current.delete(item.name)
       setBimLoading(l => l.filter(n => n !== item.name))
     }
   }, [])
-  // ⚠ INTERIM (USER 2026-11-25, on the background load: "no termina de mostrar la nube ni tampoco termina de cargar el
-  // IFC, ninguna de las dos" — web-ifc parses on the page's thread): until the IFC is built in a worker, by parts,
-  // a model is fetched by its tick
-  /** a tick in the BIM panel shows or hides its model — already loaded in the background, hidden; one still on its
-   *  way is shown when it arrives; one that is not loaded (it failed) is loaded now */
+  const cloudOnScreen = pointCount > 0 || cloudEverShown
+  const [bimNext, setBimNext] = useState(0)
+  useEffect(() => {
+    if (!cloudOnScreen || bimInFlight.current.size > 0) return
+    const next = bimAvailable.find(m => !bimModels.some(x => x.filename === m.name) && !bimFailed.current.has(m.name))
+    if (!next) return
+    void loadBimModel(next)
+      .catch(err => {
+        bimFailed.current.add(next.name)
+        report(t('bim.uploadFailed', { detail: err instanceof Error ? err.message : String(err) }), 'err')
+      })
+      .finally(() => setBimNext(n => n + 1))
+  }, [cloudOnScreen, bimAvailable, bimModels, bimNext, loadBimModel, report, t])
+  /** a tick in the BIM panel shows or hides its model — read in the background, hidden; one still filling in is shown
+   *  or hidden at once while its parts keep arriving; one that is not loaded (it failed) is loaded now */
   const toggleBimModel = useCallback(async (name: string, on: boolean) => {
     bimHiddenRef.current = on ? bimHiddenRef.current.filter(n => n !== name) : [...bimHiddenRef.current.filter(n => n !== name), name]
     setBimHidden(bimHiddenRef.current)
     const loaded = bimModels.find(m => m.filename === name)
     if (loaded) { loaded.group.visible = on; return }
+    const pending = bimPending.current.get(name)
+    if (pending) { pending.visible = on; return }
     const item = bimAvailable.find(m => m.name === name)
     if (!on || !item || bimInFlight.current.has(name)) return
     setStatusMessage(t('bim.uploadedLoading', { name }))
@@ -2519,6 +2545,8 @@ function App() {
     } catch (err) {
       bimFailed.current.add(name)
       report(t('bim.uploadFailed', { detail: err instanceof Error ? err.message : String(err) }), 'err')
+    } finally {
+      setBimNext(n => n + 1)
     }
   }, [bimModels, bimAvailable, loadBimModel, report, t])
   /** delete one BIM model from the server; `confirmed`: already confirmed (STAC's spoken confirmation) */
