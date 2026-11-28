@@ -5126,7 +5126,7 @@ tickets_api.configure(resolve_ctx=_ctx, audit_log=_audit_log)
 app.include_router(tickets_api.router)
 
 # THE GLOBE (USER 2026-11-24: "vamos a agregarle además la ubicación … gps de cada proyecto … en el panel izquierdo
-# debe haber una opción con icono de mundo" / "cesium siempre sin cuenta"): one georeference per project —
+# debe haber una opción con icono de mundo"): one georeference per project —
 # geo.py / geo_api.py
 import geo_api
 geo_api.configure(resolve_ctx=_ctx, projects_dir=lambda: Path(PROJECTS_DIR), audit_log=_audit_log)

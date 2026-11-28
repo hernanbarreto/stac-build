@@ -87,6 +87,25 @@ def geo_projects():
     return {"ok": True, "projects": rows}
 
 
+@router.get("/map_config")
+def geo_map_config():
+    """What the page's map needs (USER 2026-11-28: the works on Mapbox — "sin muestra de satelite, muestra mas bien
+    sobria con 3d y mas bien oscurito"): the Mapbox public token, from .env (MAPBOX_TOKEN). A public (pk.) token is meant
+    for the page; the page is behind the gate. None when it is not set: the page says so."""
+    import os
+    token = os.environ.get("MAPBOX_TOKEN")
+    if not token:
+        env = Path(__file__).resolve().parent.parent / ".env"
+        try:
+            for line in env.read_text().splitlines():
+                k, _, v = line.strip().removeprefix("export ").partition("=")
+                if k == "MAPBOX_TOKEN" and v:
+                    token = v.strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return {"mapbox_token": token or None}
+
+
 @router.get("/{session_id}")
 def geo_get(session_id: str):
     return {"ok": True, "georef": G.load(_project_dir(session_id))}
@@ -148,6 +167,45 @@ def geo_from_video(session_id: str, scan: Optional[str] = None):
 
 
 _PLANS: Dict[tuple, Dict[str, Any]] = {}
+
+
+_WEATHER: Dict[tuple, tuple] = {}
+WEATHER_TTL_S = 600
+
+
+@router.get("/{session_id}/weather")
+def geo_weather(session_id: str):
+    """The weather at the work NOW (USER 2026-11-28, on the works' map: "agregale las condiciones climaticas"): Open-Meteo's
+    current conditions at its georeference (a free service with no account; it is sent the work's coordinates, nothing
+    else), kept 10 minutes per place. 404 when the work has no place; 502 when the service does not answer."""
+    import time
+    import urllib.parse
+    import urllib.request
+    g = G.load(_project_dir(session_id))
+    if not g:
+        raise HTTPException(404, f"{session_id} has no place on the map")
+    key = (round(float(g["lat"]), 3), round(float(g["lon"]), 3))
+    got = _WEATHER.get(key)
+    if got and time.time() - got[0] < WEATHER_TTL_S:
+        return got[1]
+    q = urllib.parse.urlencode({
+        "latitude": key[0], "longitude": key[1], "timezone": "auto", "wind_speed_unit": "kmh",
+        "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,cloud_cover,"
+                   "wind_speed_10m,wind_direction_10m,precipitation,is_day"})
+    try:
+        with urllib.request.urlopen(f"https://api.open-meteo.com/v1/forecast?{q}", timeout=8) as r:
+            data = json.loads(r.read())
+    except Exception as e:  # noqa: BLE001 — the service's answer, said as it is
+        raise HTTPException(502, f"the weather service did not answer: {e}") from e
+    cur = data.get("current") or {}
+    out = {"ok": True, "source": "open-meteo.com", "time": cur.get("time"), "timezone": data.get("timezone"),
+           "temperature_c": cur.get("temperature_2m"), "apparent_c": cur.get("apparent_temperature"),
+           "humidity_pct": cur.get("relative_humidity_2m"), "code": cur.get("weather_code"),
+           "cloud_pct": cur.get("cloud_cover"), "wind_kmh": cur.get("wind_speed_10m"),
+           "wind_dir_deg": cur.get("wind_direction_10m"), "precip_mm": cur.get("precipitation"),
+           "is_day": bool(cur.get("is_day", 1))}
+    _WEATHER[key] = (time.time(), out)
+    return out
 
 
 @router.get("/{session_id}/plan")

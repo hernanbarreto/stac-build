@@ -1,6 +1,6 @@
 /**
  * THE GLOBE'S DATA — one georeference per project (server geo.py / geo_api.py; USER 2026-11-24: "vamos a agregarle
- * además la ubicación … gps de cada proyecto … cesium siempre sin cuenta").
+ * además la ubicación … gps de cada proyecto").
  */
 export type GeoSource = 'manual' | 'video' | 'points'
 

@@ -79,8 +79,8 @@ import { setScanContext } from './net/scanHeader'
 import { GlobePanel } from './features/globe/GlobePanel'
 import { fetchGeoProjects, removeGeoref, type GeoProject } from './features/globe/geo'
 
-// the globe and CesiumJS are loaded when the globe is first opened (USER 2026-11-24 — features/globe)
-const GlobeView = lazy(() => import('./features/globe/GlobeView'))
+// the works' map and its library are loaded when the globe is first opened (USER 2026-11-24 — features/globe)
+const MapView = lazy(() => import('./features/globe/MapView'))
 const LocationDialog = lazy(() => import('./features/globe/LocationDialog').then(m => ({ default: m.LocationDialog })))
 
 /** Translator for callbacks defined before the i18n hook is read. */
@@ -1603,7 +1603,7 @@ function App() {
   const { notify } = useToast()
 
   // THE GLOBE (features/globe — USER 2026-11-24: "en el panel izquierdo debe haber una opción con icono de mundo …
-  // cuando selecciono alguno de los pines, me lleva a ese lugar del mapa cesium y abre la sesión por defecto"): the
+  // cuando selecciono alguno de los pines, me lleva a ese lugar del mapa … y abre la sesión por defecto"): the
   // works and their places, the one being placed, the one to fly to
   const [geoProjects, setGeoProjects] = useState<GeoProject[]>([])
   const [geoLoading, setGeoLoading] = useState(false)
@@ -1644,11 +1644,6 @@ function App() {
     try { await removeGeoref(sid, token); await refreshGeo() }
     catch (e) { setGeoError(e instanceof Error ? e.message : String(e)) }
   }, [token, refreshGeo])
-  const openFromGlobe = useCallback((sid: string) => {
-    layout.setLeftTab(null)                          // the globe closes: the work opens in the 3D viewer
-    setGlobeOn(false)
-    if (sid !== activeSession) handleSessionLoad(sid)
-  }, [layout, activeSession, handleSessionLoad])
   // a work touched in the globe's list: the globe flies there and the list steps aside (USER 2026-11-25: "cuando abro
   // un proyecto en el globo, es decir que toco la lista debe ocultarse la lista para que en celulares pueda ver el globo")
   const showFromGlobeList = useCallback((sid: string) => { flyToWork(sid); layout.setLeftTab(null) }, [flyToWork, layout])
@@ -3807,7 +3802,7 @@ function App() {
             // THE GLOBE over the viewer while its section is the current one, its list shown or hidden; the viewer
             // underneath keeps its state
             <Suspense fallback={<div className="stac-globe-fallback">{t('globe.loading')}</div>}>
-              <GlobeView projects={geoProjects} focus={globeFocus} onOpen={openFromGlobe} ifcOn={globeIfc} />
+              <MapView projects={geoProjects} focus={globeFocus} ifcOn={globeIfc} />
             </Suspense>
           )}
           {locating && (

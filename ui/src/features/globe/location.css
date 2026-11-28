@@ -2,7 +2,6 @@
 .stac-location { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: var(--sp-3); height: min(72vh, 820px); min-height: 380px; }
 .stac-location__side { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; overflow: auto; }
 .stac-location__map { position: relative; min-height: 300px; border-radius: var(--r-2); overflow: hidden; background: var(--surface-0); }
-.stac-location__map .cesium-widget, .stac-location__map .cesium-viewer { width: 100%; height: 100%; }
 .stac-location__loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--text-2); font-size: var(--fs-2); }
 .stac-location__note { margin: 0; color: var(--text-2); font-size: var(--fs-1); line-height: 1.4; }
 .stac-location__error { margin: 0; color: var(--err-fg); font-size: var(--fs-1); }
@@ -35,3 +34,10 @@
 }
 .stac-location__coords { display: flex; align-items: center; gap: var(--sp-1); font-size: var(--fs-2); font-weight: 600; }
 .stac-location__decimal { color: var(--text-2); }
+/* the marks on the map (Mapbox markers): the work's origin, and the two points of the 2-point placement */
+.stac-location__mark { width: 14px; height: 14px; border-radius: 50%; background: #f28b34; border: 2px solid #fff;
+  box-shadow: 0 0 0 3px rgba(242, 139, 52, 0.3), 0 2px 6px rgba(0, 0, 0, 0.6); pointer-events: none; }
+.stac-location__mark--point { width: 22px; height: 22px; display: grid; place-items: center; color: #fff;
+  font: 600 12px/1 system-ui, sans-serif; }
+.stac-location__map .mapboxgl-ctrl-group { background: rgba(20, 22, 26, 0.9); border: 1px solid rgba(255, 255, 255, 0.12); }
+.stac-location__map .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon { filter: invert(1) brightness(0.9); }

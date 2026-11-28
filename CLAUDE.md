@@ -1128,17 +1128,13 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     server's retroactive segmentation — on a session where it finds a reconstruction it segments on the card and writes
     over the output) is gone; the cross-hair one opens the Segmentation Manager. The spoken sessions.segment_auto keeps
     its spoken confirmation.
-  · THE GLOBE, CesiumJS 1.147 WITH NO ACCOUNT (USER: "cesium siempre sin cuenta, baja la mejor calidad que se pueda
-    tener, no tenemos cuenta, veamos de conseguir relieves si o si" / "cesium si esta bien en 3 etapas"): Esri's public
-    World Imagery + World Elevation 3D (both answer with no key; for a commercial product Esri asks a key — told to
-    him). 1cdd0fc, 2d609ca, 193b73a: ONE georeference per project (<project>/georef.json — the scan origin's WGS84
-    lat / lon / height, the plan's heading, its source manual | video | points, its stated accuracy); the left rail's
-    globe (the works as pins; a pin flies there and opens the session); a session row's pin button = the Location
-    window (the plan — the cloud from above — laid on the imagery, turned by hand or by 2 points with the plan-to-map
-    scale shown as a check; the video's GPS offered first — NONE of his six videos carries one); each placed work's
-    GenRecon mesh (else a million points of its cloud) stands on the globe, its IFC on demand (web-ifc → glTF in the
-    page). Frames: the plan = the display frame written Z-up (X = x, Y = −z); the mesh tiles are glTF Y-up with
-    gltfUpAxis Z. ui/public/cesium links node_modules' build; vite pre-bundles cesium.
+  · THE GLOBE, FIRST VERSION (2026-11-24 / 25 — its library replaced by Mapbox on 2026-11-28, the entry "THE WORKS'
+    MAP" below): 1cdd0fc, 2d609ca, 193b73a: ONE georeference per project (<project>/georef.json — the scan origin's
+    WGS84 lat / lon / height, the plan's heading, its source manual | video | points, its stated accuracy); the left
+    rail's globe (the works as pins); a session row's pin button = the Location window (the plan — the cloud from
+    above — laid on the map, turned by hand or by 2 points with the plan-to-map scale shown as a check; the video's
+    GPS offered first — NONE of his six videos carries one). Frames: the plan = the display frame written Z-up (X = x,
+    Y = −z); the mesh tiles are glTF Y-up with gltfUpAxis Z.
   · HIS QUESTION, ANSWERED, HIS DECISION PENDING: an IFC with GenRecon's texture — possible (IFC4
     IfcIndexedTriangleTextureMap + IfcImageTexture; the cut keeps the triangles; today the exporter welds vertices
     and writes no colour), but almost no BIM program shows IFC textures (Revit ignores them, Bonsai reads them; our
@@ -2546,49 +2542,32 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   diciembre uno de los puntos a mejorar es justamente la velocidad"). Reference: pccr 2408 (2765 kf, 150 concepts)
   VLM 48.5 min + SAM3 ~10.5 h at ~4.1 min / concept even with the shared backbone (3ccb7c6); pccr 3108 (547 kf,
   87 concepts) SAM3 1 h 43 min. Robustness stays the bar: speed is never bought with a lost mask or a looser geometry.
-- ⭐ THE GLOBE (CESIUM) — BUILT 2026-11-24 / 25 IN THREE STAGES (the block at the top of §7); its background (USER 2026-11-20: "esperemos que termine esto y veamos si le
-  falta algo que querramos mostrar el 15/12, al menos una feature tipo place holder como los documentos o el gantt,
-  estaba pensando en incluir cesium para ubicar las obras en el lugar georreferenciado, y ver de convertir todas
-  las mediciones en mediciones geoespaciales, y tener otra manera de ver las obras que es en el globo, como lo
-  ves?"). THE PRESENTATION IS ON 2026-12-15. What the assistant answered (his decisions, nothing begun):
-  · FOR THE 15th: a Globe section — a pin per project at its real place, a touch opens the session — and ONE work
-    really standing on the globe (one session first, his eye). The conversion of every measurement to
-    geospatial (points, tickets, exports with a CRS, the IFC's map conversion) as a declared roadmap with one
-    visible hook (a picked point shows latitude / longitude / height): it touches the viewer, the exporter, the
-    tickets and the reports.
-  · MEASURED: none of the five source videos carries a GPS location (ffprobe: no location tag) — a work's place
-    is entered, by hand on the map (metres of error) or from 2–3 points of known coordinates (the common-points
-    similarity already built). THE TILED GENRECON MESHES ARE ALREADY OGC 3D TILES 1.1 (tiles/tileset.json +
-    tile_<id>.glb, tools/glb/tile_mesh.mjs, served by /api/segmentation/tsdf/tiles/…; the interface renders
-    them with 3d-tiles-renderer on three.js) — CesiumJS's native format: a mesh on the globe needs a placement,
-    no conversion. The CLOUD is Potree's octree: Cesium does not read it (a conversion, or the mesh on the
-    globe and the cloud in the detail viewer).
-  · ⭐ HIS DECISION AND THE INSTALL (USER 2026-11-20: "A cesium vamos a correrlo localmente con la mejor potencia
-    y la mejor calidad sin cuentas externas. Si es mejor mapbox usamos mapbox con algún token. Investiga qué es
-    mejor. E instálalo y luego definimos cómo implementarlo"). INVESTIGATED: CesiumJS — Apache-2.0, no account,
-    runs wholly from our server (its own offline guide), OGC 3D Tiles native (our tiled meshes open as they
-    are), a true WGS84 globe; Mapbox GL JS v3 — proprietary, an access token and billing (or its paid
-    self-hosted Atlas), NO native 3D Tiles (a custom three.js layer, Web Mercator); MapLibre (the open fork) has
-    a globe since 5.0 and no native 3D Tiles either. → CESIUM. (Mapbox's imagery can still be a base LAYER of
-    Cesium with a token, later, his call.) INSTALLED in ui/: `cesium` 1.147.0 exact (released 2026-11-02;
-    `npm install --save-exact --ignore-scripts`; @cesium/engine 26.5.0, @cesium/widgets 16.3.1; 32 packages,
-    3,492 files, 108 MB long / 394 MB allocated on the volume). ⚠ TOLD TO HIM: Cesium ≥ 1.141 DECLARES Node
-    ≥ 22 (1.147: ≥ 22.17) and the pod's nodejs env is Node 20.20.2 (npm warns EBADENGINE) — checked: it loads
-    under Node 20 and the interface's own bundler (esbuild 0.21.5, vite's) packages it clean (a 9.6 MB bundle
-    of a throw-away entry); the last release that declares Node 20 is 1.139.0. NOTHING OF THE INTERFACE WAS
-    TOUCHED (no import, no screen, no vite plugin for its run-time assets: Build/Cesium/{Workers, Assets,
-    ThirdParty, Widgets}, 342 files, ~7 MB). ITS OFFLINE WORLD MAP IS COARSE: Natural Earth II, 43 tiles,
-    levels 0–2 (~20 km a pixel) — a globe seen from space; each work seen from near needs open imagery (and
-    terrain) of its zone stored on the pod: THE IMPLEMENTATION IS DEFINED WITH HIM ("luego definimos cómo
-    implementarlo") — AND NOT YET (USER 2026-11-20, later: "Lo de cesium todavía no lo defino, déjame pensarlo
-    bien"): installed and left alone; not to be raised again until he does. Asked of him, unanswered: where each
-    work is, which session goes on the globe first, a place by hand or from points of known coordinates. The
-    kit after the install: capture run, drift.py — THE KIT IS THE POD (a598422).
-  · HIS TO DECIDE: where a work's place comes from; the base map (CesiumJS itself is Apache-2.0 and self-hosted;
-    Cesium ion's terrain / imagery is an outside service with an account — against "no paid external APIs,
-    everything local": an open map online without an account, or the five zones' tiles served by us); ONE
-    georeference per project as the single source (origin, heading, how it was obtained, its accuracy —
-    indoors a satellite image verifies nothing: "approximate" unless points were measured).
+- ⭐ THE WORKS' MAP — MAPBOX GL JS (2026-11-28, its first version of 2026-11-24 / 25 replaced). USER: "estamos seguros
+  que [la librería del primer globo] es mejor que mapbox para nuestro caso?, las imagenes … son una mierda, mapbox trabaja
+  con mapas 3d sin imagenes de satelite, y permite cargar los glb de forma rapida y simple" / his token, a public pk one
+  of years ago, checked (style, tiles, geocoding answer) / "sin muestra de satelite … sobria con 3d" then, on the day
+  view: "agregale sol, … sombras, calles si es que hay, edificios 3d, esta muy oscuro" and, of three styles shown, "la
+  primera … es la que mejor se ve" (Standard, day, the default theme) / "al presionar el mundo en el left bar, debe
+  mostrarme el mundo con los pines de las obras que tengo georeferenciadas, al tocar sobre alguna, debe acercarme y
+  mostrar el glb liviano, en el lugar correspondiente" / "agregale las condiciones climaticas" / "calidad visual super
+  profesional, rapido" (only bufferStop is placed: "grupo electrogeno no tiene punto gps").
+  · mapbox-gl 3.34.2 (2026-11-03, exact) in ui/; MAPBOX_TOKEN in .env, served by GET /api/geo/map_config. Mapbox's
+    licence is proprietary (a free tier of map loads; told to him). The former library, its package, its public/ link,
+    its vite pre-bundle and its names in the code are gone (vite pre-bundles mapbox-gl).
+  · features/globe/MapView.tsx: the globe from space centred on the placed works, a pin per work; a pin (or the list)
+    loads the work's LIGHT MODEL — the root tile of its GenRecon tileset (bufferStop's; grupo_electrogeno's would be
+    411 k triangles, 8 MB against a 560 MB GLB), else its cloud's points — then ONE flight framing it by its size,
+    tilted; drawn by three.js in a custom layer (Mapbox's matrix × the work's east-north-up placement: heading, glTF's
+    Y up, the floor adjustment), unlit textures; the pin hides up close. A pin NO LONGER OPENS THE SESSION (his new
+    description: fly and show; the session opens from the Sessions panel). Its IFC on demand: the root tile of the
+    IFC's tiles. The Location window (LocationDialog) on the same map: the plan an image laid by its four corners,
+    dragged and turned; the place's height from Mapbox's terrain.
+  · THE WEATHER: GET /api/geo/{id}/weather — Open-Meteo's current conditions (free, no account; it is sent the work's
+    coordinates, told to him), 10 minutes per place; a card (sky, temperature, feels like, humidity, wind and its
+    direction, precipitation) and Mapbox's rain or snow over the map near the work, as hard as it falls there.
+  · Seen before applying, in the pod's headless browser (software rendering), on a probe page with a read-only proxy:
+    the globe, bufferStop flown to and standing in place, the weather card with its rain (9 °C, light rain), a city's
+    3D buildings. HIS EYE in his browser: pending. THE REBUILD KIT is owed for the npm change (drift.py → capture.sh).
 - ⭐⭐ THE PRECISION CORE'S TIME — F4, F5, F6 (USER 2026-11-20: "estas F4, F5 y F6 son las que se comen todo el
   tiempo, hay manera de hacerlas mas rapido?, deben ser lo mas rapido posible, por ahi paralelizanod algo,
   investiga a fondo como optimizar el tiempo en cada uno"). INVESTIGATED READ-ONLY (the copy's run holds the card;

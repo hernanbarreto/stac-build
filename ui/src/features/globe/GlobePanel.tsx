@@ -1,7 +1,7 @@
 /**
  * THE GLOBE'S SECTION OF THE LEFT PANEL (USER 2026-11-24: "en el panel izquierdo debe haber una opción con icono de
- * mundo … cuando seleccionamos el icono del mundo, muestra cesium con todos los pines donde están los proyectos").
- * The globe itself is drawn over the viewer's area (GlobeView); here, the works: the ones placed (go to it on the
+ * mundo … cuando seleccionamos el icono del mundo, muestra [el mapa] con todos los pines donde están los proyectos").
+ * The globe itself is drawn over the viewer's area (MapView); here, the works: the ones placed (go to it on the
  * globe, open it, place it again, take its place away) and the ones not placed yet (place it: a click on the globe).
  */
 import { useState } from 'react'

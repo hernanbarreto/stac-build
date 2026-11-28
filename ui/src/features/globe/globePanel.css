@@ -24,7 +24,7 @@
 .stac-globe-list__actions > span { color: var(--text-2); font-size: var(--fs-1); }
 .stac-globe-list__hint { color: var(--text-3); font-size: var(--fs-1); margin: var(--sp-1) 0; }
 .stac-globe-list__error { color: var(--err-fg); font-size: var(--fs-1); margin: var(--sp-1) 0; }
-/* while CesiumJS is being fetched the first time (App's Suspense around GlobeView) */
+/* while the map's library is being fetched the first time (App's Suspense around MapView) */
 .stac-globe-fallback {
   position: absolute; inset: 0; z-index: 70; display: grid; place-items: center;
   background: var(--surface-0); color: var(--text-2); font-size: var(--fs-2);

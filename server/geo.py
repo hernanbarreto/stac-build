@@ -1,7 +1,7 @@
 """WHERE A WORK STANDS ON THE GLOBE (USER 2026-11-24: "vamos a agregarle además la ubicación … gps de cada
 proyecto, necesita el punto gps real y la orientación verdad?, en el panel izquierdo debe haber una opción con icono
 de mundo, y lo mismo cada sesión debe poder agregarle la información del pin gps … guardamos y ya queda indicado que
-ese proyecto tiene asignado el punto gps" / "cesium siempre sin cuenta").
+ese proyecto tiene asignado el punto gps").
 
 ONE GEOREFERENCE PER PROJECT, ``<project>/georef.json`` (it travels with the session's ZIP, it goes with a rename or
 a deletion of the project):
