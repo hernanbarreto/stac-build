@@ -24,16 +24,23 @@ JUPYTER_LOG=/jupyter.log          # the container's disk, where the image's own 
 
 listening() { [ -n "$(ss -ltnH "sport = :$1" 2> /dev/null)" ]; }
 
-# his key in <home>/.ssh/authorized_keys and the permissions sshd asks for; sets KEY_STATE
+# his key in <home>/.ssh/authorized_keys and the permissions sshd asks for; sets KEY_STATE.
+# A line carrying his key under a mangled type is removed: the pod's PUBLIC_KEY setting (his RunPod account's SSH
+# key, which /start.sh appends to every new pod) held it as "sh-ed25519 …", its first "s" lost (found 2026-11-28).
 ensure_key() {
-    local home="$1" dir="$1/.ssh" file="$1/.ssh/authorized_keys"
+    local home="$1" dir="$1/.ssh" file="$1/.ssh/authorized_keys" kept removed=""
     mkdir -p "$dir" && touch "$file" || return 1
+    if awk -v t="$SSH_KEY_TYPE" -v k="$SSH_KEY_BODY" '$2 == k && $1 != t {bad = 1} END {exit !bad}' "$file"; then
+        kept="$(awk -v t="$SSH_KEY_TYPE" -v k="$SSH_KEY_BODY" '!($2 == k && $1 != t)' "$file")" || return 1
+        if [ -n "$kept" ]; then printf '%s\n' "$kept" > "$file"; else : > "$file"; fi || return 1
+        removed=", a broken copy of it removed"
+    fi
     if awk -v t="$SSH_KEY_TYPE" -v k="$SSH_KEY_BODY" '$1 == t && $2 == k {found = 1} END {exit !found}' "$file"; then
-        KEY_STATE="already there"
+        KEY_STATE="already there$removed"
     else
         if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then echo >> "$file" || return 1; fi
         echo "$SSH_KEY_TYPE $SSH_KEY_BODY $SSH_KEY_NAME" >> "$file" || return 1
-        KEY_STATE="added"
+        KEY_STATE="added$removed"
     fi
     chmod go-w "$home" && chmod 700 "$dir" && chmod 600 "$file"
 }
