@@ -29,8 +29,10 @@ fi
 #    Electron down with "libnss3.so: cannot open shared object file"); each name is installed in its t64 form where
 #    that form exists. xvfb and x11vnc (launch_electron.sh's display and its VNC server) were missing from the list.
 #    Only what is missing is installed; the result is one line, "packages: …".
-START_PKGS="tmux xvfb x11vnc novnc websockify libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgtk-3-0
-            libgbm1 libasound2 libxdamage1 libxcomposite1 libxrandr2 libxkbcommon0"
+#    The desktop's (Electron's) part only when it is asked for: START_ELECTRON=1 (section 3a).
+START_PKGS="tmux"
+[ "${START_ELECTRON:-0}" = "1" ] && START_PKGS="$START_PKGS xvfb x11vnc novnc websockify libnss3 libatk1.0-0 libatk-bridge2.0-0
+            libcups2 libdrm2 libgtk-3-0 libgbm1 libasound2 libxdamage1 libxcomposite1 libxrandr2 libxkbcommon0"
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2> /dev/null | grep -q 'install ok installed'; }
 pkgs_missing() {
     local p out=""
@@ -106,8 +108,10 @@ fi
 
 # 3a. ELECTRON DESKTOP (headless pod → viewable over noVNC on :6080/vnc.html).
 #     Brings up Xvfb + x11vnc + noVNC, waits for Vite, then runs the app.
-#     Flag: set START_ELECTRON=0 to skip (e.g. no display stack needed).
-START_ELECTRON="${START_ELECTRON:-1}"
+#     OFF UNLESS ASKED (USER 2026-11-28: "si no hace falta para nada electron habria que matarlo"): the template exposes
+#     no 6080 and the page is used from a browser (the tunnel, the Tailscale address); started, it drew the viewer in
+#     software on ~4 cores and slowed GenRecon's CPU stage. START_ELECTRON=1 starts it (and installs its packages).
+START_ELECTRON="${START_ELECTRON:-0}"
 if [ "$START_ELECTRON" = "1" ]; then
     tmux new-session -d -s electron
     tmux send-keys -t electron "$CONDA && conda activate nodejs && cd /workspace/stac-build && bash scripts/launch_electron.sh" Enter

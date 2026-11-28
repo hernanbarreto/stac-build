@@ -462,6 +462,11 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     log kept as tailscaled.prev.log; one line "remote: up …" / "remote: ERROR …", repeated in RunPod's Logs tab.
     Tested: tailscaled frozen whole → up after 1 restart (1 m 29 s); the address dead from outside for 60 s with
     tailscaled answering on the pod → up after 2 restarts (2 m 4 s).
+  · THE ELECTRON DESKTOP IS OFF AT START (USER 2026-11-28: "para que lo usamos electron?" / "si no hace falta para nada
+    electron habria que matarlo"): it is the app drawn on the pod's virtual display, seen through noVNC on :6080 — a
+    port the template does not expose, while the page is used from a browser. Once its packages installed it drew the
+    viewer in software on ~4 cores and slowed GenRecon's CPU stage; stopped, `START_ELECTRON=1` starts it (and only
+    then are its packages installed).
   · NOT STARTED BY IT: a pipeline job that was running when the pod stopped (the queue is dropped: re-sent by
     hand, replace OFF) and the assistant's own session (tmux `claude` is created ready; `claude` is typed).
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);

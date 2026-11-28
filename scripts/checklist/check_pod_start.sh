@@ -56,13 +56,8 @@ eval "$(sed -n '/^START_PKGS=/,/libxkbcommon0"$/p' init_pod.sh)"
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2> /dev/null | grep -q 'install ok installed'; }
 miss=""; for p in $START_PKGS; do pkg_installed "$p" || pkg_installed "${p}t64" || miss="$miss $p"; done
 check "packages of init_pod.sh's list installed${miss:+ (missing:$miss)}" test -z "$miss" -a -n "$START_PKGS"
-check "Electron finds every library it loads" \
-    bash -c "! ldd ui/node_modules/electron/dist/electron | grep -q 'not found'"
-check "Xvfb running" pgrep -x Xvfb
-check "x11vnc running" pgrep -x x11vnc
-check "noVNC page answers on 6080" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} http://127.0.0.1:6080/vnc.html)" = 200 ]'
-check "Electron running" bash -c 'pgrep -f "electron/dist/electro[n]" > /dev/null'
-check "Electron not on the card" bash -c '! nvidia-smi --query-compute-apps=process_name --format=csv,noheader | grep -qi electron'
+check "the Electron desktop is off unless asked (START_ELECTRON=1)" \
+    bash -c '! pgrep -f "electron/dist/electro[n]" > /dev/null && grep -q "^START_ELECTRON=\"\${START_ELECTRON:-0}\"" init_pod.sh'
 gk=$(grep -E '^(export )?STAC_GATE_KEY=' .env | head -1 | sed -E 's/^(export )?STAC_GATE_KEY=//; s/^"//; s/"$//')
 host=$(bash scripts/remote_access.sh link 2> /dev/null | sed -E 's#^https://([^/]+)/.*#\1#')
 jar=$(mktemp)
