@@ -444,6 +444,18 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     began `sh-ed25519 …`; where its first letter was lost is NOT known (the assistant first said "his RunPod
     account's key" without seeing it — retracted). pod_access.sh removes any line carrying his key under another
     type (removed on this pod too; the old file kept in the session's scratchpad).
+  · THE POD STARTS WITH NO ERROR (USER 2026-11-28: "el pod debe arrancar siempre sin errores") — the check:
+    `bash scripts/checklist/check_pod_start.sh` (read only, last line CLOSED / NOT CLOSED). Found in every start of
+    that day: `E: Package 'libasound2' has no installation candidate` (Ubuntu 24.04's t64 renames) made apt refuse
+    init_pod.sh's WHOLE list — novnc, websockify, libnss3 never installed, Electron down ("libnss3.so: cannot open
+    shared object file"); xvfb and x11vnc were never in the list. Now each name is installed in its t64 form where it
+    exists, only what is missing, one line "packages: …" (apt's output in /tmp/stac_start_apt.log). launch_electron.sh:
+    noVNC is judged running by its PORT (a process-name pattern matched the assistant's own shell), and Electron
+    runs on a D-Bus of its own (the system bus started once, dbus-run-session) — no "Failed to connect to the bus".
+    THE PUBLIC ADDRESS DID NOT ANSWER that afternoon ("esta mierda no anda nunca"): the gate answered on the pod,
+    the Funnel relay took the connection and the TLS handshake never came back; tailscaled, started 15:15 UTC, had
+    logged nothing since its first second. Restarting tailscaled alone (`remote_access.sh start` after it) brought
+    it back (302 / 200 / 403 from the internet side). Why it went deaf: NOT traced.
   · NOT STARTED BY IT: a pipeline job that was running when the pod stopped (the queue is dropped: re-sent by
     hand, replace OFF) and the assistant's own session (tmux `claude` is created ready; `claude` is typed).
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);

@@ -23,10 +23,39 @@ fi
 # 1. paquetes de sistema si faltan: tmux + stack de escritorio para Electron/noVNC
 #    (libnss3 etc. son runtime de Chromium; sin ellos Electron no arranca — visto
 #    en pod fresco 2026-07-09: "libnss3.so: cannot open shared object file")
-if ! command -v tmux &> /dev/null || [ ! -d /usr/share/novnc ]; then
-    apt update && DEBIAN_FRONTEND=noninteractive apt install -y tmux novnc websockify \
-        libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgtk-3-0 \
-        libgbm1 libasound2 libxdamage1 libxcomposite1 libxrandr2 libxkbcommon0
+#    THE PACKAGES' NAMES ON TODAY'S IMAGE (Ubuntu 24.04): several were renamed with a "t64" suffix and `libasound2`
+#    has no installation candidate there — that one name made apt refuse the WHOLE list at every start (found
+#    2026-11-28, USER: "el pod debe arrancar siempre sin errores": novnc, websockify and libnss3 never installed,
+#    Electron down with "libnss3.so: cannot open shared object file"); each name is installed in its t64 form where
+#    that form exists. xvfb and x11vnc (launch_electron.sh's display and its VNC server) were missing from the list.
+#    Only what is missing is installed; the result is one line, "packages: …".
+START_PKGS="tmux xvfb x11vnc novnc websockify libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgtk-3-0
+            libgbm1 libasound2 libxdamage1 libxcomposite1 libxrandr2 libxkbcommon0"
+pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2> /dev/null | grep -q 'install ok installed'; }
+pkgs_missing() {
+    local p out=""
+    for p in $START_PKGS; do pkg_installed "$p" || pkg_installed "${p}t64" || out="$out $p"; done
+    echo "$out"
+}
+missing="$(pkgs_missing)"
+if [ -n "$missing" ]; then
+    APT_LOG=/tmp/stac_start_apt.log                  # apt's own output (the container's disk)
+    apt-get update -qq > "$APT_LOG" 2>&1
+    want=""
+    for p in $missing; do
+        if apt-cache show "${p}t64" > /dev/null 2>&1; then want="$want ${p}t64"; else want="$want $p"; fi
+    done
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $want >> "$APT_LOG" 2>&1
+    missing="$(pkgs_missing)"
+    if [ -n "$missing" ]; then
+        echo "packages: ERROR — not installed:$missing (apt's output: $APT_LOG, its end below)"
+        tail -n 5 "$APT_LOG" | sed 's/^/packages:   /'
+    else
+        echo "packages: installed —$want"
+    fi
+else
+    echo "packages: ok — all present"
 fi
 
 CONDA="source /workspace/miniforge3/etc/profile.d/conda.sh"

@@ -64,10 +64,17 @@ fi
 start_bg x11vnc "x11vnc -display ${DISPLAY_NUM}" \
   x11vnc -display "${DISPLAY_NUM}" -forever -shared -nopw -rfbport "${VNC_PORT}" -noxdamage
 
-# 4. noVNC (browser client) bridging NOVNC_PORT -> VNC_PORT
+# 4. noVNC (browser client) bridging NOVNC_PORT -> VNC_PORT. Running = its port listening: a process-name
+#    pattern also matched any shell whose command line held those words (2026-11-28: "already running" with
+#    nothing on 6080).
 if [ -d "${NOVNC_WEB}" ]; then
-  start_bg novnc "websockify.*${NOVNC_PORT}" \
-    websockify --web "${NOVNC_WEB}" "${NOVNC_PORT}" "localhost:${VNC_PORT}"
+  if [ -n "$(ss -ltnH "sport = :${NOVNC_PORT}" 2>/dev/null)" ]; then
+    log "novnc already listening on ${NOVNC_PORT} — reusing"
+  else
+    log "starting novnc"
+    websockify --web "${NOVNC_WEB}" "${NOVNC_PORT}" "localhost:${VNC_PORT}" >"${LOG_DIR}/novnc.log" 2>&1 &
+    sleep 1
+  fi
 else
   log "WARN: noVNC web root ${NOVNC_WEB} not found — VNC still on :${VNC_PORT}"
 fi
@@ -81,12 +88,21 @@ for _ in $(seq 1 90); do
 done
 [ "${up}" = 1 ] && log "Vite is up" || log "WARN: Vite not reachable after 90s — launching anyway"
 
-# 6. Electron on the virtual display (foreground → keeps the tmux window alive)
+# 6. D-Bus: the container runs none, and Chromium logs "Failed to connect to the bus" for the system bus and for
+#    the session bus (2026-11-28, USER: "el pod debe arrancar siempre sin errores"). The system bus is started
+#    once (a pid file left by a dead one removed first); the session bus is Electron's own (dbus-run-session).
+if [ ! -S /run/dbus/system_bus_socket ]; then
+  mkdir -p /run/dbus
+  if [ -f /run/dbus/pid ] && ! kill -0 "$(cat /run/dbus/pid 2>/dev/null)" 2>/dev/null; then rm -f /run/dbus/pid; fi
+  dbus-daemon --system --fork >"${LOG_DIR}/dbus.log" 2>&1 || log "WARN: the system D-Bus did not start (${LOG_DIR}/dbus.log)"
+fi
+
+# 7. Electron on the virtual display (foreground → keeps the tmux window alive)
 cd "${UI}"
 pkill -f "electron/dist/electron" 2>/dev/null && sleep 1 || true
 log "launching Electron → ${VITE_URL} (noVNC: http://<host>:${NOVNC_PORT}/vnc.html)"
 export VITE_DEV_SERVER_URL="${VITE_URL}"
-exec node_modules/.bin/electron . \
+exec dbus-run-session -- node_modules/.bin/electron . \
   --no-sandbox --disable-gpu-sandbox \
   --ignore-certificate-errors \
   --enable-unsafe-swiftshader --use-gl=angle --use-angle=swiftshader \
