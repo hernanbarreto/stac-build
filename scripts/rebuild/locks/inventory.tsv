@@ -222,9 +222,9 @@ asis	hf_cache/hub/CACHEDIR.TAG	191	f6572428f6d5e1575e73a1502895a8731f10757dfbb63
 asis	hf_cache/hub/models--Qwen--Qwen3-VL-8B-Instruct/refs/main	40	b977aaac705eb8c0ad6cb1c08e92631a340da86153d879ca4c79063f97b23124	
 asis	hf_cache/hub/models--depth-anything--DA3-SMALL/refs/main	40	c571bbfe5380be7e97bd38b08a345f4d208dab6536b642c44da84d8fab92549c	
 weight	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/blobs/0c9ba5b7641a989502f845180f03b09c632f8f09	3113	-	models.tsv
-asis	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/blobs/0c9ba5b7641a989502f845180f03b09c632f8f09.stac_sha256.json	132	e11ffd715a85eff4043bd250b82afb89c04c093f31f0978c94a34608696eb160	
+asis	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/blobs/0c9ba5b7641a989502f845180f03b09c632f8f09.stac_sha256.json	132	55ea3633ae99807aebca51613c69209fc1d7389c1f8349f9fc0635d81f803039	
 weight	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/blobs/8ebe871a022ed58d2fc8fdfb2ebdb31d57b60fe39611c849095851a7b7c6020c	6759558100	-	models.tsv
-asis	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/blobs/8ebe871a022ed58d2fc8fdfb2ebdb31d57b60fe39611c849095851a7b7c6020c.stac_sha256.json	138	369b4d95ab82f6c393d4e6bdaab85dc850215618f25e3b4d5fc7f42a491cedeb	
+asis	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/blobs/8ebe871a022ed58d2fc8fdfb2ebdb31d57b60fe39611c849095851a7b7c6020c.stac_sha256.json	138	86c392b4dbb400464fcd7a439a15f2bc0425dc867d384af8aadfe3b071a85167	
 weight	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/refs/main	40	-	models.tsv
 weight	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/snapshots/b2359bdf726fb44ef62acca04d629dcf158053e7/config.json	52	-	models.tsv
 weight	hf_cache/hub/models--depth-anything--DA3NESTED-GIANT-LARGE-1.1/snapshots/b2359bdf726fb44ef62acca04d629dcf158053e7/model.safetensors	76	-	models.tsv
@@ -301,20 +301,22 @@ asis	hf_cache/hub/version.txt	1	6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49
 private	hf_cache/stored_tokens	56	-	the Hugging Face token the hub client stored
 private	hf_cache/token	37	-	the Hugging Face token the hub client stored
 asis	hf_cache/xet/https___cas_serv-tGqkUaZf_CBPHQ6h/staging/	0	-	an empty directory
-asis	hf_cache/xet/logs/xet_20261031T160257391+0000_392140.log	98213	39527835af3d6ba235c0ef2b48e9028a51ea569afa49165acd03746bdc9311f0	
-asis	hf_cache/xet/logs/xet_20261103T185256819+0000_4167236.log	859651	9860afd606f120668e5a485f8940bde4e9ee33d211cec81c36896c32927983e9	
-asis	hf_cache/xet/logs/xet_20261103T220230118+0000_11530.log	38651	1bc1c4e83ca61910d13da1760084f17ea0cdaafcd794c3e8953bec6278031a61	
 asis	hf_cache/xet/logs/xet_20261112T170351968+0000_1671972.log	46629	aca3cd22af30bdb56b4d86f684f010a873bd3729af0adad4e987899ae9c08cbb	
 asis	hf_cache/xet/logs/xet_20261114T032804730+0000_421560.log	104925	6a9f608c56981fbfc1d8a1f8ae36a2c3931fb89960fec68cc6e1464f82cbfa50	
+asis	hf_cache/xet/logs/xet_20261122T164310898+0000_1873350.log	62637	907c01a392c6514f699cb5cb90f303c627e14fa5d2e66a5d0c85bce7798939c5	
+asis	hf_cache/xet/logs/xet_20261122T164420154+0000_1873557.log	159466	8838e6341432010d0db8fc1ee6231d89808e1f2efa0bbd70bb3c047acec4a03c	
+asis	hf_cache/xet/logs/xet_20261122T170140339+0000_1889554.log	139464	e1ede7640bb208682f13229e806e5f89453bf033ea885459a5230e4beaf6ad32	
+asis	hf_cache/xet/logs/xet_20261122T180052025+0000_1897273.log	129889	08d9bf65f6ecfe22fb8cd6c9096146acc0eebb2ab62a0b4454c441d6cf59812d	
 env	miniforge3/	0	-	Miniforge's pinned installer + locks/<env>.* + the env archive
 git-head	stac-build/	0	-	the repo this file is committed in (its commit is whatever is cloned)
 private	stac-build/.claude/	53268	2 files	the assistant's local settings for this repo
-private	stac-build/.env	2073	-	the tokens
+private	stac-build/.env	2291	-	the tokens
 cache	stac-build/.ipynb_checkpoints/	0	-	jupyter
 cache	stac-build/.pytest_cache/	0	-	pytest
 asis	stac-build/archive/sam3_env_20260703.yml	5957	1f28058f8c12f6ef6dab41bdfa0e6d2e51b208847a6ef9795ed3c1c9a6e60c32	
 asis	stac-build/archive/shaper_env_20260703.yml	7470	e4eca92f3de656cb7783521529bb25568b5616ff49fc2eb53f855184c2bbc4df	
-data	stac-build/logs/	359715809	718 files	the backend's logs
+cache	stac-build/experiments/new_sequence/__pycache__/	0	-	python bytecode
+data	stac-build/logs/	374841958	899 files	the backend's logs
 data	stac-build/runs/	0	0 files	evaluation runs
 cache	stac-build/scripts/__pycache__/	0	-	python bytecode
 cache	stac-build/scripts/rebuild/__pycache__/	0	-	python bytecode
@@ -341,7 +343,7 @@ cache	stac-build/server/bim/__pycache__/	0	-	python bytecode
 cache	stac-build/server/commands/__pycache__/	0	-	python bytecode
 cache	stac-build/server/commands/commands.db	663552	-	the commands database: derived from catalog/*.yaml at start
 cache	stac-build/server/correction/__pycache__/	0	-	python bytecode
-private	stac-build/server/data/	120269	5 files	the users' database, personnel, teams
+private	stac-build/server/data/	121799	5 files	the users' database, personnel, teams
 cache	stac-build/server/db/__pycache__/	0	-	python bytecode
 cache	stac-build/server/evaluation/__pycache__/	0	-	python bytecode
 cache	stac-build/server/exporter/__pycache__/	0	-	python bytecode
@@ -350,7 +352,7 @@ cache	stac-build/server/fusion/__pycache__/	0	-	python bytecode
 cache	stac-build/server/gaussians/__pycache__/	0	-	python bytecode
 cache	stac-build/server/ingestors/__pycache__/	0	-	python bytecode
 cache	stac-build/server/intake/__pycache__/	0	-	python bytecode
-data	stac-build/server/logs/	27313802	2 files	logs
+data	stac-build/server/logs/	28338827	2 files	logs
 cache	stac-build/server/patches/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase2_classify/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase2_classify/tests/__pycache__/	0	-	python bytecode
@@ -367,7 +369,7 @@ cache	stac-build/server/phase7_validation/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase_r/__pycache__/	0	-	python bytecode
 cache	stac-build/server/phase_r/tests/__pycache__/	0	-	python bytecode
 cache	stac-build/server/precision/__pycache__/	0	-	python bytecode
-data	stac-build/server/projects/	133394926713	63594 files	THE SESSIONS (videos, clouds, segmentations, meshes)
+data	stac-build/server/projects/	88132925790	37575 files	THE SESSIONS (videos, clouds, segmentations, meshes)
 data	stac-build/server/quick_cloud.log	72	-	logs
 cache	stac-build/server/reconstruction/__pycache__/	0	-	python bytecode
 cache	stac-build/server/reconstruction/certify/__pycache__/	0	-	python bytecode
@@ -599,6 +601,13 @@ cache	stac-build/vendor/AMB3R-SLAM/thirdparty/depth_anything_3/src/depth_anythin
 cache	stac-build/vendor/AMB3R-SLAM/thirdparty/depth_anything_3/src/depth_anything_3/utils/__pycache__/	0	-	python bytecode
 cache	stac-build/vendor/AMB3R-SLAM/thirdparty/depth_anything_3/src/depth_anything_3/utils/export/__pycache__/	0	-	python bytecode
 cache	stac-build/vendor/AMB3R-SLAM/thirdparty/depth_anything_3/src/depth_anything_3/utils/io/__pycache__/	0	-	python bytecode
+cache	stac-build/vendor/AMB3R-SLAM/thirdparty/salad/__pycache__/	0	-	python bytecode
+cache	stac-build/vendor/AMB3R-SLAM/thirdparty/salad/dinov2/__pycache__/	0	-	python bytecode
+cache	stac-build/vendor/AMB3R-SLAM/thirdparty/salad/dinov2/dinov2/__pycache__/	0	-	python bytecode
+cache	stac-build/vendor/AMB3R-SLAM/thirdparty/salad/dinov2/dinov2/hub/__pycache__/	0	-	python bytecode
+cache	stac-build/vendor/AMB3R-SLAM/thirdparty/salad/dinov2/dinov2/hub/depth/__pycache__/	0	-	python bytecode
+cache	stac-build/vendor/AMB3R-SLAM/thirdparty/salad/dinov2/dinov2/layers/__pycache__/	0	-	python bytecode
+cache	stac-build/vendor/AMB3R-SLAM/thirdparty/salad/dinov2/dinov2/models/__pycache__/	0	-	python bytecode
 cache	stac-build/vendor/AMB3R-SLAM/thirdparty/vggt-omega/vggt_omega/__pycache__/	0	-	python bytecode
 cache	stac-build/vendor/AMB3R-SLAM/thirdparty/vggt-omega/vggt_omega/models/__pycache__/	0	-	python bytecode
 cache	stac-build/vendor/AMB3R-SLAM/thirdparty/vggt-omega/vggt_omega/models/heads/__pycache__/	0	-	python bytecode
@@ -5617,33 +5626,33 @@ asis	stac-build/weights/qwen3vl/8b-instruct/.cache/huggingface/download/vocab.js
 weight	stac-build/weights/qwen3vl/8b-instruct/.gitattributes	1519	-	models.tsv
 weight	stac-build/weights/qwen3vl/8b-instruct/README.md	7133	-	models.tsv
 weight	stac-build/weights/qwen3vl/8b-instruct/chat_template.json	5499	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/chat_template.json.stac_sha256.json	133	e41a97a8f7f71b9d9fc9208d5f12de835630339986888b10496ed13278bcf0df	
+asis	stac-build/weights/qwen3vl/8b-instruct/chat_template.json.stac_sha256.json	133	9c4e64a690f153e1ba9899800d7ef26ec4549a9f81e84acd510ca8bb585a7f2f	
 weight	stac-build/weights/qwen3vl/8b-instruct/config.json	1474	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/config.json.stac_sha256.json	133	081902555bd3c2a1200002f707b6a0fea46fdf841b03e67ba20355bf25672cc7	
+asis	stac-build/weights/qwen3vl/8b-instruct/config.json.stac_sha256.json	133	5fab259cd401e8865a52e1c6bcb7f8c39f9fea5e6d947624331f8893e46c47df	
 weight	stac-build/weights/qwen3vl/8b-instruct/generation_config.json	269	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/generation_config.json.stac_sha256.json	132	eda1271ad2f72df83849264ed75ab96110359bba42d0de286835d61296ca8d14	
+asis	stac-build/weights/qwen3vl/8b-instruct/generation_config.json.stac_sha256.json	132	9044ea74ad096de96499245554841a8a3942c3fbd3a5035e781db47d3238adcb	
 weight	stac-build/weights/qwen3vl/8b-instruct/merges.txt	1671839	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/merges.txt.stac_sha256.json	136	06fc7dd3ebcef72e9d5f5fc6cba5027e7d28e8e14be595e76bd6be176b58e522	
+asis	stac-build/weights/qwen3vl/8b-instruct/merges.txt.stac_sha256.json	136	fc118ce90650e0f93d92b24314f557f8275d2ef20d66f5858880d20640094c39	
 weight	stac-build/weights/qwen3vl/8b-instruct/model-00001-of-00004.safetensors	4902275944	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/model-00001-of-00004.safetensors.stac_sha256.json	139	a50af86a17ba5f7f74c5033a520e10258a44c7387058ec0bbdba27d96546006b	
+asis	stac-build/weights/qwen3vl/8b-instruct/model-00001-of-00004.safetensors.stac_sha256.json	139	f13096fc5861391198515dd6871ad2ab4d3755e712824fdaa6f11a78e75495a6	
 weight	stac-build/weights/qwen3vl/8b-instruct/model-00002-of-00004.safetensors	4915962496	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/model-00002-of-00004.safetensors.stac_sha256.json	139	c9c42b7033aa78ee56e4fdbf99c62fdde31dcd85e54109fcf9786337ab080221	
+asis	stac-build/weights/qwen3vl/8b-instruct/model-00002-of-00004.safetensors.stac_sha256.json	139	23c5402c97a0d690c6f905621373934fed00b4240c2cfa4cec80a1d3ee1cbc84	
 weight	stac-build/weights/qwen3vl/8b-instruct/model-00003-of-00004.safetensors	4999831048	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/model-00003-of-00004.safetensors.stac_sha256.json	139	cff13de05eae317e695147c47974da088bfe20e7ef24bb262168aea753aa6d60	
+asis	stac-build/weights/qwen3vl/8b-instruct/model-00003-of-00004.safetensors.stac_sha256.json	139	67a2994230b52664b3ece036946fae782a4d494615e2403f8088bf5d545b7831	
 weight	stac-build/weights/qwen3vl/8b-instruct/model-00004-of-00004.safetensors	2716270024	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/model-00004-of-00004.safetensors.stac_sha256.json	139	a46c5c7c9b06a554e49e1253e83bf72f077e9238a0bc8114eddf1937d03de2bb	
+asis	stac-build/weights/qwen3vl/8b-instruct/model-00004-of-00004.safetensors.stac_sha256.json	139	ce7d911f7339389418ccdb2bcdab5b557a741057d2f54ffb49fc536eb813ffb3	
 weight	stac-build/weights/qwen3vl/8b-instruct/model.safetensors.index.json	67759	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/model.safetensors.index.json.stac_sha256.json	134	f1f66a4eb3639d399b6dff4d94930be1cad1ca4eda8681f4186453fea22130c6	
+asis	stac-build/weights/qwen3vl/8b-instruct/model.safetensors.index.json.stac_sha256.json	134	23359dd80191e598320714b163243395fefa8ca12bab63a85982ed80aff978cc	
 weight	stac-build/weights/qwen3vl/8b-instruct/preprocessor_config.json	390	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/preprocessor_config.json.stac_sha256.json	132	ae444b05f044b4a7bf941eb0e76508dbe10cc19a7d3ef7bdce473db43a984713	
+asis	stac-build/weights/qwen3vl/8b-instruct/preprocessor_config.json.stac_sha256.json	132	4690cf32e42d1b49da8f2fec15b0c7c0e1e408038fd6f71bf87284eb14ccdf8d	
 weight	stac-build/weights/qwen3vl/8b-instruct/tokenizer.json	7032403	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/tokenizer.json.stac_sha256.json	136	b5f9cb4a54355c1717cb2aee7e74701f5f26f3c3b9ad35a117fd2b9a7972bc98	
+asis	stac-build/weights/qwen3vl/8b-instruct/tokenizer.json.stac_sha256.json	136	d68cd9356ddd3c0f5cd083787648b4510a1b9d85cb9dcd11cefd8a096d4a532d	
 weight	stac-build/weights/qwen3vl/8b-instruct/tokenizer_config.json	10868	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/tokenizer_config.json.stac_sha256.json	134	a81b3fa5e64012924e6228a6ff8b970b2c2a98c0b898acb5abd2ffc81d06b8e3	
+asis	stac-build/weights/qwen3vl/8b-instruct/tokenizer_config.json.stac_sha256.json	134	91703c18f0fd5bdbb2248bebcbcc37e7d7161e7d35a1883b88308b40521f36b2	
 weight	stac-build/weights/qwen3vl/8b-instruct/video_preprocessor_config.json	385	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/video_preprocessor_config.json.stac_sha256.json	132	bf2468365c12d2625a4e4fcf13aa80b53dcb1fa9cacaab86695b34d587e51576	
+asis	stac-build/weights/qwen3vl/8b-instruct/video_preprocessor_config.json.stac_sha256.json	132	4119b047194f293485d0e70c8129589475789c9831bdbfa87f52c31de294d42e	
 weight	stac-build/weights/qwen3vl/8b-instruct/vocab.json	2776833	-	models.tsv
-asis	stac-build/weights/qwen3vl/8b-instruct/vocab.json.stac_sha256.json	136	63ed940cf2dd44a31054c2091913512ed38fd202ed5de3df81d99ea27fab2b81	
+asis	stac-build/weights/qwen3vl/8b-instruct/vocab.json.stac_sha256.json	136	78fc54404eef02e92eaaf0e3cfeab11baa0f477e3187892e3737d71c29665f8e	
 asis	stac-build/weights/sam3/.cache/huggingface/.gitignore	1	684888c0ebb17f374298b65ee2807526c066094c701bcc7ebbe1c1095f494fc1	
 asis	stac-build/weights/sam3/.cache/huggingface/download/sam3_hiera_large.pt.lock	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
 asis	stac-build/weights/sam31/.cache/huggingface/.gitignore	1	684888c0ebb17f374298b65ee2807526c066094c701bcc7ebbe1c1095f494fc1	
@@ -5654,12 +5663,13 @@ asis	stac-build/weights/sam31/.cache/huggingface/download/sam3.1_multiplex.pt.me
 weight	stac-build/weights/sam31/config.json	25843	-	models.tsv
 weight	stac-build/weights/sam31/sam3.1_multiplex.pt	3502755717	-	models.tsv
 private	tailscale/certs/	5068	2 files	the Tailscale node's TLS certificate
-private	tailscale/state/	24355	5 files	the Tailscale node's identity
+private	tailscale/state/	23904	5 files	the Tailscale node's identity
 download	tailscale/tailscale	21268215	349b69aa2e8db0ce430c9ef600e16b1e4b2820286d354a0ca6bb5fdb66b8fa55	Tailscale 1.86.2
 download	tailscale/tailscaled	40048426	dd5ff38a1539554498e8b9d6bb0ed3dc565c70c42eeecb6ecca7695f8e0be870	Tailscale 1.86.2
-data	tailscale/tailscaled.log	46130	-	log
+data	tailscale/tailscaled.log	16801	-	log
+data	tailscale/tailscaled.prev.log	7618	-	the previous start's log (remote_access.sh keeps it)
 data	tailscale/tailscaled.sock	0	-	a socket
-data	tmp/	806211	53 files	scratch of past work (worktrees are recreated from locks/git-refs.tsv)
+data	tmp/	21623934836	4793 files	scratch of past work (worktrees are recreated from locks/git-refs.tsv)
 cache	torch_cache/.ipynb_checkpoints/	0	-	jupyter
 weight	torch_cache/hub/checkpoints/dinov2_vitb14_pretrain.pth	346378731	-	models.tsv
 asis	torch_cache/hub/facebookresearch_dinov2_main/.github/workflows/lint.yaml	796	843ad6a49b4b9d5c852ac97c2261038424bc14dc3ccee1f5cdbdc4f79a4fbbaf	
@@ -5875,4 +5885,5 @@ asis	torch_cache/hub/facebookresearch_dinov2_main/setup.cfg	130	b786579a6174d03c
 asis	torch_cache/hub/facebookresearch_dinov2_main/setup.py	2751	8ec72d3be027aee099a7b7b1c36c874be6d7ade4dd9eb69baff3975b586820ae	
 asis	torch_cache/hub/trusted_list	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
 env	usdtools/	0	-	locks/usdtools.* (a venv of the system's python 3.11)
+data	video/	1310267222	25 files	the presentation video's working files (recordings, music, cuts)
 asis	weights/	0	-	an empty directory

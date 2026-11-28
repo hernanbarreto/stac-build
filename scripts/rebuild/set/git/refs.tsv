@@ -1,5 +1,5 @@
 # repo	kind	name	commit	upstream | message | branch
-stac-build	head	main	b54339e7d5ec3be56f89213540163a28d1937130	
+stac-build	head	main	47137b501727fedc29f673334e219bbb5af05f1e	
 stac-build	remote	origin	-	https://github.com/hernanbarreto/stac-build.git
 stac-build	branch	amb3r-probe	a376a3faf51e053fc51d8fd6e87fb94fb41b68bb	
 stac-build	branch	audit/precision-geometry-2026-10-23	2643294742867d185c22e353a724753a126f22a9	origin/audit/precision-geometry-2026-10-23
@@ -16,7 +16,7 @@ stac-build	branch	gpu-main	f3233a20a6271f48769398ce56e32fe7d328b414
 stac-build	branch	gpu-projection	2045900d8aaaf9ed60f49e473f1a6337bd7b0c39	
 stac-build	branch	gs-layer	69d2e13c9141b000ca630c917c7972ab396b6620	origin/gs-layer
 stac-build	branch	integ	ffa03c5b48efbed0a9ab55090177fa16951b16ed	
-stac-build	branch	main	b54339e7d5ec3be56f89213540163a28d1937130	origin/main
+stac-build	branch	main	47137b501727fedc29f673334e219bbb5af05f1e	origin/main
 stac-build	branch	master	e811235522473e657caafb1300b0941b1cc262b6	
 stac-build	branch	merge/gpu-main-2026-11-02	1662e368fef3f3f66df19c7b35daaa933961cf29	
 stac-build	branch	obb-device-draws	d58d07aa88836f648055f246030670626e753633	

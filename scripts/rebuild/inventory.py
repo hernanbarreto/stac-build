@@ -83,8 +83,10 @@ RULES = [
     ("data",     f"{R}/server/logs/",                       "logs"),
     ("data",     f"{R}/server/*.log",                       "logs"),
     ("data",     "tmp/",                                    "scratch of past work (worktrees are recreated from locks/git-refs.tsv)"),
+    ("data",     "video/",                                  "the presentation video's working files (recordings, music, cuts)"),
     ("data",     "cloudflared.log",                         "log"),
     ("data",     "tailscale/tailscaled.log",                "log"),
+    ("data",     "tailscale/tailscaled.prev.log",           "the previous start's log (remote_access.sh keeps it)"),
     ("data",     "tailscale/tailscaled.sock",               "a socket"),
     # fetched again from a pinned source, held to locks/downloads.sha256
     ("download", f"{R}/vendor/KTX-Software-4.4.2-Linux-x86_64/**", "KhronosGroup's release 4.4.2"),
