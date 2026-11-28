@@ -98,7 +98,7 @@ other programs; a session as one resumable ZIP, out of the machine and back in; 
 21. [Repository map](#21-repository-map)
 22. [The application around the pipeline](#22-the-application-around-the-pipeline): opening a session, the spatial
     chat, calibration, STAC's commands and voice, the BIM comparison, the IFC from a scan, downloads and exports, jobs,
-    tickets, common points
+    tickets, common points, the viewer kept fluid (the IFC as tiles), the works' map
 
 ---
 
@@ -2053,6 +2053,20 @@ the card from a rebuilt env.
 
 ---
 
+### 20.2 The pod's start (`init_pod.sh`, `scripts/pod_autostart.sh`)
+
+The pod's start command runs `scripts/pod_autostart.sh` beside the image's own start; it runs `init_pod.sh` once.
+Checked by `bash scripts/checklist/check_pod_start.sh` (read only; its last line CLOSED or NOT CLOSED).
+
+- **The way in, first and at every run** (`scripts/pod_access.sh`): the owner's key in `/root/.ssh/authorized_keys`
+  when missing (a copy of it under a mangled type removed), `/root` not writable by others, `.ssh` 700, the file 600,
+  `ssh-keygen -A`, sshd started when nothing listens; JupyterLab on :8888 only when `JUPYTER_PASSWORD` is set (its
+  token). Lines `ssh: …` / `jupyter: …` in the start's log and in the provider's log.
+- **Packages**: only what is missing, each name in the form this Ubuntu has (`libasound2` → `libasound2t64`: one name
+  apt could not install made it refuse the whole list); the Electron desktop is off unless `START_ELECTRON=1`.
+- **The public address** (`scripts/remote_access.sh`): the start asks it from outside (the gate's 403) and restarts
+  tailscaled until it answers — a tailscaled started in the pod's first seconds took no connection.
+
 ## 21. Repository map
 
 ```text
@@ -2303,7 +2317,9 @@ is global and the others verify. **Verification**: every *test* measurement is r
 difference to the real one and whether it lies within its $\sigma$. The scan's state — *uncalibrated*, *calibrated*,
 *verified* — is shown by the scan's name: a warning triangle while it is uncalibrated.
 
-The stored measurements are drawn on the model in their own colour and stay through "clear measurements".
+The stored measurements are **off on the model** until a switch in the window shows them ("Show the measurements on the
+model"); off again with every other session or scan. Shown, each distance is a dimension — a thick shaft, an arrow at
+each of its points — and each plane a thick outline with its points; they stay through "clear measurements".
 
 **Applying it: the real rescale** (`server/correction/rescale.py`). "Apply to the scan" in the window rewrites the
 scan's geometry at the calibrated scale, so that everything measured or compared afterwards — against another scan,
@@ -2331,6 +2347,14 @@ with $1/s$; when the reference itself is rescaled, every other scan's with $s$).
 
 Measured on a copy of bufferStop (3,837,478 points, 174 keyframes): 29 s, $\max \lVert \mathbf x' - s\,\mathbf x
 \rVert = 0.24\,\mu\text{m}$ (the cloud's float32), the octree's bounding box $\times s$ on its six bounds.
+
+**After the rescale** (`server/bim/after_rescale.py`, at the end of the rescale's own process): the segments, the
+boxes and the GenRecon mesh are already at the new scale — nothing is re-projected and GenRecon is not run again (the
+IFC writer reads a mesh placed by its glTF nodes, §22.7). What the new scale left stale is renewed: the IFCs written
+**from this scan** (told by the name in their header) are written again under the same name, with the share of the
+mesh their header records, their texture when it lay beside them and `export.ifc`'s values — an IFC that came from
+outside, a design model, is never touched — and the stored BIM comparison of this scan is removed (compare again).
+Tests: `tests/test_after_rescale.py`.
 
 To bring one scan to another's scale, the same elements are measured on both, stored on the scan to change with
 *another scan* as their source, verified, and applied.
@@ -2528,6 +2552,8 @@ kept and not used by the export.)
   1.85 m triangles lay under 57 cm tiles. A triangle then goes to the object that holds the majority of the
   `export.ifc.neighbours` (128) cloud points nearest to it, within one voxel; an object the majority leaves with no
   triangle takes the triangles its own points lie on, so every object appears.
+- **The mesh as placed.** Each mesh is read placed by the transforms of the glTF nodes above it (a calibration's
+  rescale scales the GLB by a node at its root — read at the new scale; a mesh placed twice is refused).
 - **The frame.** The mesh and the cloud on disk are in one frame and the cut happens there. A floor adjustment made
   after the mesh (§17.4, the floor-level tool) is then applied to every element, as the viewer applies it to both.
 - **The file.** IFC4: one `IfcTriangulatedFaceSet` an element, its class from its label (wall, slab, door, beam,
@@ -2663,3 +2689,52 @@ on the other and comparing them cloud to cloud follow it.
 
 Routes: `GET /api/project/{project}/common_points`, `GET …/common_points/solve`, `POST …/common_points`,
 `PUT …/common_points/{point}/marks`, `DELETE …/common_points/{point}`. Tests: `tests/test_common_points.py`.
+
+### 22.12 The viewer, kept fluid (IFC, GLB and points, every session)
+
+Measured first on grupo_electrogeno: the BIM hover cast a ray at every triangle of every IFC of the session, ticked or
+not, every 80 ms — up to 778 ms a ray on its 7.54 M triangles (6.5 ms with a bounding-volume tree); every IFC was built
+whole at the session's open and kept, hidden; 10 M points were drawn at every frame, moving or still.
+
+- **The IFC as tiles** (`server/bim/ifc_tiles.py`, `tools/glb/ifc_tiles.mjs`, `ui/scripts/ifc-parts.ts`). Every IFC
+  of a project gets `ifcs/.tiles/<name>/` — a 3D Tiles set with levels of detail and `elements.json` (the parts and the
+  spatial tree) — made in a process of its own when absent or when the file changed (uploaded, regenerated,
+  rescaled: its size and date), a failure kept for that version and not retried. The IFC is read by the page's own
+  reader (the same names, colours and tree), its parts **welded by position** (web-ifc gives every triangle its own
+  vertices, which nothing can simplify), large parts cut in pieces of ≤ 50,000 triangles, and every primitive carries
+  its element in its extras. `tools/glb/tile_mesh.mjs` tiles them (it is a module now; the GenRecon tiles are
+  byte-identical). Routes: `GET /api/sessions/{id}/bim_tiles/{ifc}/status` and `…/{version}/{file}` (cached for good:
+  a new version of the IFC, a new address). grupo_electrogeno: 937 tiles, 84 MB (the IFC 250 MB), 88 s.
+  The viewer reads the elements and the tree at the open and streams the tiles only while the model is ticked;
+  unticked, they are freed. One material per element is shared by its tiles, so an opacity, a highlight, a hidden
+  element or the deviation sheet's dimming hold for tiles still to come.
+- **Rays** (`ui/src/components/viewport/raycastable.ts`): only at what is on screen, with a three-mesh-bvh tree built
+  while the page is idle; the hover skips a mesh with no tree yet.
+- **GLB**: a tiled mesh unticked is freed; the compressed geometry is decoded in workers.
+- **Points**: while the camera moves the finest octree levels are left out, chosen once at the movement's start down
+  to a limit learned from the frames' time (cut at every frame, points came and went); still, the whole budget again.
+  What leaves the screen is kept up to a quarter of the budget (it was the whole budget: memory grew while exploring).
+- **At rest** a frame every 250 ms; at every frame while anything can change on screen (the camera, a pointer, a key,
+  a flight, an animation, the physics sandbox).
+- **The heat map in and out** sets the scan's cloud aside for the sheet and brings it back where the camera is,
+  without reloading the session (that reload lost the view and took the BIM models out of the scene).
+
+Tests: `tests/test_ifc_tiles.py`; the tiler's and the archive's.
+
+### 22.13 The works' map (`ui/src/features/globe/`, `server/geo.py`, `server/geo_api.py`)
+
+**Mapbox GL JS** (its Standard style by day: streets, 3D buildings, their shadows; no satellite imagery), with a public
+token in `.env` (`MAPBOX_TOKEN`, served by `GET /api/geo/map_config`). Each project has **one georeference**
+(`<project>/georef.json`: the scan origin's latitude, longitude and height, the plan's heading, where they came from).
+
+- The left rail's globe shows a **pin per placed work**; a pin (or the work in the list) loads the work's **light
+  model** — the root tile of its GenRecon tileset (the whole mesh simplified, its textures reduced), else a million
+  points of its cloud — and flies once to frame it, tilted. It is drawn by three.js inside Mapbox's frame (a custom
+  layer: Mapbox's matrix × the work's east-north-up placement — heading, glTF's Y up, the floor adjustment), the depth
+  shared with the buildings. A pin does not open the session.
+- **The weather** at the work (`GET /api/geo/{id}/weather`): Open-Meteo's current conditions — free, no account; it
+  is sent the work's coordinates — kept 10 minutes per place; a card (sky, temperature, feels like, humidity, wind and
+  its direction, precipitation) and Mapbox's rain or snow over the map near the work.
+- **The Location window** places a work on the same map: a place found by name, address or coordinates in any form;
+  the plan (the cloud from above) laid by its four corners, dragged and turned, or set by two points (the plan-to-map
+  scale shown as a check); the height from Mapbox's terrain.
