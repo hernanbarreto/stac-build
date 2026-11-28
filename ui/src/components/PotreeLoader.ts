@@ -156,12 +156,13 @@ export class PotreeOctreeLoader {
     private _tick = 0
     private _loading = false
     private _smallCloudLogged = false
-    // WHILE THE CAMERA MOVES, THE MOST IMPORTANT POINTS FIRST (USER 2026-11-28: "debe moverse fluido siempre con los
-    // puntos pasa igual"): the nodes on screen in their priority order (the traversal's — the largest on screen first;
-    // a small cloud's, coarse to fine), and how many points of them are drawn (null: all). Nothing is unloaded: a node
-    // beyond the limit is only not drawn until the camera stops.
-    private _drawOrder: string[] = []
-    private _drawLimit: number | null = null
+    // WHILE THE CAMERA MOVES, THE FINEST LEVELS LEFT OUT (USER 2026-11-28: "debe moverse fluido siempre con los puntos
+    // pasa igual"; on the first version, which cut the nodes by priority and moved the cut at every frame: "cuando muevo
+    // el modelo los puntos es como si se vieran barridos, aparecen y desaparecen … hasta que luego de un rato parece
+    // quedarse quieto"). At the start of a movement the deepest octree level kept is chosen ONCE — the deepest whose
+    // points, with every coarser level's, fit the limit — and no node below it is drawn until the camera stops: the
+    // whole view a little less dense, the same nodes for the whole movement, nothing coming and going. Nothing unloaded.
+    private _depthCut: number | null = null
     private _hasConfidence = false
     private _hasWitness = false
     get hasWitness(): boolean { return this._hasWitness }
@@ -673,8 +674,6 @@ export class PotreeOctreeLoader {
         }
 
         this.visiblePoints = numVisiblePoints
-        this._drawOrder = [...renderSet]
-        this._applyDrawLimit()
     }
 
     /** Small cloud path: load ALL nodes, no frustum culling, no unloading.
@@ -696,30 +695,31 @@ export class PotreeOctreeLoader {
             }
         }
         this.visiblePoints = numVisible
-        if (this._drawOrder.length !== this.nodes.size)
-            this._drawOrder = [...this.nodes.keys()].sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0))
-        this._applyDrawLimit()
     }
 
-    /** At most `points` points drawn, the most important first; null: every node on screen. */
+    /** A movement starts: the deepest level whose points (with the coarser ones') on screen fit `points` is the last
+     *  drawn until null (the camera stopped) — chosen once, so the same nodes stay for the whole movement. */
     setDrawLimit(points: number | null): void {
-        if (points === this._drawLimit) return
-        this._drawLimit = points
-        this._applyDrawLimit()
-    }
-
-    private _applyDrawLimit(): void {
-        let drawn = 0
-        for (const name of this._drawOrder) {
-            const node = this.nodes.get(name)
-            if (!node?.points) continue
-            const over = this._drawLimit !== null && drawn + node.numPoints > this._drawLimit && drawn > 0
-            if (!over) drawn += node.numPoints
-            if (node.points.userData.lodHidden !== over) {
-                node.points.userData.lodHidden = over
-                this._applyClassCull(node.points)
+        let cut: number | null = null
+        if (points !== null) {
+            const byDepth: number[] = []
+            for (const [name, node] of this.nodes) {
+                if (!node.loaded || !node.points) continue
+                const d = name.length - 1
+                byDepth[d] = (byDepth[d] ?? 0) + node.numPoints
             }
+            let sum = 0
+            cut = 0
+            for (let d = 0; d < byDepth.length; d++) {
+                sum += byDepth[d] ?? 0
+                if (sum > points && d > 0) break
+                cut = d
+            }
+            if (cut >= byDepth.length - 1) cut = null          // everything fits: nothing left out
         }
+        if (cut === this._depthCut) return
+        this._depthCut = cut
+        for (const [, node] of this.nodes) if (node.points) this._applyClassCull(node.points)
     }
 
     /** Load a single octree node's point data via HTTP Range request (LOD streaming) */
@@ -983,7 +983,8 @@ export class PotreeOctreeLoader {
     }
 
     private _applyClassCull(points: THREE.Points): void {
-        if (points.userData.lodHidden) {                 // beyond the draw limit while the camera moves
+        // a level left out while the camera moves (setDrawLimit) — a node loaded meanwhile too, from its first frame
+        if (this._depthCut !== null && points.name.length - 'potree-node-'.length - 1 > this._depthCut) {
             points.visible = false
             return
         }

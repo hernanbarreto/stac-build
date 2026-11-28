@@ -54,9 +54,14 @@ function makeGltfLoader(): GLTFLoader {
 // cover before the finer tile loads; 3d-tiles-renderer's default (16 px) is a geometry tolerance and shows the
 // coarse atlases at room distances.
 const MESH_TILES_ERROR_TARGET = 2
-// WHILE THE CAMERA MOVES (USER 2026-11-28: "debe moverse fluido siempre con los puntos pasa igual"): the points drawn are
-// the most important ones (PotreeLoader.setDrawLimit), as many as keep a frame near MOTION_FRAME_MS — the count learned
-// from one movement to the next, never under MOTION_MIN_POINTS nor over the user's budget; MOTION_REST_MS after the
+// Every tileset's GLTF plugin is made with autoDispose: false — the KTX2 transcoder and the meshopt decoder are the
+// viewer's, shared by every tileset, and the plugin's own disposal disposed them AND threw on the loaders it was not
+// given (null): a tileset freed when hidden stopped half-way and never came back (USER 2026-11-28: "lo deje de mostrar
+// y al volver a prender ya no se muestra").
+// WHILE THE CAMERA MOVES (USER 2026-11-28: "debe moverse fluido siempre con los puntos pasa igual"): the finest levels of
+// the octree are left out (PotreeLoader.setDrawLimit) down to MOTION's limit, chosen ONCE at the movement's start (cut at
+// every frame, points came and went — "se vieran barridos, aparecen y desaparecen"); the limit learned from one movement
+// to the next by its frames' time, never under MOTION_MIN_POINTS nor over the user's budget; MOTION_REST_MS after the
 // camera stops, every point of the budget again. (10 M points drawn at every frame while moving: 8 – 13 fps on his PC.)
 const MOTION_FRAME_MS = 33
 const MOTION_MIN_POINTS = 1_000_000
@@ -770,7 +775,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const modelTilesRef = useRef<Set<TilesRenderer>>(new Set())
     const bimHiddenNamesRef = useRef<Set<string>>(new Set())
     const bimDimmedRef = useRef(false)
-    const motionRef = useRef({ last: new THREE.Matrix4(), movingUntil: 0, limit: 0, frameMs: 16, prevT: 0 })
+    const motionRef = useRef({ last: new THREE.Matrix4(), movingUntil: 0, limit: 0, frameMs: 0, frames: 0, prevT: 0, moving: false })
     const lastInputRef = useRef(0)
     const lastFrameRef = useRef(0)
     const sabanaGroupRef = useRef<THREE.Group | null>(null)
@@ -2306,7 +2311,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 ktx2LoaderRef.current = new KTX2Loader().setTranscoderPath(`${import.meta.env.BASE_URL}basis/`).detectSupport(renderer)
             const key = `tsdf-${sh.folder}`
             const tiles = new TilesRenderer(sh.tileset_url)
-            tiles.registerPlugin(new GLTFExtensionsPlugin({ ktxLoader: ktx2LoaderRef.current, meshoptDecoder: MeshoptDecoder }))
+            tiles.registerPlugin(new GLTFExtensionsPlugin({ ktxLoader: ktx2LoaderRef.current, meshoptDecoder: MeshoptDecoder, autoDispose: false }))
             tiles.errorTarget = MESH_TILES_ERROR_TARGET
             tiles.setCamera(camera)
             tiles.setResolutionFromRenderer(camera, renderer)
@@ -3005,9 +3010,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 // tiles leave the card and the memory — hidden, they stayed loaded — and its next tick loads it again
                 if (!visible && meshGroup.userData.tiled && meshGroup.userData.entry) {
                     const t = tilesRenderersRef.current.get(folder)
-                    if (t) { tilesRenderersRef.current.delete(folder); t.dispose() }
+                    tilesRenderersRef.current.delete(folder)
                     meshGroup.parent?.remove(meshGroup)
                     tsdfPendingRef.current.set(folder, meshGroup.userData.entry as TsdfListEntry)
+                    t?.dispose()                  // last: the mesh is already out and pending again
                     return
                 }
                 meshGroup.visible = visible
@@ -3097,7 +3103,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const renderer = rendererRef.current, camera = cameraRef.current
                 if (!renderer || !camera) return
                 const t = new TilesRenderer(tilesetUrl)
-                t.registerPlugin(new GLTFExtensionsPlugin({ meshoptDecoder: MeshoptDecoder }))
+                t.registerPlugin(new GLTFExtensionsPlugin({ meshoptDecoder: MeshoptDecoder, autoDispose: false }))
                 t.errorTarget = MESH_TILES_ERROR_TARGET
                 t.setCamera(camera)
                 t.setResolutionFromRenderer(camera, renderer)
@@ -3140,11 +3146,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 tiles = t
             }
             const close = () => {
-                if (!tiles) return
-                modelTilesRef.current.delete(tiles)
-                group.remove(tiles.group)
-                tiles.dispose()
-                tiles = null
+                const t = tiles
+                if (!t) return
+                tiles = null                      // the model's state first: a disposal that fails leaves it closed
+                modelTilesRef.current.delete(t)
+                group.remove(t.group)
+                t.dispose()
             }
             group.userData = {
                 bimMaterials: materials, ifcTiles: true, parts: parts.length,
@@ -4153,7 +4160,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     t.update()
                 }
             }
-            // the points drawn while the camera moves (MOTION_* above)
+            // the points drawn while the camera moves (MOTION_* above): the level cut chosen once at a movement's
+            // start from what the last movements' frames took, lifted when the camera stops
             {
                 const m = motionRef.current
                 const dt = m.prevT ? now - m.prevT : MOTION_FRAME_MS
@@ -4161,18 +4169,23 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 if (!m.last.equals(camera.matrixWorld)) { m.last.copy(camera.matrixWorld); m.movingUntil = now + MOTION_REST_MS }
                 const loaders = [potreeLoaderRef.current, ...[...scanLayersRef.current.values()].map(e => e.loader)]
                     .filter((l): l is PotreeOctreeLoader => !!l?.isLoaded)
-                if (loaders.length) {
-                    if (now < m.movingUntil) {
-                        m.frameMs = m.frameMs * 0.8 + Math.min(dt, 250) * 0.2
-                        const full = loaders[0].getPointBudget()
-                        if (!m.limit) m.limit = Math.min(full, MOTION_START_POINTS)
-                        if (m.frameMs > MOTION_FRAME_MS * 1.2) m.limit = Math.max(MOTION_MIN_POINTS, m.limit * 0.85)
-                        else if (m.frameMs < MOTION_FRAME_MS * 0.8) m.limit = Math.min(full, m.limit * 1.08)
-                        for (const l of loaders) l.setDrawLimit(Math.round(m.limit))
-                    } else {
-                        for (const l of loaders) l.setDrawLimit(null)
-                    }
+                const moving = now < m.movingUntil
+                if (loaders.length && moving && !m.moving) {                      // a movement starts
+                    const full = loaders[0].getPointBudget()
+                    if (!m.limit) m.limit = Math.min(full, MOTION_START_POINTS)
+                    m.limit = Math.min(full, m.limit)
+                    m.frameMs = 0; m.frames = 0
+                    for (const l of loaders) l.setDrawLimit(Math.round(m.limit))
+                } else if (moving && m.moving) {
+                    m.frameMs += Math.min(dt, 250); m.frames += 1
+                } else if (!moving && m.moving) {                                 // it ended: the next one's limit
+                    const avg = m.frames ? m.frameMs / m.frames : MOTION_FRAME_MS
+                    const full = loaders[0]?.getPointBudget() ?? m.limit
+                    if (avg > MOTION_FRAME_MS * 1.2) m.limit = Math.max(MOTION_MIN_POINTS, m.limit * 0.7)
+                    else if (avg < MOTION_FRAME_MS * 0.8) m.limit = Math.min(full, m.limit * 1.3)
+                    for (const l of loaders) l.setDrawLimit(null)
                 }
+                m.moving = moving
             }
             // the IFC's tiles: a model shown streams them (a model hidden has none — they were freed)
             if (drawNow && modelTilesRef.current.size) {
