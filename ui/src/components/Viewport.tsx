@@ -533,6 +533,11 @@ ${POINT_SHADOW_FRAG_DECL}
 `
 
 // ── Measurement helpers (outside component) ──
+// A key no list of readouts produces: the HUD is told on the next frame even when the list is now EMPTY (an empty
+// list's key is '' — reset to '', the last label of a removed measurement or of the calibration marks turned off
+// stayed on screen; 2026-11-28, USER: "cuando lo apago se siguen viendo las etiquetas")
+const READOUTS_CHANGED = '\u0000'
+
 function createMarker(position: THREE.Vector3, color: number = tokenHex(VP.marker)): THREE.Mesh {
     const geom = new THREE.SphereGeometry(0.008, 12, 12)
     const mat = new THREE.MeshBasicMaterial({ color, depthTest: false })
@@ -1282,7 +1287,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // the scan's stored calibration marks are not measurements of the moment: they stay
         readoutsWorldRef.current = readoutsWorldRef.current.filter(r => r.id.startsWith('cal-'))
         liveReadoutRef.current = null
-        lastReadoutKeyRef.current = ''
+        lastReadoutKeyRef.current = READOUTS_CHANGED
         if (!readoutsWorldRef.current.length) onReadoutsRef.current?.([])
     }, [])
 
@@ -2628,7 +2633,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 measurementsRef.current = measurementsRef.current.filter(x => x !== m)
             }
             readoutsWorldRef.current = readoutsWorldRef.current.filter(x => x.id !== id)
-            lastReadoutKeyRef.current = ''
+            lastReadoutKeyRef.current = READOUTS_CHANGED
         },
         setCalibrationMarks: (marks: CalibrationMark[], planes: CalibrationPlane[] = []) => {
             const group = calibGroupRef.current
@@ -2672,7 +2677,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 readoutsWorldRef.current.push({ id: `cal-${pl.id}`, kind: 'angle', pos: c.clone(), anchor: c.clone(),
                                                 degrees: pl.inclinationDeg, tag: pl.label || pl.id, cal: 'plane' })
             }
-            lastReadoutKeyRef.current = ''
+            lastReadoutKeyRef.current = READOUTS_CHANGED
         },
         setAssistantObjects: (objects: SceneObject[]) => {
             assistantVizRef.current?.setObjects(objects)
