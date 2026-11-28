@@ -100,6 +100,8 @@ interface ViewportProps {
      *  screen, unticked — their tick only shows them (USER 2026-11-25; addBIMGroup) */
     onBimAvailable?: (models: { name: string; url: string }[]) => void
     onSabanaLoaded?: (pointCount: number) => void
+    /** a load of the session took the BIM models out of the scene: they are to be put back */
+    onBimCleared?: () => void
     onHasConfidence?: (has: boolean) => void
     showCameraPoses?: boolean
     onHasCameraPoses?: (has: boolean) => void
@@ -211,6 +213,9 @@ export interface ViewportHandle {
     physicsStopPlacing: () => void
     sendCommand: (cmd: Record<string, unknown>) => void
     sendCommandPreserveCamera: (cmd: Record<string, unknown>) => void
+    /** leaving the deviation sheet: the scan's cloud set aside for it comes back, the camera where it is — false when
+     *  there is none to bring back (then the session is loaded again) */
+    restoreScanCloud: () => boolean
     toggleOBB: (key: string, visible: boolean) => void
     /** a cube of the cut shown / hidden; the camera flown to it */
     setCubeVisible: (id: number, visible: boolean) => void
@@ -717,7 +722,7 @@ const _ctpScl = new THREE.Vector3()
 const _ctpFwd = new THREE.Vector3()
 
 const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
-    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimAvailable, onSabanaLoaded, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked, onPointPicked, onPointContext, tickets },
+    { pointSize, pointBudget, confidenceThreshold, activeSession, openScanKey, activeTool, showAxes = true, showGrid = true, sceneLook = DEFAULT_LOOK, pipelineRunning = false, onPointCount, onFps, onStatusMessage, onSegments, onPipelineProgress, onBimAvailable, onSabanaLoaded, onBimCleared, onHasConfidence, showCameraPoses = true, onHasCameraPoses, onCubes, onVolumeChanged, onVolumeDeleted, eraseRadius, eraseShape, eraseYawDeg, onEraseRadiusChange, onEraseMarksChanged, onEraseBoxSelected, onEraseLedger, onTsdfReady, onSceneObjectSelected, onSceneObjectsChanged, onHasWitness, onCursor, onReadouts, onDistanceMeasured, onPlaneMeasured, onViewScale, onSegmentPicked, onPointPicked, onPointContext, tickets },
     ref
 ) {
     const containerRef = useRef<HTMLDivElement>(null)
@@ -1251,6 +1256,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     // the LIGHT CLOUD drawn the instant a session opens, until the octree covers it (USER 2026-10-09)
     const previewRef = useRef<{ group: THREE.Group; n: number; session: string; shownAt: number } | null>(null)
     const preserveCameraRef = useRef<{ pos: THREE.Vector3; target: THREE.Vector3 } | null>(null)
+    // the camera kept for THE load it was saved for: that load's own clear of the scene must not drop it (it did: a
+    // preserved reload showed the default view)
+    const keepPreserveOnClearRef = useRef(false)
+    // the scan's cloud set aside while the deviation sheet is shown, and whether the cloud on screen is the sheet
+    const scanCloudAsideRef = useRef<PotreeOctreeLoader | null>(null)
+    const sheetShownRef = useRef(false)
+    const onBimClearedRef = useRef(onBimCleared)
+    onBimClearedRef.current = onBimCleared
     const floorTransformRef = useRef<THREE.Matrix4 | null>(null)
     const gridRef = useRef<THREE.Object3D | null>(null)
     const cloudBBoxRef = useRef<THREE.Box3 | null>(null)
@@ -2627,10 +2640,24 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     pos: cameraRef.current.position.clone(),
                     target: controlsRef.current.target.clone(),
                 }
+                keepPreserveOnClearRef.current = true
             }
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify(cmd))
             }
+        },
+        restoreScanCloud: () => {
+            const aside = scanCloudAsideRef.current
+            if (!aside) return false
+            scanCloudAsideRef.current = null
+            sabanaLoadIdRef.current += 1                    // a sheet still loading is stale from now on
+            if (potreeLoaderRef.current && potreeLoaderRef.current !== aside) potreeLoaderRef.current.dispose()
+            potreeLoaderRef.current = aside
+            sheetShownRef.current = false
+            aside.resume()
+            totalPointsRef.current = aside.getVisiblePointCount()
+            onPointCount(totalPointsRef.current)
+            return true
         },
         setCubeVisible: (id: number, visible: boolean) => {
             if (visible) cubeVisRef.current.add(id)
@@ -5287,9 +5314,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         // F5 reset these (fresh module state); unloadreload did not — that was
         // exactly the "reload shows only camera poses, no cloud" bug.
         cloudHiddenRef.current = false
-        preserveCameraRef.current = null
+        if (keepPreserveOnClearRef.current) keepPreserveOnClearRef.current = false     // the clear of the preserved load
+        else preserveCameraRef.current = null
         sessionFramedRef.current = null
         disposePreview()
+        if (scanCloudAsideRef.current) { scanCloudAsideRef.current.dispose(); scanCloudAsideRef.current = null }
+        sheetShownRef.current = false
         // Dispose Potree loader if active
         if (potreeLoaderRef.current) {
             potreeLoaderRef.current.dispose()
@@ -5333,11 +5363,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             group.matrixAutoUpdate = true
             group.matrixWorldNeedsUpdate = true
         }
-        // Clear BIM models
+        // Clear BIM models (the page is told: it puts its models back — they were left out of the scene while the
+        // page still counted them loaded, and a tick showed nothing)
         const bimGroup = bimGroupRef.current
         if (bimGroup) {
+            const had = bimGroup.children.length > 0
+            if (had) setTimeout(() => onBimClearedRef.current?.(), 0)
             while (bimGroup.children.length > 0) {
                 const child = bimGroup.children[0]
+                ;(child.userData?.close as (() => void) | undefined)?.()   // a tiled model's tiles and materials
                 bimGroup.remove(child)
                 child.traverse((obj: any) => {
                     if (obj.geometry) obj.geometry.dispose()
@@ -5728,11 +5762,16 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const mat = materialRef.current
             if (!scene || !camera || !mat) return
 
-            // 1) Clear only the scan cloud (not BIM, not OBBs)
-            if (potreeLoaderRef.current) {
-                potreeLoaderRef.current.dispose()
+            // 1) The scan's cloud SET ASIDE, not disposed (PotreeLoader.suspend): leaving the sheet brings it back where the
+            //    camera is, without loading the session again; a sheet loaded again replaces the previous sheet
+            const current = potreeLoaderRef.current
+            if (current) {
+                if (sheetShownRef.current) current.dispose()
+                else if (!scanCloudAsideRef.current) { current.suspend(); scanCloudAsideRef.current = current }
+                else current.dispose()
                 potreeLoaderRef.current = null
             }
+            sheetShownRef.current = true
             // Clear legacy geometry (non-Potree binary streaming)
             const geo = geometryRef.current
             if (geo) {

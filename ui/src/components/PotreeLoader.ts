@@ -724,7 +724,7 @@ export class PotreeOctreeLoader {
 
     /** Load a single octree node's point data via HTTP Range request (LOD streaming) */
     private async loadNode(node: OctreeNode): Promise<void> {
-        if (!this.metadata || node.loaded || node.loading) return
+        if (!this.metadata || node.loaded || node.loading || this._suspended) return
 
         // Cache hit: geometry still in memory from a previous visit -> just
         // re-attach to the scene. No network, no re-parse (instant).
@@ -961,6 +961,11 @@ export class PotreeOctreeLoader {
             points.frustumCulled = false
         }
 
+        if (this._suspended) {                          // set aside meanwhile: what arrives is not shown
+            geometry.dispose()
+            node.loading = false
+            return
+        }
         this.octreeGroup.add(points)
         node.points = points
         node.loaded = true
@@ -1061,6 +1066,24 @@ export class PotreeOctreeLoader {
         this.totalLoadedPoints = 0
         this._cachedPoints = 0
         this.visiblePoints = 0
+    }
+
+    // SET ASIDE WHILE THE DEVIATION SHEET IS SHOWN IN ITS PLACE (USER 2026-11-28: "cuando salgo del mapa de calor para ver
+    // nuevamente la nube, me muestra la vista por defecto, no mantiene el punto de vision" / "volvi a clickear para ver
+    // el ifc y sigue sin mostrarse"): the scan's cloud was disposed for the sheet, and leaving the sheet reloaded the
+    // WHOLE session to get it back — the camera reset, the BIM models taken out of the scene. Suspended, its points leave
+    // the card and nothing in flight is attached; its octree (and the meshes hung from its group) stay; resume() shows it
+    // again from the camera where it is.
+    private _suspended = false
+    suspend(): void {
+        this._suspended = true
+        this._abort.abort()
+        this._abort = new AbortController()
+        this.releaseGPUMemory()
+    }
+    resume(): void {
+        this._suspended = false
+        this.updateVisibility()
     }
 
     /** Remove everything and reset (disposes both in-scene and cached geometry) */

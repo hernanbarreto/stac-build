@@ -1560,8 +1560,13 @@ function App() {
   const handleToggleSabana = useCallback(() => {
     if (!activeSession) return
     if (sabanaVisible) {
-      // Toggle OFF  reload original scan cloud + show OBBs (preserve camera!)
-      viewportRef.current?.sendCommandPreserveCamera({ type: 'load_session', session_id: activeSession })
+      // Toggle OFF: the scan's cloud set aside for the sheet comes back where the camera is, the BIM models and meshes
+      // untouched (USER 2026-11-28: "cuando salgo del mapa de calor para ver nuevamente la nube, me muestra la vista por
+      // defecto … debe mostrarme la posicion que el usuario tiene elegida"); the session is loaded again only when no
+      // cloud was set aside (camera preserved)
+      const vp = viewportRef.current
+      if (vp?.restoreScanCloud()) vp.clearDeviationSurface()
+      else vp?.sendCommandPreserveCamera({ type: 'load_session', session_id: activeSession })
       viewportRef.current?.setOBBsVisible(true)
       setSabanaVisible(false)
       setSabanaMetrics(null)
@@ -3855,6 +3860,7 @@ function App() {
             }}
             onHasConfidence={setHasConfidence}
             onBimAvailable={onBimAvailable}   /* the project's IFC models, loaded in the background once the cloud is on screen, unticked (USER 2026-11-25); the grid and the axes stay as the user has them (USER 2026-11-19) */
+            onBimCleared={() => { bimPending.current.clear(); setBimModels([]) }}
             onSabanaLoaded={nPts => { setSabanaLoading(false); setSessionLoading(null); setStatusMessage(t('deviation.loadedPoints', { n: fmt.integer(nPts ?? 0) })) }}
             showCameraPoses={showCameraPoses && !sabanaVisible}
             onCubes={setCubes}
