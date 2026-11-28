@@ -759,6 +759,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   RUN ON A REAL SESSION BY THE ASSISTANT: applying it is his action. PER AXIS IS NOT APPLIED TO THE GEOMETRY
   (USER 2026-11-14, to "only the global factor is applied, per axis stays a diagnosis": "si, me parece") — an
   anisotropic scale is not a similarity: the cameras cannot follow it.
+- ⭐ AFTER A RESCALE, THE CORRECT PATH (USER 2026-11-28: "cual es el paso correcto para el genrecon el ifc y la comparacion"
+  / "perfecto, dale"; he had run GenRecon again after calibrating grupo_electrogeno — "yo rehice genrecon al pedo?" —
+  because the IFC generator REFUSED the mesh the rescale scales by a node at its root): the rescale carries the cloud,
+  cameras, segments, boxes and the GenRecon mesh exactly — NO segments re-projected, NO GenRecon again. Now the IFC
+  generator reads a mesh placed by its nodes (ifc_from_mesh.mesh_placements: the vertices × s exactly), and the
+  rescale's own process ends with bim/after_rescale.renew: the IFCs written FROM THIS SCAN (their header's name) are
+  written again under the same name with what they were made with (the share of the mesh their header records — pccr's
+  light one stays 0.1 —, the texture when it lay beside them, export.ifc's neighbours and large faces), their tiles
+  follow; an IFC from outside (a design model) is never touched; the stored BIM comparison of this scan is removed
+  (compare again). Tests: 3 + 2 new; the rescale's and the IFC generator's pass. NOT RUN on a real rescale yet.
 - Chat = spatial intelligence (`phase5_qa`): runs in a worker thread (never on the event loop); tools for measuring
   (feature bands, vertical axis, extents), `describe_scene` (VLM, cached), persistent notes, evaluation VOLUMES
   (rest on the floor, gizmo Move / Rotate / Resize, collision tint, `measure_volume`); a session with no instance

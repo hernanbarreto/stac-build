@@ -58,10 +58,58 @@ class MeshError(ValueError):
 
 
 def read_glb(path: Path | str) -> Tuple[np.ndarray, np.ndarray]:
-    """(vertices N×3 float32, triangles M×3 int64) of a binary glTF: every primitive's positions
-    and indices, as stored (the nodes of a published GenRecon mesh carry no transform — checked)."""
+    """(vertices N×3 float32, triangles M×3 int64) of a binary glTF: every primitive's positions, placed by the
+    transforms of the nodes above its mesh, and its indices."""
     d = read_glb_textured(path, textures=False)
     return d["vertices"], d["faces"]
+
+
+def _node_matrix(node: Dict[str, Any]) -> np.ndarray:
+    """A glTF node's local transform: its matrix (column-major), or T·R·S."""
+    if "matrix" in node:
+        return np.array(node["matrix"], dtype=np.float64).reshape(4, 4, order="F")
+    t = np.array(node.get("translation", [0.0, 0.0, 0.0]), dtype=np.float64)
+    x, y, z, w = (float(c) for c in node.get("rotation", [0.0, 0.0, 0.0, 1.0]))
+    R = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                  [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                  [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+    S = np.diag(np.array(node.get("scale", [1.0, 1.0, 1.0]), dtype=np.float64))
+    M = np.eye(4)
+    M[:3, :3] = R @ S
+    M[:3, 3] = t
+    return M
+
+
+def mesh_placements(doc: Dict[str, Any], path: Path | str = "") -> Dict[int, np.ndarray]:
+    """Each mesh's place in the scene: the product of the transforms of the nodes above it (a mesh no node moves is
+    not listed). A calibration's rescale puts the scene's roots under a node ``stac_scale`` (correction/rescale.py
+    scale_glb): the mesh is read at the scan's new scale (USER 2026-11-28: "cual es el paso correcto para el genrecon
+    el ifc y la comparacion" — the IFC refused that mesh, and GenRecon had to run again to make one). A mesh placed by
+    two nodes (an instance) is refused: one surface, one place."""
+    nodes = doc.get("nodes", [])
+    out: Dict[int, np.ndarray] = {}
+    seen: Dict[int, int] = {}
+    scenes = doc.get("scenes") or [{"nodes": list(range(len(nodes)))}]
+    roots = scenes[int(doc.get("scene", 0))].get("nodes", [])
+
+    def walk(i: int, parent: np.ndarray, depth: int) -> None:
+        if depth > 64:
+            raise MeshError(f"{path}: its nodes nest deeper than 64 (a cycle?)")
+        n = nodes[i]
+        M = parent @ _node_matrix(n)
+        if "mesh" in n:
+            m = int(n["mesh"])
+            seen[m] = seen.get(m, 0) + 1
+            if seen[m] > 1:
+                raise MeshError(f"{path}: mesh {m} is placed by more than one node (an instance)")
+            if not np.allclose(M, np.eye(4), rtol=0, atol=0):
+                out[m] = M
+        for c in n.get("children", []):
+            walk(int(c), M, depth + 1)
+
+    for r in roots:
+        walk(int(r), np.eye(4), 0)
+    return out
 
 
 def read_glb_textured(path: Path | str, *, textures: bool = True) -> Dict[str, Any]:
@@ -78,9 +126,7 @@ def read_glb_textured(path: Path | str, *, textures: bool = True) -> Dict[str, A
         base = f.tell()
         if doc.get("extensionsRequired"):
             raise MeshError(f"{path}: requires {doc['extensionsRequired']} (plain accessors are read)")
-        for n in doc.get("nodes", []):
-            if any(k in n for k in ("matrix", "translation", "rotation", "scale")):
-                raise MeshError(f"{path}: node '{n.get('name')}' carries a transform (a baked mesh is read)")
+        placed = mesh_placements(doc, path)
         acc, views = doc["accessors"], doc["bufferViews"]
 
         def array(index: int, dtype: str, comps: int) -> np.ndarray:
@@ -95,11 +141,14 @@ def read_glb_textured(path: Path | str, *, textures: bool = True) -> Dict[str, A
         verts, faces, uvs, mats, offset = [], [], [], [], 0
         images: Dict[int, Dict[str, Any]] = {}
         textured = textures
-        for mesh in doc["meshes"]:
+        for mi, mesh in enumerate(doc["meshes"]):
             for prim in mesh["primitives"]:
                 if prim.get("mode", 4) != 4:
                     raise MeshError(f"{path}: a primitive that is not triangles")
                 v = array(prim["attributes"]["POSITION"], "<f4", 3)
+                M = placed.get(mi)
+                if M is not None:                                      # (float64, back to the file's float32)
+                    v = (v.astype(np.float64) @ M[:3, :3].T + M[:3, 3]).astype(np.float32)
                 idx = acc[prim["indices"]]
                 i = array(prim["indices"], types[idx["componentType"]], 1).reshape(-1, 3)
                 verts.append(v)

@@ -63,6 +63,36 @@ def test_the_mesh_is_read_and_welded_into_its_surface(tmp_path):
     assert area(wv, wf) == pytest.approx(wall.area + chair.area, rel=1e-5)
 
 
+def test_a_mesh_rescaled_by_the_calibration_is_read_at_its_new_scale(tmp_path):
+    """A calibration's rescale scales the GenRecon GLB by a node at its root (correction/rescale.scale_glb); the IFC
+    generator refused it ("a baked mesh is read") and GenRecon had to run again (USER 2026-11-28: "yo rehice genrecon
+    al pedo?"). It is read placed by its nodes: every vertex × s, the triangles the same."""
+    from correction.rescale import scale_glb
+    _out, glb, _wall, _chair = _scan(tmp_path)
+    v, f = M.read_glb(glb)
+    scale_glb(glb, 1.0337)
+    v2, f2 = M.read_glb(glb)
+    assert np.array_equal(f2, f)
+    assert np.array_equal(v2, (v.astype(np.float64) * 1.0337).astype(np.float32))
+    scale_glb(glb, 1 / 1.0337)                                  # the undo: back to the stored vertices
+    v3, _ = M.read_glb(glb)
+    assert np.allclose(v3, v, rtol=0, atol=1e-6)
+
+
+def test_a_node_s_rotation_and_translation_place_its_mesh():
+    """glTF's T·R·S: a quarter turn about y and a shift."""
+    q = [0.0, np.sin(np.pi / 4), 0.0, np.cos(np.pi / 4)]
+    doc = {"scene": 0, "scenes": [{"nodes": [0]}],
+           "nodes": [{"translation": [1.0, 2.0, 3.0], "rotation": q, "scale": [2.0, 2.0, 2.0], "children": [1]}, {"mesh": 0}]}
+    P = M.mesh_placements(doc)
+    x = np.array([1.0, 0.0, 0.0])
+    assert np.allclose(P[0][:3, :3] @ x + P[0][:3, 3], [1.0, 2.0, 1.0])      # (1,0,0) → ×2 → turned to (0,0,-2) → shifted
+    doc["nodes"].append({"mesh": 0})
+    doc["scenes"][0]["nodes"].append(2)
+    with pytest.raises(M.MeshError, match="instance"):
+        M.mesh_placements(doc)
+
+
 def test_each_object_gets_its_part_of_the_mesh(tmp_path):
     out, glb, wall, chair = _scan(tmp_path)
     elements, report = M.elements_of(out, glb, keep=1.0, max_distance=0.05, log=lambda _m: None)
