@@ -5,12 +5,17 @@
 # bash /workspace/stac-build/init_pod.sh
 # variant launch <script src="https://launchar.app/sdk/v1?key=O0j6XZVvKo3Ns3GiqezRiAOBpVnW66px&redirect=true"></script>
 
-# 0. ONE START PER POD START. Everything below creates tmux sessions and TYPES their commands into them: run a
+# 0. THE WAY IN — SSH AND JUPYTERLAB (USER 2026-11-28: "El arranque automático (init_pod.sh) tiene que dejar el SSH
+#    funcionando en cada pod nuevo, sin que yo haga nada"): first, and at EVERY run — it only sets what is missing,
+#    so a run by hand on a started pod mends the access and touches nothing else. Lines "ssh: …", "jupyter: …".
+bash /workspace/stac-build/scripts/pod_access.sh
+
+# 0b. ONE START PER POD START. Everything below creates tmux sessions and TYPES their commands into them: run a
 #    second time it would type into the live panes (the backend's among them). The pod starts by itself now
 #    (scripts/pod_autostart.sh — USER 2026-11-20: "todo debe arrancar automaticamente al iniciar el pod"), so a
-#    run by hand afterwards does nothing. STAC_INIT_FORCE=1 runs it anyway.
+#    run by hand afterwards does nothing more. STAC_INIT_FORCE=1 runs it anyway.
 if [ "${STAC_INIT_FORCE:-0}" != "1" ] && command -v tmux &> /dev/null && tmux has-session -t backend 2> /dev/null; then
-    echo "init_pod: the services are already started (tmux session 'backend' exists) — nothing done."
+    echo "init_pod: the services are already started (tmux session 'backend' exists) — nothing else done."
     echo "  (the backend alone: bash scripts/restart_backend.sh; this script anyway: STAC_INIT_FORCE=1)"
     exit 0
 fi

@@ -431,6 +431,16 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     guard of init_pod.sh on a cut copy. ⚠ NOT TESTED: A REAL POD START — the first one after the setting is the
     test (apt on a fresh container, tmux with no terminal, the backend's own start): watch
     logs/autostart_latest.log with him. If it fails nothing is lost: the pod is up, init_pod.sh by hand.
+  · THE WAY IN (USER 2026-11-28: "El arranque automático (init_pod.sh) tiene que dejar el SSH funcionando en cada
+    pod nuevo, sin que yo haga nada"): scripts/pod_access.sh, FIRST in init_pod.sh and at EVERY run (it sets only
+    what is missing) — his key `ssh-ed25519 … hernan` appended to /root/.ssh/authorized_keys when it is not there,
+    /root go-w, .ssh 700, the file 600, `ssh-keygen -A`, sshd started when nothing listens on its port; JupyterLab
+    on :8888 ONLY when JUPYTER_PASSWORD is set (its token, through the environment; never with no password). Lines
+    "ssh: up …" / "jupyter: …" in logs/autostart_latest.log AND in RunPod's Logs tab (pod_autostart.sh repeats
+    them). TESTED on the live pod: the sshd listener killed, `bash init_pod.sh` started it again (the open SSH
+    session alive, tmux untouched) and the server accepts his key; Jupyter with a throwaway password 403 / 200,
+    then stopped (this pod has no JUPYTER_PASSWORD). This pod's authorized_keys has a first line whose type lacks
+    its "s" (`sh-ed25519`): sshd ignores it; left as it is.
   · NOT STARTED BY IT: a pipeline job that was running when the pod stopped (the queue is dropped: re-sent by
     hand, replace OFF) and the assistant's own session (tmux `claude` is created ready; `claude` is typed).
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);
