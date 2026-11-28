@@ -27,8 +27,13 @@ TILES = ".tiles"
 JOBS = 4
 
 
+NODE_ENV_BIN = "/workspace/miniforge3/envs/nodejs/bin/node"
+
+
 def _node() -> str:
-    return shutil.which("node") or "/workspace/miniforge3/envs/nodejs/bin/node"
+    """The pod's node (env nodejs — the one the GenRecon tiles run with); the PATH's only on a machine without it
+    (the backend's PATH found the system's node 18 first)."""
+    return NODE_ENV_BIN if os.path.exists(NODE_ENV_BIN) else (shutil.which("node") or "node")
 
 
 def tiles_dir(ifcs_dir: Path, name: str) -> Path:
