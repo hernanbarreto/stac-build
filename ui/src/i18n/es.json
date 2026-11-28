@@ -707,6 +707,7 @@
     "stale": "{@epoch} {n}",
     "staleHint": "Tomada sobre otra {@epoch} de este {@scan}: no se usa. Medila de nuevo.",
     "frame": "Mostrar en el modelo",
+    "showMarks": "Mostrar las mediciones en el modelo",
     "makeTest": "Que verifique",
     "makeGauge": "Que calibre",
     "measure": "Medir sobre el modelo",

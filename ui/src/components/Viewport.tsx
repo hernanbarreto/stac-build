@@ -2634,17 +2634,19 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const group = calibGroupRef.current
             if (!group) return
             while (group.children.length > 0) {
-                const child = group.children[0] as THREE.Mesh
+                const child = group.children[0]
                 group.remove(child)
-                if (child.geometry) child.geometry.dispose()
-                if (child.material) (Array.isArray(child.material) ? child.material : [child.material]).forEach(x => x.dispose())
+                disposeGroup(child)
             }
             readoutsWorldRef.current = readoutsWorldRef.current.filter(r => !r.id.startsWith('cal-'))
+            // each measurement drawn as the line it was taken along, a dimension with an arrow at each of its two
+            // points, thick enough to be seen over the cloud (USER 2026-11-28: "cuando se muestran debe mostrar las
+            // lineas que se tomaron para calibrar o los planos" — a 1-pixel line and 8-mm dots were lost in the points)
             for (const m of marks) {
                 const a = new THREE.Vector3().fromArray(m.a), b = new THREE.Vector3().fromArray(m.b)
                 // a gauge calibrates (the brand's own colour); a test only measures the error
                 const col = tokenHex(m.role === 'gauge' ? VP.calibration : VP.angle)
-                group.add(createMarker(a, col), createMarker(b, col), createMeasurementLine([a, b], col))
+                group.add(arrowDimension(a, b, col))
                 const mid = a.clone().add(b).multiplyScalar(0.5)
                 readoutsWorldRef.current.push({ id: `cal-${m.id}`, kind: 'distance', pos: mid.clone(), anchor: mid.clone(),
                                                 metres: m.metres, tag: m.id, cal: m.role })
@@ -2654,8 +2656,18 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 const pts = pl.points.map(q => new THREE.Vector3().fromArray(q))
                 if (pts.length < 3) continue
                 const col = tokenHex(VP.calibration)
-                group.add(createPlaneFill(pts, col), createMeasurementLine([...pts, pts[0]], col))
-                for (const q of pts) group.add(createMarker(q, col))
+                const edges = pts.map((q, i) => [q, pts[(i + 1) % pts.length]] as const)
+                const size = Math.max(...edges.map(([p, q]) => p.distanceTo(q)))
+                const r = THREE.MathUtils.clamp(size * 0.004, 0.004, 0.015)
+                const mat = new THREE.MeshBasicMaterial({ color: col, depthTest: false, transparent: true })
+                group.add(createPlaneFill(pts, col))
+                for (const [p, q] of edges) group.add(thickSegment(p, q, r, mat))
+                for (const q of pts) {
+                    const dot = new THREE.Mesh(new THREE.SphereGeometry(r * 2.5, 12, 12), mat)
+                    dot.position.copy(q)
+                    dot.renderOrder = 1998
+                    group.add(dot)
+                }
                 const c = pts.reduce((sum, q) => sum.add(q), new THREE.Vector3()).multiplyScalar(1 / pts.length)
                 readoutsWorldRef.current.push({ id: `cal-${pl.id}`, kind: 'angle', pos: c.clone(), anchor: c.clone(),
                                                 degrees: pl.inclinationDeg, tag: pl.label || pl.id, cal: 'plane' })

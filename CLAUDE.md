@@ -683,6 +683,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     is the scan's own, uncompressed, with each point's colour replaced (the point found by its origin triple;
     a point of no compared object is grey). pccr 2026-08-31, start to end: 46 s (171 – 186 s before; distances
     95 → 12 s, coverage 8 → 2 s, octree 40 → 5 s). HE CLOSED THE POINT AT THAT.
+- THE CALIBRATION'S MEASUREMENTS ON THE MODEL ARE OFF BY DEFAULT (USER 2026-11-28: "no deben quedar ahi mostrados, de
+  ultima que los pueda prender y apagar, pero no de forma permanente" / "en la de calibracion" / "cuando se muestran
+  debe mostrar las lineas que se tomaron para calibrar o los planos"): a switch in the Calibration window shows them,
+  off again with every other session or scan; each distance drawn as a dimension (a thick shaft, an arrow at each of
+  its points), each plane with a thick outline and its points — the 1-pixel line and 8-mm dots were lost in the cloud.
+  HIS EYE: pending.
 - OPENING A SESSION (USER 2026-11-13: "al abrir las sesiones por defecto aparezcan las mallas genrecon apagadas para
   que abra rapido la sesion"): every mesh is listed unchecked and NOT downloaded; checking one loads it; a mesh that
   appears while the session is open loads at once.

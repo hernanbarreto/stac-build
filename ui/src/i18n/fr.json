@@ -707,6 +707,7 @@
     "stale": "{@epoch} {n}",
     "staleHint": "Prise sur une autre {@epoch} de ce {@scan} : non utilisée. Refaites la mesure.",
     "frame": "Afficher dans le modèle",
+    "showMarks": "Afficher les mesures sur le modèle",
     "makeTest": "Passer en vérification",
     "makeGauge": "Passer en étalonnage",
     "measure": "Mesurer sur le modèle",

@@ -29,7 +29,7 @@ import { IconButton } from '../components/ui/IconButton'
 import { Badge } from '../components/ui/Badge'
 import { Banner } from '../components/ui/Banner'
 import { EmptyState } from '../components/ui/EmptyState'
-import { Field, Input, NumberInput, SegmentedControl, Select } from '../components/ui/Field'
+import { Field, Input, NumberInput, SegmentedControl, Select, Switch } from '../components/ui/Field'
 import { KeyValue, Row, Section, Stack } from '../components/ui/Panel'
 import { Table, type Column } from '../components/ui/Table'
 import { useToast } from '../components/ui/Toast'
@@ -149,11 +149,15 @@ interface CalibrationDialogProps {
   onStored: (readoutId: string) => void
   /** fly to a stored measurement or plane (its points) */
   onFrame: (points: number[][]) => void
+  /** the stored measurements drawn on the model — off by default (USER 2026-11-28: "de ultima que los pueda prender
+   *  y apagar, pero no de forma permanente") */
+  marksShown: boolean
+  onShowMarks: (shown: boolean) => void
 }
 
 const scanQuery = (scanKey: string | null) => (scanKey ? `?scan_key=${encodeURIComponent(scanKey)}` : '')
 
-export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft, onClose, onMeasure, onChanged, onStored, onFrame }: CalibrationDialogProps) {
+export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft, onClose, onMeasure, onChanged, onStored, onFrame, marksShown, onShowMarks }: CalibrationDialogProps) {
   const t = useT()
   const fmt = useFmt()
   const { notify } = useToast()
@@ -506,6 +510,7 @@ export function CalibrationDialog({ open, sessionId, scanKey, otherScans, draft,
       icon={<Pin aria-hidden />} size="lg" onClose={onClose}
       footer={
         <>
+          <Switch checked={marksShown} onChange={onShowMarks} label={t('calibration.showMarks')} disabled={!sessionId} />
           <Button icon={<Ruler aria-hidden />} disabled={!sessionId} onClick={() => onMeasure('distance')} title={t('calibration.measureHint')}>{t('calibration.measure')}</Button>
           <Button icon={<Pentagon aria-hidden />} disabled={!sessionId} onClick={() => onMeasure('plane')} title={t('calibration.planeHint')}>{t('calibration.measurePlane')}</Button>
           <Button onClick={onClose}>{t('common.close')}</Button>

@@ -9,7 +9,7 @@
  * Status messages go through i18n (`tt` = translator for callbacks).
  */
 import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
-import Viewport, { ViewportHandle, SegmentInstance, type CubeInfo } from './components/Viewport'
+import Viewport, { ViewportHandle, SegmentInstance, type CubeInfo, type CalibrationMark, type CalibrationPlane } from './components/Viewport'
 import type { UserVolume } from './components/assistantViz'
 import { SyncPlayer } from './components/SyncPlayer'
 import TeamPanel from './components/TeamPanel'
@@ -1801,14 +1801,31 @@ function App() {
   // the scan's stored calibration measurements, drawn on the model: the ones of the CURRENT geometry epoch (a stale
   // one was picked on another cloud: its points are no longer on this one)
   const [calibrationSummary, setCalibrationSummary] = useState<CalSummary | null>(null)
+  // THE STORED MEASUREMENTS ON THE MODEL: off unless the user turns them on in the Calibration window, and off
+  // again with every other session or scan (USER 2026-11-28: "no deben quedar ahi mostrados, de ultima que los pueda
+  // prender y apagar, pero no de forma permanente" / "en la de calibracion")
+  const [calibrationMarksOn, setCalibrationMarksOn] = useState(false)
+  const calibrationMarksOnRef = useRef(false)
+  calibrationMarksOnRef.current = calibrationMarksOn
+  const calibrationMarksRef = useRef<{ marks: CalibrationMark[]; planes: CalibrationPlane[] }>({ marks: [], planes: [] })
+  const showCalibrationMarks = useCallback(() => {
+    const { marks, planes } = calibrationMarksRef.current
+    if (calibrationMarksOnRef.current) viewportRef.current?.setCalibrationMarks(marks, planes)
+    else viewportRef.current?.setCalibrationMarks([], [])
+  }, [])
   const drawCalibrationMarks = useCallback((measurements: CalMeasurement[], summary: CalSummary, planes: CalPlane[] = []) => {
     setCalibrationSummary(summary)
     const stale = new Set([...summary.rows.filter(r => r.stale).map(r => r.id), ...(summary.planes ?? []).filter(pl => pl.stale).map(pl => pl.id)])
-    viewportRef.current?.setCalibrationMarks(
-      measurements.filter(m => !stale.has(m.id)).map(m => ({ id: m.id, a: m.a, b: m.b, metres: m.measured_m, role: m.role })),
-      planes.filter(pl => !stale.has(pl.id)).map(pl => ({ id: pl.id, points: pl.points, label: pl.label, inclinationDeg: pl.inclination_deg })))
-  }, [])
+    calibrationMarksRef.current = {
+      marks: measurements.filter(m => !stale.has(m.id)).map(m => ({ id: m.id, a: m.a, b: m.b, metres: m.measured_m, role: m.role })),
+      planes: planes.filter(pl => !stale.has(pl.id)).map(pl => ({ id: pl.id, points: pl.points, label: pl.label, inclinationDeg: pl.inclination_deg })),
+    }
+    showCalibrationMarks()
+  }, [showCalibrationMarks])
+  useEffect(() => { showCalibrationMarks() }, [calibrationMarksOn, showCalibrationMarks])
   useEffect(() => {
+    calibrationMarksRef.current = { marks: [], planes: [] }
+    setCalibrationMarksOn(false)
     viewportRef.current?.setCalibrationMarks([])
     setCalibrationSummary(null)
     if (!activeSession || !cloudEverShown) return
@@ -4104,6 +4121,7 @@ function App() {
             setStatusMessage(tt(kind === 'distance' ? 'calibration.measureStatus' : 'calibration.planeStatus'))
           }}
           onChanged={drawCalibrationMarks}
+          marksShown={calibrationMarksOn} onShowMarks={setCalibrationMarksOn}
           onStored={id => { viewportRef.current?.removeDistance(id); setCalibrationDraft(null) }}
           onFrame={pts => {
             const lo = [0, 1, 2].map(k => Math.min(...pts.map(q => q[k]))), hi = [0, 1, 2].map(k => Math.max(...pts.map(q => q[k])))
