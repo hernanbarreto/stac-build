@@ -440,9 +440,10 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     them). TESTED on the live pod: the sshd listener killed, `bash init_pod.sh` started it again (the open SSH
     session alive, tmux untouched) and the server accepts his key; Jupyter with a throwaway password 403 / 200,
     then stopped (this pod has no JUPYTER_PASSWORD). A BROKEN COPY OF HIS KEY on every new pod (USER: "si estaba
-    roto arreglalo no dejes nada roto"): the pod's PUBLIC_KEY — his RunPod account's SSH key, which /start.sh
-    appends — reads `sh-ed25519 …`, its first "s" lost; pod_access.sh removes any line carrying his key under
-    another type (removed on this pod too). The setting itself is his to correct in RunPod (Settings → SSH keys).
+    roto arreglalo no dejes nada roto"): the PUBLIC_KEY variable this pod received, which /start.sh appends,
+    began `sh-ed25519 …`; where its first letter was lost is NOT known (the assistant first said "his RunPod
+    account's key" without seeing it — retracted). pod_access.sh removes any line carrying his key under another
+    type (removed on this pod too; the old file kept in the session's scratchpad).
   · NOT STARTED BY IT: a pipeline job that was running when the pod stopped (the queue is dropped: re-sent by
     hand, replace OFF) and the assistant's own session (tmux `claude` is created ready; `claude` is typed).
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);
