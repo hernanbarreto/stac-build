@@ -30,7 +30,7 @@
  *   The ktx tool: $KTX_BIN (default <repo>/vendor/KTX-Software-4.4.2-Linux-x86_64/bin/ktx, its lib/ beside it).
  */
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -149,7 +149,9 @@ function extract(prim, M, index) {
       return [slot, tex ? { bytes: tex.getImage(), mime: tex.getMimeType() } : null];
     })),
   } : null;
+  const extras = prim.getExtras();
   return { index, pos, nrm, uv, idx, min, max, area, uvArea, material,
+           extras: extras && Object.keys(extras).length ? extras : null,
            centroid: [0, 1, 2].map(k => 0.5 * (min[k] + max[k])) };
 }
 
@@ -224,10 +226,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const [inPath, outDir] = args.pos;
   if (!existsSync(KTX_BIN)) throw new Error(`the ktx tool is missing: ${KTX_BIN} (set KTX_BIN)`);
-  const ktxEnv = { ...process.env, LD_LIBRARY_PATH: [path.join(path.dirname(KTX_BIN), '..', 'lib'), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':') };
-  await MeshoptEncoder.ready;
   await MeshoptDecoder.ready;
-  await MeshoptSimplifier.ready;
   const io = new NodeIO().registerExtensions(ALL_EXTENSIONS)
     .registerDependencies({ 'meshopt.encoder': MeshoptEncoder, 'meshopt.decoder': MeshoptDecoder });
   const t0 = Date.now();
@@ -251,6 +250,23 @@ async function main() {
   const nTri = items.reduce((s, it) => s + it.idx.length / 3, 0);
   log(`${inPath}: ${items.length} primitives, ${nTri.toLocaleString('en')} triangles (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
   if (empty) log(`${empty} primitive(s) of the source have no triangle — left out of the tiles`);
+  await tileItems(items, outDir, { jobs: args.jobs, uastcQuality: args.uastcQuality, t0,
+    report: { source: path.resolve(inPath), source_bytes: (await stat(inPath)).size, source_primitives_without_triangles: empty } });
+}
+
+/**
+ * The tiles of a set of primitives (each as extract() gives it: vertices in the scene's frame, its material, its
+ * `extras` — carried to every tile that holds it), written to <outDir> (built in <outDir>.part, renamed at the end).
+ * `opts.report` goes into tiles_report.json as it is; `opts.files` ({ name: string | Buffer }) are written beside the
+ * tileset before the rename.
+ */
+export async function tileItems(items, outDir, opts = {}) {
+  const args = { jobs: opts.jobs ?? 8, uastcQuality: opts.uastcQuality ?? 2 };
+  const t0 = opts.t0 ?? Date.now();
+  const ktxEnv = { ...process.env, LD_LIBRARY_PATH: [path.join(path.dirname(KTX_BIN), '..', 'lib'), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':') };
+  await MeshoptEncoder.ready;
+  await MeshoptSimplifier.ready;
+  const nTri = items.reduce((s, it) => s + it.idx.length / 3, 0);
 
   const tree = build(items);
   let nextId = 0;
@@ -276,6 +292,7 @@ async function main() {
     const key = `${it.index}:${slot}:${w}x${h}`;
     if (!encodes.has(key)) encodes.set(key, { it, slot, w, h, bytes: null });
   }
+  if (encodes.size && !existsSync(KTX_BIN)) throw new Error(`the ktx tool is missing: ${KTX_BIN} (set KTX_BIN)`);
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'tile_mesh_'));
   const threads = Math.max(1, Math.floor(Math.min(os.cpus().length, 30) / args.jobs));
   let done = 0;
@@ -361,6 +378,7 @@ async function main() {
         }
         prim.setMaterial(mat);
       }
+      if (it.extras) prim.setExtras(it.extras);
       mesh.addPrimitive(prim);
     }
     ge = node.h === 0 ? 0 : Math.max(simplErr, texel, ...node.children.map(ch => ch.ge));
@@ -394,10 +412,11 @@ async function main() {
                     geometricError: tree.ge, root: tile(tree) };
   await writeFile(path.join(part, 'tileset.json'), JSON.stringify(tileset));
   const total = report.reduce((s, r) => s + r.bytes, 0);
+  for (const [name, content] of Object.entries(opts.files ?? {})) await writeFile(path.join(part, name), content);
   await writeFile(path.join(part, 'tiles_report.json'), JSON.stringify({
-    source: path.resolve(inPath), source_bytes: (await stat(inPath)).size, primitives: items.length, triangles: nTri,
+    ...(opts.report ?? {}), primitives: items.length, triangles: nTri,
     tiles: nodes.length, depth: tree.h, bytes: total, textures_encoded: encodes.size,
-    source_primitives_without_triangles: empty, primitives_kept_from_below: keptList,
+    primitives_kept_from_below: keptList,
     ktx: { tool: KTX_BIN, encode: 'uastc', uastc_quality: args.uastcQuality, zstd: 18, mipmaps: true },
     rule: 'leaves = the source primitives at full detail; a tile of height h = its primitives simplified to 1/2^h of '
         + 'their triangles (meshoptimizer, LockBorder, its own absolute error), textures at the source side >> ceil(h/2); '
@@ -409,7 +428,10 @@ async function main() {
   log(`→ ${outDir}: ${nodes.length} tiles, depth ${tree.h}, ${(total / 1e6).toFixed(0)} MB, root error ${tree.ge.toFixed(3)} m (${((Date.now() - t0) / 1000).toFixed(0)} s)`);
 }
 
-main().catch((err) => {
-  console.error('[tile_mesh] FAILED:', err?.stack || err);
-  process.exit(1);
-});
+// a command when run, a module when imported (tools/glb/ifc_tiles.mjs)
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  main().catch((err) => {
+    console.error('[tile_mesh] FAILED:', err?.stack || err);
+    process.exit(1);
+  });
+}

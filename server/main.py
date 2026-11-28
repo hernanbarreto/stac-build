@@ -1474,6 +1474,39 @@ async def serve_sabana_potree_files(session_id: str, file_path: str):
         headers={"Cache-Control": "no-cache"},  # No cache — may be regenerated
     )
 
+@app.get("/api/sessions/{session_id}/bim_tiles/{filename}/status")
+async def bim_tiles_status(session_id: str, filename: str):
+    """The viewer's tiles of one of the project's IFCs (bim/ifc_tiles.py, USER 2026-11-28: "tipo los tiles del glb?" /
+    "si, mejora todo"): their state, the conversion started when they are absent or of an older version of the file."""
+    from bim import ifc_tiles
+    if "/" in filename or ".." in filename or not filename.lower().endswith(".ifc"):
+        raise HTTPException(status_code=400, detail="Invalid IFC name")
+    ctx = _ctx(session_id)
+    st = await asyncio.to_thread(ifc_tiles.ensure, ctx.ifcs_dir, filename)
+    if st["state"] == "missing":
+        raise HTTPException(status_code=404, detail=f"IFC not found: {filename}")
+    if st["state"] == "ready":
+        st["tileset_url"] = f"/api/sessions/{session_id}/bim_tiles/{filename}/{st['version']}/tileset.json"
+        st["elements_url"] = f"/api/sessions/{session_id}/bim_tiles/{filename}/{st['version']}/elements.json"
+    return st
+
+
+@app.get("/api/sessions/{session_id}/bim_tiles/{filename}/{version}/{rel:path}")
+async def bim_tiles_file(session_id: str, filename: str, version: str, rel: str):
+    """A file of an IFC's tiles under that IFC's version: it never changes, so it is cached for good (a new version of
+    the IFC has another address)."""
+    from fastapi.responses import FileResponse
+    from bim import ifc_tiles
+    if "/" in filename or ".." in filename or ".." in rel:
+        raise HTTPException(status_code=400, detail="Invalid path component")
+    ctx = _ctx(session_id)
+    p = await asyncio.to_thread(ifc_tiles.file_path, ctx.ifcs_dir, filename, version, rel)
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"no tiles of {filename} at {version}")
+    media = "model/gltf-binary" if p.suffix == ".glb" else "application/json"
+    return FileResponse(str(p), media_type=media, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
 @app.get("/api/sessions/{session_id}/bim/{filename}")
 async def serve_bim_file(session_id: str, filename: str, request: Request):
     """Serve BIM GLB/JSON files for a session.
@@ -3616,6 +3649,9 @@ async def upload_bim(
     dest = ctx.ifcs_dir / file.filename
     dest.write_bytes(content)
     print(f"[BIM] ✅ Uploaded {file.filename} ({len(content)/1024:.0f} KB) to {session_id}")
+    # the viewer's tiles of it (bim/ifc_tiles.py) start now, in their own process
+    from bim import ifc_tiles
+    await asyncio.to_thread(ifc_tiles.ensure, ctx.ifcs_dir, file.filename)
 
     # Return updated list of IFC files
     ifc_files = [f.name for f in sorted(ctx.ifcs_dir.glob("*.ifc"))]
@@ -3647,6 +3683,8 @@ async def delete_bim(
 
     filepath.unlink()
     print(f"[BIM] 🗑️ Deleted {filename} from {session_id}")
+    from bim import ifc_tiles
+    await asyncio.to_thread(ifc_tiles.remove, ctx.ifcs_dir, filename)
 
     # Return updated list of IFC files
     ifc_files = [f.name for f in sorted(ctx.ifcs_dir.glob("*.ifc"))]

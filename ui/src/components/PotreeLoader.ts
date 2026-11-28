@@ -114,6 +114,9 @@ class _MaxHeap {
 
 // ── Potree Octree Loader ───────────────────────────────────────────────
 
+/** what is kept of the points that left the screen, as a share of the point budget (_evictCache) */
+const OFFSCREEN_CACHE_SHARE = 0.25
+
 export class PotreeOctreeLoader {
     private baseUrl: string
     private metadata: PotreeMetadata | null = null
@@ -153,6 +156,12 @@ export class PotreeOctreeLoader {
     private _tick = 0
     private _loading = false
     private _smallCloudLogged = false
+    // WHILE THE CAMERA MOVES, THE MOST IMPORTANT POINTS FIRST (USER 2026-11-28: "debe moverse fluido siempre con los
+    // puntos pasa igual"): the nodes on screen in their priority order (the traversal's — the largest on screen first;
+    // a small cloud's, coarse to fine), and how many points of them are drawn (null: all). Nothing is unloaded: a node
+    // beyond the limit is only not drawn until the camera stops.
+    private _drawOrder: string[] = []
+    private _drawLimit: number | null = null
     private _hasConfidence = false
     private _hasWitness = false
     get hasWitness(): boolean { return this._hasWitness }
@@ -664,6 +673,8 @@ export class PotreeOctreeLoader {
         }
 
         this.visiblePoints = numVisiblePoints
+        this._drawOrder = [...renderSet]
+        this._applyDrawLimit()
     }
 
     /** Small cloud path: load ALL nodes, no frustum culling, no unloading.
@@ -685,6 +696,30 @@ export class PotreeOctreeLoader {
             }
         }
         this.visiblePoints = numVisible
+        if (this._drawOrder.length !== this.nodes.size)
+            this._drawOrder = [...this.nodes.keys()].sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0))
+        this._applyDrawLimit()
+    }
+
+    /** At most `points` points drawn, the most important first; null: every node on screen. */
+    setDrawLimit(points: number | null): void {
+        if (points === this._drawLimit) return
+        this._drawLimit = points
+        this._applyDrawLimit()
+    }
+
+    private _applyDrawLimit(): void {
+        let drawn = 0
+        for (const name of this._drawOrder) {
+            const node = this.nodes.get(name)
+            if (!node?.points) continue
+            const over = this._drawLimit !== null && drawn + node.numPoints > this._drawLimit && drawn > 0
+            if (!over) drawn += node.numPoints
+            if (node.points.userData.lodHidden !== over) {
+                node.points.userData.lodHidden = over
+                this._applyClassCull(node.points)
+            }
+        }
     }
 
     /** Load a single octree node's point data via HTTP Range request (LOD streaming) */
@@ -948,6 +983,10 @@ export class PotreeOctreeLoader {
     }
 
     private _applyClassCull(points: THREE.Points): void {
+        if (points.userData.lodHidden) {                 // beyond the draw limit while the camera moves
+            points.visible = false
+            return
+        }
         if (!this.hiddenClasses.size) {
             points.visible = true
             return
@@ -982,10 +1021,10 @@ export class PotreeOctreeLoader {
     /** LRU eviction: when cached (off-screen) geometry exceeds the cap, dispose
      *  the least-recently-shown NOT-in-scene nodes until back under budget. */
     private _evictCache(): void {
-        // Off-screen retention cap. Kept at ~the visible budget (not the old 15M
-        // floor) so total resident VRAM stays ≈ 2× budget instead of growing to
-        // ~20M points as the camera explores new regions.
-        const cap = this.pointBudget
+        // Off-screen retention cap: a QUARTER of the budget (USER 2026-11-28: "con los puntos por que se pone lento con el
+        // tiempo? … se va poniendo cada vez mas lento"). It was the whole budget: exploring, the points kept in memory grew
+        // to twice what is drawn (20 M with a 10 M budget). A region left long ago is fetched again when it comes back.
+        const cap = Math.round(this.pointBudget * OFFSCREEN_CACHE_SHARE)
         if (this._cachedPoints <= cap) return
 
         const evictable: OctreeNode[] = []

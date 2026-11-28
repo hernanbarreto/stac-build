@@ -2501,23 +2501,25 @@ function App() {
     setBimHidden(bimHiddenRef.current)
     setBimAvailable(models)
   }, [])
-  /** read one listed model in the IFC worker: its group enters the scene at once, shown only if its tick is on, and
-   *  fills in by parts; null when it is already on its way, or when another session was opened meanwhile */
+  /** one listed model AS ITS TILES (USER 2026-11-28: "se pone densa la pagina al mostrar el ifc y ademas aun luego de
+   *  apagar el ifc queda lento" / "tipo los tiles del glb?" / "si, mejora todo"): its elements and tree read now (the
+   *  server tiles it first if it has to), its tiles streamed only while its tick is on and freed when it is off — the
+   *  page no longer builds every triangle of every IFC at the session's open; null when it is already on its way, or
+   *  when another session was opened meanwhile */
   const loadBimModel = useCallback(async (item: { name: string; url: string }) => {
     const signal = bimAbort.current.signal                               // this session's
     if (signal.aborted || bimInFlight.current.has(item.name)) return null
     bimInFlight.current.add(item.name)
     setBimLoading(l => [...l.filter(n => n !== item.name), item.name])
     try {
-      const { loadIFC } = await import('./components/IFCLoader')
-      const result = await loadIFC(item.url, item.name, {
-        signal,
-        onGroup: group => {
-          group.visible = !bimHiddenRef.current.includes(item.name)
-          bimPending.current.set(item.name, group)
-          viewportRef.current?.addBIMGroup(group)
-        },
-      })
+      const { fetchIfcTiles } = await import('./components/ifcTiles')
+      const info = await fetchIfcTiles(item.url, { signal, onBuilding: () => setStatusMessage(tt('bim.tilesBuilding', { name: item.name })) })
+      const vp = viewportRef.current
+      if (signal.aborted || !vp) return null
+      const group = vp.openIfcTiles(item.name, info.tilesetUrl, info.parts)
+      vp.addBIMGroup(group)
+      ;(group.userData.show as (on: boolean) => void)(!bimHiddenRef.current.includes(item.name))
+      const result: IFCLoadResult = { group, hierarchy: info.hierarchy, filename: item.name }
       setBimModels(prev => [...prev.filter(m => m.filename !== item.name), result])
       return result
     } catch (err) {
@@ -2549,7 +2551,11 @@ function App() {
     bimHiddenRef.current = on ? bimHiddenRef.current.filter(n => n !== name) : [...bimHiddenRef.current.filter(n => n !== name), name]
     setBimHidden(bimHiddenRef.current)
     const loaded = bimModels.find(m => m.filename === name)
-    if (loaded) { loaded.group.visible = on; return }
+    if (loaded) {
+      const show = loaded.group.userData.show as ((v: boolean) => void) | undefined
+      if (show) show(on); else loaded.group.visible = on
+      return
+    }
     const pending = bimPending.current.get(name)
     if (pending) { pending.visible = on; return }
     const item = bimAvailable.find(m => m.name === name)
@@ -2558,7 +2564,7 @@ function App() {
     bimFailed.current.delete(name)
     try {
       const result = await loadBimModel(item)
-      if (result) report(t('bim.loaded', { name, n: result.group.children.length }), 'ok')
+      if (result) report(t('bim.loaded', { name, n: result.group.userData.parts ?? result.group.children.length }), 'ok')
     } catch (err) {
       bimFailed.current.add(name)
       report(t('bim.uploadFailed', { detail: err instanceof Error ? err.message : String(err) }), 'err')
@@ -3751,13 +3757,15 @@ function App() {
                         const res = await fetch(`/api/sessions/${activeSession}/bim/upload`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: formData })
                         if (res.ok) {
                           setStatusMessage(t('bim.uploadedLoading', { name: file.name }))
-                          const { loadIFC } = await import('./components/IFCLoader')
-                          const result = await loadIFC(`/api/sessions/${activeSession}/bim/${file.name}`, file.name)
-                          viewportRef.current?.addBIMGroup(result.group)
-                          setBimModels(prev => [...prev, result])
-                          setBimAvailable(prev => (prev.some(m => m.name === file.name) ? prev
-                            : [...prev, { name: file.name, url: `/api/sessions/${activeSession}/bim/${file.name}` }]))
-                          report(t('bim.loaded', { name: file.name, n: result.group.children.length }), 'ok')
+                          const item = { name: file.name, url: `/api/sessions/${activeSession}/bim/${file.name}` }
+                          // a model uploaded again: its former tiles leave the scene, the new version's come
+                          viewportRef.current?.removeBIMGroup(file.name)
+                          setBimModels(prev => prev.filter(m => m.filename !== file.name))
+                          bimHiddenRef.current = bimHiddenRef.current.filter(n => n !== file.name)
+                          setBimHidden(bimHiddenRef.current)
+                          setBimAvailable(prev => (prev.some(m => m.name === file.name) ? prev : [...prev, item]))
+                          const result = await loadBimModel(item)
+                          if (result) report(t('bim.loaded', { name: file.name, n: result.group.userData.parts ?? result.group.children.length }), 'ok')
                           connectToServer()
                         } else report(t('bim.uploadFailed', { detail: (await res.json()).detail }), 'err')
                       } catch (err: any) { report(t('bim.uploadFailed', { detail: err.message }), 'err') }

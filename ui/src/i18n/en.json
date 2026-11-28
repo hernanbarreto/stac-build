@@ -883,6 +883,7 @@
     "emptyDesc": "A manager can load an IFC file for this {@session}.",
     "emptyDescAdmin": "Load an IFC file to compare the model against the {@scan}.",
     "uploadedLoading": "IFC uploaded: {name}. Loading",
+    "tilesBuilding": "Preparing {name} for the viewer — the first time takes a few minutes",
     "loaded": "BIM loaded: {name} ({n} elements)",
     "uploadFailed": "Could not load the IFC. {detail}",
     "deleteMessage": "The model {name} will be removed from the {@session}.",

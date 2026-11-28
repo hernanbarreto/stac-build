@@ -9,6 +9,10 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
+// the compressed geometry of every tile and GLB decoded OFF the page's thread (it was decoded on it: the movement
+// stopped while tiles streamed in — USER 2026-11-28: "siempre debe verse fluido")
+const { useWorkers: startDecoderWorkers } = MeshoptDecoder   // (not a React hook: the decoder's own call)
+startDecoderWorkers(2)
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js'
 import { TilesRenderer } from '3d-tiles-renderer'
 import { GLTFExtensionsPlugin } from '3d-tiles-renderer/plugins'
@@ -19,6 +23,8 @@ import { Eye, EyeOff, Focus, RotateCw, Move, Save, Trash2, X, Box as BoxIcon, Sc
 import { getT, getFmt } from '../i18n'
 import { registerCommands, type Executors, type Outcome, type ViewportCommandId } from '../commands/registry'
 import { tokenColor, tokenHex, edgeColorHex, VP } from './viewport/palette'
+import { visibleMeshes, queueBounds, hasBounds, disposeBounds } from './viewport/raycastable'
+import { bimElementMaterial } from './IFCLoader'
 import { applyBackground, DEFAULT_LOOK, disposeGroup, makeHorizon, makeLookGrid, type SceneLook } from './viewport/sceneLook'
 import { Button } from './ui/Button'
 import { IconButton } from './ui/IconButton'
@@ -48,6 +54,21 @@ function makeGltfLoader(): GLTFLoader {
 // cover before the finer tile loads; 3d-tiles-renderer's default (16 px) is a geometry tolerance and shows the
 // coarse atlases at room distances.
 const MESH_TILES_ERROR_TARGET = 2
+// WHILE THE CAMERA MOVES (USER 2026-11-28: "debe moverse fluido siempre con los puntos pasa igual"): the points drawn are
+// the most important ones (PotreeLoader.setDrawLimit), as many as keep a frame near MOTION_FRAME_MS — the count learned
+// from one movement to the next, never under MOTION_MIN_POINTS nor over the user's budget; MOTION_REST_MS after the
+// camera stops, every point of the budget again. (10 M points drawn at every frame while moving: 8 – 13 fps on his PC.)
+const MOTION_FRAME_MS = 33
+const MOTION_MIN_POINTS = 1_000_000
+const MOTION_START_POINTS = 3_000_000
+const MOTION_REST_MS = 200
+// AT REST, A FRAME EVERY REST_FRAME_MS: the scene was drawn at every frame with nothing moving (on his PC the page stayed
+// busy drawing 10 M points 8 – 13 times a second). Drawn at every frame while anything can change it on screen: the
+// camera moving or ACTIVE_MS after it stopped, a pointer, wheel or key within ACTIVE_MS, a flight, a measurement drawing
+// itself, the physics sandbox in use; what arrives on its own (points, tiles, a server's update) shows within
+// REST_FRAME_MS.
+const REST_FRAME_MS = 250
+const ACTIVE_MS = 1000
 
 type Tool = 'navigate' | 'measure-distance' | 'measure-angle' | 'measure-plane' | 'section-box' | 'align' | 'erase'
 
@@ -192,6 +213,8 @@ export interface ViewportHandle {
     toggleBIMVisibility: (meshNames: string[], visible: boolean) => void
     highlightBIMElement: (meshNames: string[]) => void
     addBIMGroup: (group: THREE.Group) => void
+    /** an IFC as its tiles (bim/ifc_tiles.py): its group — `userData.show(on)` streams its tiles or frees them */
+    openIfcTiles: (name: string, tilesetUrl: string, parts: Array<{ name: string; color: number[] }>) => THREE.Group
     removeBIMGroup: (filename: string) => void
     setBIMOpacity: (meshNames: string[], opacity: number) => void
     applyDeviationSurface: (sabanaData: Record<string, { positions: number[], colors: number[] }>, unmatchedKeys: string[]) => void
@@ -741,6 +764,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
     const ktx2LoaderRef = useRef<KTX2Loader | null>(null)
     const obbMapRef = useRef<Map<string, THREE.Object3D>>(new Map())
     const bimGroupRef = useRef<THREE.Group | null>(null)
+    // THE IFC'S TILES (bim/ifc_tiles.py, USER 2026-11-28: "tipo los tiles del glb?" / "si, mejora todo"): the renderers of
+    // the models shown, and what every tile takes as it arrives — the elements hidden in the BIM tree, the deviation
+    // sheet's dimming (a tile can arrive after either was set)
+    const modelTilesRef = useRef<Set<TilesRenderer>>(new Set())
+    const bimHiddenNamesRef = useRef<Set<string>>(new Set())
+    const bimDimmedRef = useRef(false)
+    const motionRef = useRef({ last: new THREE.Matrix4(), movingUntil: 0, limit: 0, frameMs: 16, prevT: 0 })
+    const lastInputRef = useRef(0)
+    const lastFrameRef = useRef(0)
     const sabanaGroupRef = useRef<THREE.Group | null>(null)
     const cameraGroupRef = useRef<THREE.Group | null>(null)
     // the cubes of the cut (GET /api/sessions/<id>/cubes, in the display frame like the camera markers): one box per
@@ -1507,10 +1539,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
             }
         }
-        if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
-        if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
-        // a model hidden by its tick is not picked (three.js casts rays at invisible objects too)
-        if (bimGroupRef.current?.visible) targets.push(...bimGroupRef.current.children.filter(c => c.visible))
+        // only what is on screen: three.js casts rays at invisible objects too (a mesh or a model hidden by its tick,
+        // or a tile its renderer keeps aside, was measured against — every triangle of it)
+        targets.push(...visibleMeshes([tsdfGroupRef.current, reconSceneGroupRef.current, bimGroupRef.current]))
         // evaluation volumes are measurable like the scene (user 2026-08-29)
         if (assistantVizRef.current) targets.push(...assistantVizRef.current.pickableVolumes())
         const intersects = raycaster.intersectObjects(targets)
@@ -1650,10 +1681,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 }
             }
         }
-        if (tsdfGroupRef.current) targets.push(tsdfGroupRef.current)
-        if (reconSceneGroupRef.current) targets.push(reconSceneGroupRef.current)
-        // a model hidden by its tick is not picked (three.js casts rays at invisible objects too)
-        if (bimGroupRef.current?.visible) targets.push(...bimGroupRef.current.children.filter(c => c.visible))
+        // only what is on screen: three.js casts rays at invisible objects too (a mesh or a model hidden by its tick,
+        // or a tile its renderer keeps aside, was measured against — every triangle of it)
+        targets.push(...visibleMeshes([tsdfGroupRef.current, reconSceneGroupRef.current, bimGroupRef.current]))
         // evaluation volumes are measurable like the scene (user 2026-08-29)
         if (assistantVizRef.current) targets.push(...assistantVizRef.current.pickableVolumes())
         const intersects = raycaster.intersectObjects(targets)
@@ -2281,8 +2311,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             tiles.setCamera(camera)
             tiles.setResolutionFromRenderer(camera, renderer)
             tiles.addEventListener('load-model', ({ scene: tileScene }) => {
+                const meshes: THREE.Mesh[] = []
                 tileScene.traverse((obj) => {
                     if (!(obj instanceof THREE.Mesh)) return
+                    meshes.push(obj)
                     for (const m of (Array.isArray(obj.material) ? obj.material : [obj.material])) {
                         if (!m) continue
                         m.side = THREE.DoubleSide           // as the GLB meshes below
@@ -2290,10 +2322,14 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                         if (wireframeRef.current.has(key) && 'wireframe' in w) w.wireframe = true
                     }
                 })
+                queueBounds(meshes)                         // a measurement on the mesh: the tree's ray
+            })
+            tiles.addEventListener('dispose-model', ({ scene: tileScene }) => {
+                tileScene.traverse(o => { if ((o as THREE.Mesh).isMesh) disposeBounds(o as THREE.Mesh) })
             })
             const meshGroup = new THREE.Group()
             meshGroup.name = key
-            meshGroup.userData = { meta: sh.meta, folder: sh.folder, method: 'tsdf', tiled: true }
+            meshGroup.userData = { meta: sh.meta, folder: sh.folder, method: 'tsdf', tiled: true, entry: sh }
             meshGroup.add(tiles.group)
             group.add(meshGroup)
             tilesRenderersRef.current.set(sh.folder, tiles)
@@ -2965,6 +3001,15 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const meshGroup = tsdfGroupRef.current?.children
                 .find(c => c.name === `tsdf-${folder}`)
             if (meshGroup) {
+                // A TILED MESH HIDDEN IS FREED (USER 2026-11-28: "aun luego de apagar el ifc queda lento" / "para todo"): its
+                // tiles leave the card and the memory — hidden, they stayed loaded — and its next tick loads it again
+                if (!visible && meshGroup.userData.tiled && meshGroup.userData.entry) {
+                    const t = tilesRenderersRef.current.get(folder)
+                    if (t) { tilesRenderersRef.current.delete(folder); t.dispose() }
+                    meshGroup.parent?.remove(meshGroup)
+                    tsdfPendingRef.current.set(folder, meshGroup.userData.entry as TsdfListEntry)
+                    return
+                }
                 meshGroup.visible = visible
                 return
             }
@@ -3008,6 +3053,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         },
         clearReconScene: () => clearAllReconScene(),
         toggleBIMVisibility: (meshNames: string[], visible: boolean) => {
+            for (const n of meshNames) { if (visible) bimHiddenNamesRef.current.delete(n); else bimHiddenNamesRef.current.add(n) }
             const bimGroup = bimGroupRef.current
             if (!bimGroup) return
             bimGroup.traverse((child) => {
@@ -3019,24 +3065,96 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         highlightBIMElement: (meshNames: string[]) => {
             const bimGroup = bimGroupRef.current
             if (!bimGroup) return
-            // Reset all BIM materials, then highlight selected
+            // every element material (the loaded meshes', and a tiled model's own — its elements not loaded now
+            // included: a tile that arrives later shows the highlight), reset, then the chosen ones lit
+            const wanted = new Set(meshNames)
+            const all = new Set<any>(), chosen = new Set<any>()
             bimGroup.traverse((child) => {
                 if (child instanceof THREE.Mesh && child.userData?.expressID) {
-                    const mat = child.material as any
-                    if (mat._originalEmissive !== undefined) {
-                        mat.emissive.setHex(mat._originalEmissive)
-                    }
+                    all.add(child.material)
+                    if (wanted.has(child.name)) chosen.add(child.material)
                 }
+                const own = child.userData?.bimMaterials as Map<string, THREE.Material> | undefined
+                if (own) for (const [n, m] of own) { all.add(m); if (wanted.has(n)) chosen.add(m) }
             })
-            bimGroup.traverse((child) => {
-                if (child instanceof THREE.Mesh && meshNames.includes(child.name)) {
-                    const mat = child.material as any
-                    if (mat._originalEmissive === undefined) {
-                        mat._originalEmissive = mat.emissive.getHex()
-                    }
-                    mat.emissive.setHex(tokenHex(VP.bimHighlight))
-                }
-            })
+            for (const mat of all) if (mat?.emissive && mat._originalEmissive !== undefined) mat.emissive.setHex(mat._originalEmissive)
+            for (const mat of chosen) {
+                if (!mat?.emissive) continue                 // a dimmed element (the deviation sheet) has no emissive
+                if (mat._originalEmissive === undefined) mat._originalEmissive = mat.emissive.getHex()
+                mat.emissive.setHex(tokenHex(VP.bimHighlight))
+            }
+        },
+        openIfcTiles: (name: string, tilesetUrl: string, parts: Array<{ name: string; color: number[] }>) => {
+            const group = new THREE.Group()
+            group.name = `ifc_${name}`
+            // one material per element, shared by every tile that holds it: an opacity or a highlight set on it holds
+            // for the tiles still to come
+            const materials = new Map<string, THREE.MeshStandardMaterial>()
+            for (const p of parts) if (!materials.has(p.name)) materials.set(p.name, bimElementMaterial(p.color, true))
+            const spare = bimElementMaterial([0.7, 0.7, 0.7, 1], true)
+            let tiles: TilesRenderer | null = null
+            const open = () => {
+                const renderer = rendererRef.current, camera = cameraRef.current
+                if (!renderer || !camera) return
+                const t = new TilesRenderer(tilesetUrl)
+                t.registerPlugin(new GLTFExtensionsPlugin({ meshoptDecoder: MeshoptDecoder }))
+                t.errorTarget = MESH_TILES_ERROR_TARGET
+                t.setCamera(camera)
+                t.setResolutionFromRenderer(camera, renderer)
+                t.addEventListener('load-model', ({ scene: tileScene }) => {
+                    const meshes: THREE.Mesh[] = []
+                    tileScene.traverse(o => {
+                        const mesh = o as THREE.Mesh
+                        if (!mesh.isMesh) return
+                        // which element it is: the primitive's extras (tools/glb/ifc_tiles.mjs), the names the BIM
+                        // tree and the loader before it use
+                        const ex = (mesh.geometry.userData ?? {}) as { name?: string; expressID?: number; ifc_type?: string; ifc_name?: string }
+                        for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) m?.dispose()
+                        mesh.name = ex.name ?? ''
+                        mesh.userData = { expressID: ex.expressID, ifc_type: ex.ifc_type, ifc_name: ex.ifc_name, ifcTile: true }
+                        const own = materials.get(mesh.name) ?? spare
+                        mesh.material = own
+                        if (bimDimmedRef.current) {
+                            mesh.userData._originalMaterial = own
+                            mesh.material = new THREE.MeshBasicMaterial({ color: tokenHex(VP.sabanaUnmatched), transparent: true,
+                                opacity: 0.20, side: THREE.DoubleSide, depthWrite: false })
+                        }
+                        mesh.visible = !bimHiddenNamesRef.current.has(mesh.name)
+                        meshes.push(mesh)
+                    })
+                    queueBounds(meshes)
+                })
+                t.addEventListener('dispose-model', ({ scene: tileScene }) => {
+                    tileScene.traverse(o => {
+                        const mesh = o as THREE.Mesh
+                        if (!mesh.isMesh) return
+                        disposeBounds(mesh)
+                        // the element's own material is every tile's: the tile's disposal must not take it
+                        if (mesh.material === mesh.userData._originalMaterial || materials.get(mesh.name) === mesh.material || mesh.material === spare)
+                            mesh.material = new THREE.MeshBasicMaterial()
+                        delete mesh.userData._originalMaterial
+                    })
+                })
+                group.add(t.group)
+                modelTilesRef.current.add(t)
+                tiles = t
+            }
+            const close = () => {
+                if (!tiles) return
+                modelTilesRef.current.delete(tiles)
+                group.remove(tiles.group)
+                tiles.dispose()
+                tiles = null
+            }
+            group.userData = {
+                bimMaterials: materials, ifcTiles: true, parts: parts.length,
+                // shown: its tiles stream from the camera; hidden: they are freed (USER 2026-11-28: "aun luego de apagar
+                // el ifc queda lento")
+                show: (on: boolean) => { group.visible = on; if (on) { if (!tiles) open() } else close() },
+                close: () => { close(); for (const m of materials.values()) m.dispose(); spare.dispose() },
+            }
+            group.visible = false
+            return group
         },
         addBIMGroup: (group: THREE.Group) => {
             const bimGroup = bimGroupRef.current
@@ -3048,6 +3166,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             const groupName = `ifc_${filename}`
             const toRemove = bimGroup.children.filter(c => c.name === groupName)
             for (const child of toRemove) {
+                (child.userData?.close as (() => void) | undefined)?.()
                 child.traverse((obj) => {
                     if (obj instanceof THREE.Mesh) {
                         obj.geometry?.dispose()
@@ -3069,6 +3188,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 for (const x of Array.isArray(m) ? m : m ? [m] : []) { x.opacity = opacity; x.transparent = opacity < 1.0; x.needsUpdate = true }
             }
             bimGroup.traverse((child) => {
+                // a tiled model's elements, loaded now or not
+                const elementMats = child.userData?.bimMaterials as Map<string, THREE.Material> | undefined
+                if (elementMats) for (const n of wanted) { const m = elementMats.get(n); if (m) put(m) }
                 if (!(child instanceof THREE.Mesh) || !wanted.has(child.name)) return
                 put(child.material)
                 // an element shown dimmed (the deviation on screen) or highlighted keeps its own material aside: the
@@ -3132,6 +3254,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             }
 
             // ── Make ALL BIM meshes semi-transparent so sábana stands out ──
+            bimDimmedRef.current = true
             bimGroup.traverse((child) => {
                 if (!(child instanceof THREE.Mesh)) return
                 if (!child.userData._originalMaterial) {
@@ -3211,6 +3334,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             sabanaGroup.add(pts)
 
             // ── Dim BIM meshes ──
+            bimDimmedRef.current = true
             const bimGroup = bimGroupRef.current
             if (bimGroup) {
                 bimGroup.traverse((child) => {
@@ -3251,6 +3375,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 sabanaGroupRef.current = null
             }
             // Restore BIM mesh materials
+            bimDimmedRef.current = false
             const bimGroup = bimGroupRef.current
             if (bimGroup) {
                 bimGroup.traverse((child) => {
@@ -4015,8 +4140,12 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     if (ep && ep.uViewRotInv) { (ep.uViewRotInv.value as THREE.Matrix3).copy(u.uViewRotInv.value as THREE.Matrix3); ep.uViewportH.value = u.uViewportH.value }
                 }
             }
+            // at rest the tiles' traversal runs at the pace of the drawing (REST_FRAME_MS above)
+            const active = now < motionRef.current.movingUntil + ACTIVE_MS || now - lastInputRef.current < ACTIVE_MS
+                || flying || physics.count > 0 || physics.holding || !!assistantVizRef.current?.animating
+            const drawNow = active || now - lastFrameRef.current >= REST_FRAME_MS
             // tiled meshes: which tiles the camera needs, at which detail (a hidden mesh loads nothing)
-            if (tilesRenderersRef.current.size && tsdfGroupRef.current?.visible) {
+            if (drawNow && tilesRenderersRef.current.size && tsdfGroupRef.current?.visible) {
                 camera.updateMatrixWorld()
                 for (const t of tilesRenderersRef.current.values()) {
                     if (!t.group.parent?.visible) continue
@@ -4024,7 +4153,39 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     t.update()
                 }
             }
-            renderer.render(scene, camera)
+            // the points drawn while the camera moves (MOTION_* above)
+            {
+                const m = motionRef.current
+                const dt = m.prevT ? now - m.prevT : MOTION_FRAME_MS
+                m.prevT = now
+                if (!m.last.equals(camera.matrixWorld)) { m.last.copy(camera.matrixWorld); m.movingUntil = now + MOTION_REST_MS }
+                const loaders = [potreeLoaderRef.current, ...[...scanLayersRef.current.values()].map(e => e.loader)]
+                    .filter((l): l is PotreeOctreeLoader => !!l?.isLoaded)
+                if (loaders.length) {
+                    if (now < m.movingUntil) {
+                        m.frameMs = m.frameMs * 0.8 + Math.min(dt, 250) * 0.2
+                        const full = loaders[0].getPointBudget()
+                        if (!m.limit) m.limit = Math.min(full, MOTION_START_POINTS)
+                        if (m.frameMs > MOTION_FRAME_MS * 1.2) m.limit = Math.max(MOTION_MIN_POINTS, m.limit * 0.85)
+                        else if (m.frameMs < MOTION_FRAME_MS * 0.8) m.limit = Math.min(full, m.limit * 1.08)
+                        for (const l of loaders) l.setDrawLimit(Math.round(m.limit))
+                    } else {
+                        for (const l of loaders) l.setDrawLimit(null)
+                    }
+                }
+            }
+            // the IFC's tiles: a model shown streams them (a model hidden has none — they were freed)
+            if (drawNow && modelTilesRef.current.size) {
+                camera.updateMatrixWorld()
+                for (const t of modelTilesRef.current) {
+                    t.setResolutionFromRenderer(camera, renderer)
+                    t.update()
+                }
+            }
+            if (drawNow) {
+                renderer.render(scene, camera)
+                lastFrameRef.current = now
+            }
         }
         animate()
 
@@ -4499,8 +4660,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                     if ((c.name || '').startsWith('potree-node-') && c.visible) targets.push(c)
                 })
             }
-            for (const g of [sceneObjectsGroupRef.current, tsdfGroupRef.current, reconSceneGroupRef.current])
-                if (g) targets.push(g)
+            targets.push(...visibleMeshes([sceneObjectsGroupRef.current, tsdfGroupRef.current, reconSceneGroupRef.current]))
             const hit = throwRay.intersectObjects(targets, true).find(h => hitIsVisibleRef.current(h))
             const r = placeRef.current ? placeRef.current.diameter / 2 : 0.1
             return hit ? hit.point.clone().add(new THREE.Vector3(0, r + 0.3, 0))
@@ -4597,6 +4757,10 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
         renderer.domElement.addEventListener('mouseup', onEraseLeftUp)
         window.addEventListener('keydown', onEraseKey)
         window.addEventListener('keydown', onKeyDown)
+        // any input: the scene is drawn at every frame for a while (REST_FRAME_MS above)
+        const onAnyInput = () => { lastInputRef.current = performance.now() }
+        for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown'] as const)
+            window.addEventListener(ev, onAnyInput, { capture: true, passive: true })
 
         // Cleanup
         return () => {
@@ -4645,6 +4809,8 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             renderer.domElement.removeEventListener('webglcontextlost', handleContextLost)
             renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored)
             window.removeEventListener('keydown', onKeyDown)
+            for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown'] as const)
+                window.removeEventListener(ev, onAnyInput, { capture: true })
             controls.dispose()
             scene.background = null; background.dispose()
             scene.remove(horizon); disposeGroup(horizon); horizonRef.current = null; backgroundTexRef.current = null
@@ -4840,8 +5006,9 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 bimHoverThrottleRef.current = now
                 const bimGroup = bimGroupRef.current
                 if (bimGroup && bimGroup.children.length > 0 && bimGroup.visible) {
-                    const bimHits = rc.intersectObjects(bimGroup.children, true)
-                      .filter(h => h.object.visible)
+                    // only the elements on screen, and only those whose tree is built: the hover never casts a slow ray
+                    // (it cast at every triangle of every IFC, shown or not: up to 778 ms a ray on grupo_electrogeno's)
+                    const bimHits = rc.intersectObjects(visibleMeshes([bimGroup]).filter(hasBounds), false)
                     if (bimHits.length > 0) {
                         const bimHit = bimHits[0].object
                         const ifcType = bimHit.userData?.ifc_type || ''
@@ -4911,8 +5078,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
             if (!bimGroup || bimGroup.children.length === 0 || !bimGroup.visible) return
             const rc = camRaycasterRef.current
             rc.setFromCamera(mouse, camera)
-            const bimHits = rc.intersectObjects(bimGroup.children, true)
-              .filter(h => h.object.visible)
+            const bimHits = rc.intersectObjects(visibleMeshes([bimGroup]), false)
             if (bimHits.length > 0) {
                 e.preventDefault()
                 e.stopPropagation()
@@ -5582,6 +5748,7 @@ const Viewport = forwardRef<ViewportHandle, ViewportProps>(function Viewport(
                 // Keep camera where it is — user navigates from current position
 
                 // 3) Dim BIM meshes to 20% opacity
+                bimDimmedRef.current = true
                 const bimGroup = bimGroupRef.current
                 if (bimGroup) {
                     let dimmed = 0

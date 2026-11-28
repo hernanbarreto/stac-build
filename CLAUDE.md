@@ -688,6 +688,36 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     is the scan's own, uncompressed, with each point's colour replaced (the point found by its origin triple;
     a point of no compared object is grey). pccr 2026-08-31, start to end: 46 s (171 – 186 s before; distances
     95 → 12 s, coverage 8 → 2 s, octree 40 → 5 s). HE CLOSED THE POINT AT THAT.
+- ⭐ THE VIEWER ALWAYS FLUID — IFC, GLB AND POINTS, FOR EVERY SESSION (USER 2026-11-28: "se pone densa la pagina al mostrar
+  el ifc y ademas aun luego de apagar el ifc queda lento" / "tipo los tiles del glb?" / "si, mejora todo" / "las soluciones
+  siempre deben ser completas y de fondo, no parches" / "debe funcionar siempre incluso para futuras sesiones" / "con los
+  puntos por que se pone lento con el tiempo?"). MEASURED FIRST: the BIM hover cast a ray at every triangle of every IFC
+  of the session, ticked or not, every 80 ms — up to 778 ms a ray on grupo_electrogeno's (7.54 M triangles), 6.5 ms with
+  a bounding-volume tree; every IFC was built whole at the session's open and kept hidden; 10 M points drawn at every
+  frame, moving or still (8 – 13 fps on his PC); the points left behind kept up to a whole second budget in memory.
+  · THE IFC AS TILES: bim/ifc_tiles.py — every IFC of <project>/ifcs/ gets ifcs/.tiles/<name>/ (tileset, tiles,
+    elements.json = parts + tree) made by tools/glb/ifc_tiles.mjs in its own process (CPU, nice), started when absent or
+    when the file changed (size + date: uploaded, regenerated, rescaled); a failure kept for that version, not retried;
+    GET /api/sessions/{id}/bim_tiles/{ifc}/status and …/{version}/{file} (cached for good: a new version, a new address).
+    ui/scripts/ifc-parts.ts reads the IFC with the page's own reader (ifcParse.readIfc: the same names, colours, tree);
+    the parts are WELDED by position (web-ifc gives every triangle its own vertices: nothing could be simplified — 1.17 GB
+    of tiles on the first try), large parts cut in pieces of ≤ 50,000 triangles, each primitive carrying its element in
+    its extras; tile_mesh.mjs is a module now (tileItems(); the GLB tiles byte-identical, checked). grupo_electrogeno 965
+    tiles / 86 MB (IFC 260 MB, 80 s), bufferStop 627 / 22 MB (33 s), pccr 2417 / 50 MB (43 s). The viewer
+    (Viewport.openIfcTiles, components/ifcTiles.ts): the elements and tree at the open, the tiles only while ticked,
+    freed when unticked; one material per element shared by its tiles (opacity, highlight, hidden elements and the
+    deviation sheet's dimming hold for tiles still to come); flat shading (no normals carried — the same faceted look).
+    The session ZIP leaves .tiles out (made again). The globe still reads the IFC with the old loader (not asked).
+  · RAYS: components/viewport/raycastable.ts — only what is on screen, a three-mesh-bvh tree built when the page is
+    idle; the hover skips a mesh with no tree yet. Hover, BIM click, measurements, the physics drop.
+  · GLB: a tiled mesh unticked is freed (its next tick loads it); its tiles get trees; meshopt decoded in 2 workers.
+  · POINTS: while the camera moves, the most important nodes first (PotreeLoader.setDrawLimit), as many as keep ~33 ms a
+    frame (learned between movements, 1 M – the budget); still for 200 ms, the whole budget. The off-screen cache a
+    quarter of the budget (it was the whole budget).
+  · AT REST a frame every 250 ms (camera still 1 s, no pointer / wheel / key for 1 s, no flight, animation or physics).
+  · Tested: the module's 6 tests (states, a new version, a failure not retried, files of the version only), the tiler's
+    and the archive's 26; the tiles read as three reads them (every primitive names its element, the tree's ray = three's);
+    the routes on the live backend and through the dev server. HIS EYE in the browser: pending.
 - THE CALIBRATION'S MEASUREMENTS ON THE MODEL ARE OFF BY DEFAULT (USER 2026-11-28: "no deben quedar ahi mostrados, de
   ultima que los pueda prender y apagar, pero no de forma permanente" / "en la de calibracion" / "cuando se muestran
   debe mostrar las lineas que se tomaron para calibrar o los planos"): a switch in the Calibration window shows them,

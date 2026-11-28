@@ -191,6 +191,9 @@ export class AssistantViz {
         for (const o of objs) this.objects.set(o.id, o)
     }
 
+    /** a measurement still drawing itself (the viewer draws every frame meanwhile) */
+    get animating(): boolean { return this.animators.length > 0 }
+
     update(now: number) {
         if (!this.animators.length) return
         this.animators = this.animators.filter((a) => !a.update(now))

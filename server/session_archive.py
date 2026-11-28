@@ -58,8 +58,9 @@ ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 SCAN_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 BLOCK = 1 << 20
 
-# what a use of the session writes again, and never part of it
-SKIP_DIRS = {"__pycache__", ".ipynb_checkpoints"}
+# what a use of the session writes again, and never part of it (ifcs/.tiles: the viewer's tiles of each IFC, made again
+# from the IFC when it is first shown — bim/ifc_tiles.py)
+SKIP_DIRS = {"__pycache__", ".ipynb_checkpoints", ".tiles"}
 SKIP_SUFFIXES = ("-shm", ".uploading", ".pyc")
 STAT_THREADS = 16                                             # (the volume is a network one: a file's stat is ~1 ms, in turn)
 

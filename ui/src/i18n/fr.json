@@ -883,6 +883,7 @@
     "emptyDesc": "Un responsable peut charger un fichier IFC pour cette {@session}.",
     "emptyDescAdmin": "Chargez un fichier IFC pour comparer le modèle au {@scan}.",
     "uploadedLoading": "IFC téléversé : {name}. Chargement",
+    "tilesBuilding": "Préparation de {name} pour la visionneuse — la première fois prend quelques minutes",
     "loaded": "BIM chargé : {name} ({n} éléments)",
     "uploadFailed": "Impossible de charger l'IFC. {detail}",
     "deleteMessage": "Le modèle {name} sera retiré de la {@session}.",

@@ -58,22 +58,29 @@ export function collectMeshNames(node: IFCTreeNode): string[] {
     return names
 }
 
+/** an element's material as the viewer shows it — its IFC colour, the BIM panel's default opacity (one an IFC makes
+ *  more transparent keeps its own); shared by every tile of the element when the IFC comes as tiles. `flat`: shaded
+ *  from the surface itself — the tiles carry no normals (web-ifc's were one per triangle: the same faceted look) */
+export function bimElementMaterial(color: number[], flat = false): THREE.MeshStandardMaterial {
+    const [r, g, b, a = 1] = color
+    return new THREE.MeshStandardMaterial({
+        color: new THREE.Color(r, g, b),
+        opacity: Math.min(a, BIM_DEFAULT_OPACITY),
+        transparent: Math.min(a, BIM_DEFAULT_OPACITY) < 1.0,
+        side: THREE.DoubleSide,
+        metalness: 0.0,
+        roughness: 0.6,
+        flatShading: flat,
+    })
+}
+
 /** one received part as the mesh the page's loader made of it: its own material, its placement applied */
 function buildMesh(part: IfcPart): THREE.Mesh {
     const bufferGeometry = new THREE.BufferGeometry()
     bufferGeometry.setAttribute('position', new THREE.BufferAttribute(part.positions, 3))
     bufferGeometry.setAttribute('normal', new THREE.BufferAttribute(part.normals, 3))
     bufferGeometry.setIndex(new THREE.BufferAttribute(part.indices, 1))
-    const [r, g, b, a] = part.color
-    const material = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(r, g, b),
-        opacity: Math.min(a, BIM_DEFAULT_OPACITY),      // (a material the IFC makes more transparent keeps its own)
-        transparent: Math.min(a, BIM_DEFAULT_OPACITY) < 1.0,
-        side: THREE.DoubleSide,
-        metalness: 0.0,
-        roughness: 0.6,
-    })
-    const mesh = new THREE.Mesh(bufferGeometry, material)
+    const mesh = new THREE.Mesh(bufferGeometry, bimElementMaterial(part.color))
     // web-ifc already outputs Y-up coordinates in meters: its placement alone
     mesh.applyMatrix4(new THREE.Matrix4().fromArray(part.matrix))
     mesh.name = part.name
