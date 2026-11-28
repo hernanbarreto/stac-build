@@ -717,7 +717,12 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
   · AT REST a frame every 250 ms (camera still 1 s, no pointer / wheel / key for 1 s, no flight, animation or physics).
   · Tested: the module's 6 tests (states, a new version, a failure not retried, files of the version only), the tiler's
     and the archive's 26; the tiles read as three reads them (every primitive names its element, the tree's ray = three's);
-    the routes on the live backend and through the dev server. HIS EYE in the browser: pending.
+    the routes on the live backend and through the dev server.
+  · FIXED ON HIS SCREEN THE SAME DAY: the points' cut moved at every frame ("se vieran barridos, aparecen y desaparecen")
+    → one level cut per movement; a hidden tileset never came back (the GLTF plugin disposed the shared loaders and
+    threw) → autoDispose: false; leaving the heat map reloaded the whole session (the view lost, the IFC out of the
+    scene) → the scan's cloud set aside for the sheet and brought back (PotreeLoader.suspend / resume). ✓ USER
+    2026-11-28, on the heat map in and out and the IFC ticked again: "ahora funciona bien".
 - THE CALIBRATION'S MEASUREMENTS ON THE MODEL ARE OFF BY DEFAULT (USER 2026-11-28: "no deben quedar ahi mostrados, de
   ultima que los pueda prender y apagar, pero no de forma permanente" / "en la de calibracion" / "cuando se muestran
   debe mostrar las lineas que se tomaron para calibrar o los planos"): a switch in the Calibration window shows them,
