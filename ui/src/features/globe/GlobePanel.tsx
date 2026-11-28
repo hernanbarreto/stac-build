@@ -5,7 +5,7 @@
  * globe, open it, place it again, take its place away) and the ones not placed yet (place it: a click on the globe).
  */
 import { useState } from 'react'
-import { Building2, Crosshair, Earth, MapPin, MapPinOff, RefreshCw, Trash2 } from 'lucide-react'
+import { Crosshair, Earth, MapPin, MapPinOff, RefreshCw, Trash2 } from 'lucide-react'
 import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { IconButton } from '../../components/ui/IconButton'
@@ -25,12 +25,9 @@ export interface GlobePanelProps {
   onPlace: (sid: string) => void
   onRemove: (sid: string) => void
   onRefresh: () => void
-  /** the works whose IFC is shown on the globe (loaded when first asked: heavy) */
-  ifcOn: string[]
-  onToggleIfc: (sid: string) => void
 }
 
-export function GlobePanel({ projects, loading, error, placing, canEdit, onShow, onPlace, onRemove, onRefresh, ifcOn, onToggleIfc }: GlobePanelProps) {
+export function GlobePanel({ projects, loading, error, placing, canEdit, onShow, onPlace, onRemove, onRefresh }: GlobePanelProps) {
   const t = useT()
   const [confirming, setConfirming] = useState<string | null>(null)
   const placed = projects.filter(p => p.georef)
@@ -63,10 +60,6 @@ export function GlobePanel({ projects, loading, error, placing, canEdit, onShow,
               </div>
             ) : (
               <div className="stac-globe-list__actions">
-                {p.ifcs.length > 0 && (
-                  <Button size="sm" variant={ifcOn.includes(p.session_id) ? 'primary' : 'ghost'} icon={<Building2 aria-hidden />}
-                    aria-pressed={ifcOn.includes(p.session_id)} onClick={() => onToggleIfc(p.session_id)}>{t('globe.ifcOn')}</Button>
-                )}
                 <Button size="sm" variant="ghost" icon={<Crosshair aria-hidden />} disabled={!canEdit} onClick={() => onPlace(p.session_id)}>{t('globe.placeAgain')}</Button>
                 <IconButton size="sm" label={t('globe.remove')} icon={<Trash2 aria-hidden />} disabled={!canEdit}
                   onClick={() => setConfirming(p.session_id)} />

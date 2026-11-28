@@ -1653,7 +1653,6 @@
     "source_video": "the video's GPS",
     "source_points": "from known points",
     "workFailed": "{name} could not be shown on the globe: {detail}",
-    "ifcOn": "IFC on the globe",
     "ifcLoading": "Turning {name}'s IFC into the globe's format…"
   },
   "location": {

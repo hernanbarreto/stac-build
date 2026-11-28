@@ -5,12 +5,13 @@
  * georeferenciadas, al tocar sobre alguna, debe acercarme y mostrar el glb liviano, en el lugar correspondiente" /
  * "calidad visual super profesional, rapido").
  *
- * Mapbox's Standard style, monochrome at night, its 3D buildings, no satellite and no points of interest; the globe
- * from space, a pin per placed work. A pin (or the work in the list) flies there and stands the work's LIGHT model
- * where it was placed: the root tile of its GenRecon mesh's tileset (the whole mesh simplified, its textures reduced —
- * grupo_electrogeno's: 411 k triangles, 8 MB, against the 560 MB GLB), else a million points of its cloud; its IFC on
- * demand (the root tile of the IFC's tiles). The models are drawn by three.js inside Mapbox's own frame (a custom
- * layer: Mapbox's matrix × the work's placement — the depth shared, so the buildings hide what they stand before).
+ * Mapbox's Standard style by day ("la primera … es la que mejor se ve"), its 3D buildings and shadows, no satellite and
+ * no points of interest; the globe from space, a pin per placed work. A pin (or the work in the list) flies there and
+ * stands the work's LIGHT model where it was placed: the root tile of its GenRecon mesh's tileset (the whole mesh
+ * simplified, its textures reduced — grupo_electrogeno's: 411 k triangles, 8 MB, against the 560 MB GLB), else a
+ * million points of its cloud — never its IFC ("no debe cargar el IFC en el globo, debe cargar el glb en el globo").
+ * The models are drawn by three.js inside Mapbox's own frame (a custom layer: Mapbox's matrix × the work's placement —
+ * the depth shared, so the buildings hide what they stand before).
  * The token: the backend's (GET /api/geo/map_config, MAPBOX_TOKEN in .env).
  */
 import { useEffect, useRef, useState } from 'react'
@@ -31,8 +32,6 @@ export interface MapViewProps {
   projects: GeoProject[]
   /** fly to this work (n changes for every request) */
   focus: { sid: string; n: number } | null
-  /** the works whose IFC stands on the map */
-  ifcOn: string[]
 }
 
 type Floor = { R: number[][]; s: number; t: number[] } | null
@@ -54,8 +53,8 @@ function skyOf(code: number): { sky: Sky; strength: number } {
 }
 const SKY_ICON = { clear: Sun, partly: CloudSun, cloudy: Cloud, fog: CloudFog, drizzle: CloudDrizzle, rain: CloudRain, snow: CloudSnow, storm: CloudLightning }
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
-interface Content { mesh_tileset: string | null; cloud_tileset: string | null; floor: Floor; ifcs: Array<{ name: string; url: string }> }
-interface Work { sid: string; scene: THREE.Scene; mesh: THREE.Group; ifc: THREE.Group | null; ifcLoading: boolean
+interface Content { mesh_tileset: string | null; cloud_tileset: string | null; floor: Floor }
+interface Work { sid: string; scene: THREE.Scene; mesh: THREE.Group
                  ready: Promise<void>; frame: { lon: number; lat: number; radius: number } | null }
 
 const NEAR_ZOOM = 12                        // the works' models are drawn from this zoom in (the map is flat there)
@@ -109,7 +108,7 @@ function unlit(root: THREE.Object3D): void {
   })
 }
 
-export default function MapView({ projects, focus, ifcOn }: MapViewProps) {
+export default function MapView({ projects, focus }: MapViewProps) {
   const t = useT()
   const host = useRef<HTMLDivElement>(null)
   const mapRef = useRef<mapboxgl.Map | null>(null)
@@ -118,8 +117,6 @@ export default function MapView({ projects, focus, ifcOn }: MapViewProps) {
   const [notice, setNotice] = useState<string | null>(null)
   const projectsRef = useRef(projects)
   projectsRef.current = projects
-  const ifcOnRef = useRef(ifcOn)
-  ifcOnRef.current = ifcOn
   // the three.js side, drawn inside Mapbox's frame
   const three = useRef<{ renderer: THREE.WebGLRenderer; camera: THREE.Camera; loader: GLTFLoader } | null>(null)
   const works = useRef(new Map<string, Work>())
@@ -149,6 +146,10 @@ export default function MapView({ projects, focus, ifcOn }: MapViewProps) {
         })
         mapRef.current = map
         map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right')
+        // the map follows its box (a side panel closing or opening left a black strip where it had not drawn)
+        const fit = new ResizeObserver(() => map.resize())
+        fit.observe(host.current)
+        map.on('remove', () => fit.disconnect())
         map.on('style.load', () => {
           if (gone) return
           map.addLayer({
@@ -166,7 +167,7 @@ export default function MapView({ projects, focus, ifcOn }: MapViewProps) {
               const view = new THREE.Matrix4().fromArray(matrix as unknown as number[])
               for (const w of works.current.values()) {
                 const g = projectsRef.current.find(p => p.session_id === w.sid)?.georef
-                if (!g || !(w.mesh.children.length || w.ifc?.visible)) continue
+                if (!g || !w.mesh.children.length) continue
                 // Mapbox's mercator → clip, after the work's east-north-up metres → mercator; each group's own frame
                 // (heading, axes, floor) is its matrix in the scene
                 th.camera.projectionMatrix.copy(view).multiply(mercatorOf(g))
@@ -209,7 +210,7 @@ export default function MapView({ projects, focus, ifcOn }: MapViewProps) {
     mesh.matrixAutoUpdate = false
     scene.add(mesh)
     let done: () => void = () => {}
-    const w: Work = { sid, scene, mesh, ifc: null, ifcLoading: false, frame: null, ready: new Promise<void>(r => { done = r }) }
+    const w: Work = { sid, scene, mesh, frame: null, ready: new Promise<void>(r => { done = r }) }
     works.current.set(sid, w)
     void (async () => {
       try {
@@ -236,60 +237,12 @@ export default function MapView({ projects, focus, ifcOn }: MapViewProps) {
           w.frame = { lon, lat, radius: Math.max(2, 0.5 * Math.hypot(size.x, size.y, size.z)) }
         }
         map.triggerRepaint()
-        loadIfc.current(sid, c)
       } catch (err) {
         works.current.delete(sid)
         setNotice(t('globe.workFailed', { name: sid, detail: err instanceof Error ? err.message : String(err) }))
       } finally {
         done()
         pinsByZoom.current()
-      }
-    })()
-  }
-
-  // A WORK'S IFC, while ticked in the list: the root tile of the IFC's tiles (bim/ifc_tiles.py)
-  const loadIfc = useRef<(sid: string, c?: Content) => void>(() => {})
-  loadIfc.current = (sid: string, c?: Content) => {
-    const w = works.current.get(sid), th = three.current, map = mapRef.current
-    if (!w || !th || !map) return
-    const on = ifcOnRef.current.includes(sid)
-    if (w.ifc) { w.ifc.visible = on; map.triggerRepaint(); return }
-    if (!on || w.ifcLoading) return
-    w.ifcLoading = true
-    void (async () => {
-      try {
-        const content = c ?? await fetch(`/api/geo/${encodeURIComponent(sid)}/content`, { cache: 'no-store' }).then(r => r.json()) as Content
-        const g = projectsRef.current.find(p => p.session_id === sid)?.georef
-        if (!g || !content.ifcs.length) return
-        const { fetchIfcTiles } = await import('../../components/ifcTiles')
-        const grp = new THREE.Group()
-        grp.matrixAutoUpdate = false
-        grp.matrix.copy(localPlacement(g, null, true))           // written from the scan: its floor adjustment is in it
-        for (const ifc of content.ifcs) {
-          const info = await fetchIfcTiles(ifc.url, { onBuilding: () => setNotice(t('bim.tilesBuilding', { name: ifc.name })) })
-          const gltf = await th.loader.loadAsync(await rootTileUrl(info.tilesetUrl))
-          const colours = new Map(info.parts.map(p => [p.name, p.color]))
-          gltf.scene.traverse(o => {
-            const mesh = o as THREE.Mesh
-            if (!mesh.isMesh) return
-            const col = colours.get((mesh.geometry.userData as { name?: string }).name ?? '') ?? [0.7, 0.7, 0.7, 1]
-            ;(mesh.material as THREE.Material).dispose()
-            mesh.material = new THREE.MeshStandardMaterial({ color: new THREE.Color(col[0], col[1], col[2]), flatShading: true,
-              side: THREE.DoubleSide, roughness: 0.7, metalness: 0, transparent: true, opacity: 0.85 })
-          })
-          grp.add(gltf.scene)
-        }
-        grp.add(new THREE.HemisphereLight(0xffffff, 0x404040, 2.2), new THREE.DirectionalLight(0xffffff, 1.2))
-        if (works.current.get(sid) !== w) return
-        w.ifc = grp
-        w.scene.add(grp)
-        grp.visible = ifcOnRef.current.includes(sid)
-        setNotice(null)
-        map.triggerRepaint()
-      } catch (err) {
-        setNotice(t('globe.workFailed', { name: sid, detail: err instanceof Error ? err.message : String(err) }))
-      } finally {
-        w.ifcLoading = false
       }
     })()
   }
@@ -387,14 +340,6 @@ export default function MapView({ projects, focus, ifcOn }: MapViewProps) {
 
   // GO TO A WORK (the list's name)
   useEffect(() => { if (ready && focus) flyToWork.current(focus.sid) }, [ready, focus])
-
-  // ITS IFC, ticked or not in the list
-  useEffect(() => {
-    if (!ready) return
-    for (const sid of ifcOn) { if (!works.current.has(sid)) loadWork.current(sid); else loadIfc.current(sid) }
-    for (const w of works.current.values()) if (w.ifc && !ifcOn.includes(w.sid)) w.ifc.visible = false
-    mapRef.current?.triggerRepaint()
-  }, [ready, ifcOn])
 
   // a place found by the search: the camera goes there (a region: its whole extent)
   const goTo = (p: Place) => {

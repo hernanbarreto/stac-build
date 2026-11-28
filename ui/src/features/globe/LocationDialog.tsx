@@ -148,6 +148,10 @@ export function LocationDialog({ sessionId, token, onClose, onSaved }: LocationD
         })
         mapRef.current = map
         map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }), 'top-right')
+        // the map follows its box (a side panel closing or opening left a black strip where it had not drawn)
+        const fit = new ResizeObserver(() => map.resize())
+        fit.observe(host.current)
+        map.on('remove', () => fit.disconnect())
         map.on('style.load', () => {
           if (gone) return
           map.addSource('stac-dem', { type: 'raster-dem', url: 'mapbox://mapbox.mapbox-terrain-dem-v1', tileSize: 512, maxzoom: 14 })

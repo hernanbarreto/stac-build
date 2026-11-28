@@ -251,11 +251,8 @@ def geo_content(session_id: str, scan: Optional[str] = None):
         mesh = f"/api/segmentation/tsdf/tiles/{sid}/{quote(folder, safe='')}/tileset.json?stac_scan={stac_scan}"
     cloud = (f"/api/geo/{sid}/cloud/tileset.json?scan={quote(key, safe='')}"
              if (out / "cleaned_cloud.ply").is_file() else None)
-    # the project's IFC models, as the BIM panel loads them (the page turns one into glTF for the globe on demand)
-    ifcs = [{"name": n, "url": f"/api/sessions/{sid}/bim/{quote(n, safe='')}"}
-            for n in _project_row(_project_dir(session_id))["ifcs"]]
     return {"ok": True, "scan": key, "georef": G.load(_project_dir(session_id)), "floor": G.floor_adjustment(out),
-            "mesh_tileset": mesh, "mesh_folder": folder, "cloud_tileset": cloud, "ifcs": ifcs}
+            "mesh_tileset": mesh, "mesh_folder": folder, "cloud_tileset": cloud}
 
 
 _CLOUDS: Dict[tuple, Dict[str, Any]] = {}

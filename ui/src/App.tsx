@@ -1610,7 +1610,6 @@ function App() {
   const [geoError, setGeoError] = useState<string | null>(null)
   const [locating, setLocating] = useState<string | null>(null)       // the work whose Location window is open
   const [globeFocus, setGlobeFocus] = useState<{ sid: string; n: number } | null>(null)
-  const [globeIfc, setGlobeIfc] = useState<string[]>([])               // the works whose IFC stands on the globe
   // THE GLOBE STAYS while its section is the current one, its list (the left panel) shown or hidden over it (USER
   // 2026-11-25: "si vuelvo a presionar el icono del globo cuando esta el globo puesto no debe sacar el globo, debe
   // ocultar el panel como en el resto de las barras laterales, sino en celulares no se puede ver"): the globe's icon
@@ -3719,8 +3718,7 @@ function App() {
             {globeListOpen && (
               <GlobePanel projects={geoProjects} loading={geoLoading} error={geoError} placing={locating} canEdit={!!token}
                 onShow={showFromGlobeList} onRefresh={() => void refreshGeo()}
-                onPlace={setLocating} onRemove={sid => void removePlace(sid)} ifcOn={globeIfc}
-                onToggleIfc={sid => { setGlobeIfc(l => (l.includes(sid) ? l.filter(x => x !== sid) : [...l, sid])); showFromGlobeList(sid) }} />
+                onPlace={setLocating} onRemove={sid => void removePlace(sid)} />
             )}
             {layout.state.leftTab === 'tickets' && (
               <TicketsPanel sessionId={activeSession} scanKey={activeScanTab} tickets={tickets} counts={ticketCounts}
@@ -3802,7 +3800,7 @@ function App() {
             // THE GLOBE over the viewer while its section is the current one, its list shown or hidden; the viewer
             // underneath keeps its state
             <Suspense fallback={<div className="stac-globe-fallback">{t('globe.loading')}</div>}>
-              <MapView projects={geoProjects} focus={globeFocus} ifcOn={globeIfc} />
+              <MapView projects={geoProjects} focus={globeFocus} />
             </Suspense>
           )}
           {locating && (
