@@ -81,7 +81,7 @@ main() {
     rc=$?
     if [ "$rc" -ne 0 ]; then say "⚠ init_pod.sh ended with code $rc — see $log"; fi
     # the way in (scripts/pod_access.sh), here too: this log can be read when SSH is what failed
-    grep -E '^(ssh|jupyter):' "$log" 2> /dev/null | while IFS= read -r line; do say "$line"; done
+    grep -E '^(ssh|jupyter|packages|remote):' "$log" 2> /dev/null | while IFS= read -r line; do say "$line"; done
     if command -v tmux > /dev/null 2>&1; then
         say "tmux sessions: $(tmux list-sessions -F '#{session_name}' 2> /dev/null | tr '\n' ' ')"
     else

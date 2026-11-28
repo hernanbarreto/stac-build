@@ -86,18 +86,56 @@ gate_down() {
     fi
 }
 
+# This pod's tailscaled, or nothing (by its process name and its state directory: a pattern over whole command
+# lines also matches any shell that merely mentions it)
+daemon_pid() {
+    local p
+    for p in $(pgrep -x tailscaled); do
+        { tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null | grep -qF -- "--statedir=$TS_DIR/state" && { echo "$p"; return 0; }
+    done
+    return 1
+}
+
+daemon_start() {
+    echo "[remote] starting tailscaled (userspace networking)"
+    [ -f "$TS_DIR/tailscaled.log" ] && mv -f "$TS_DIR/tailscaled.log" "$TS_DIR/tailscaled.prev.log"   # the last one kept
+    # its own session: a caller's time limit or closed terminal must not take the daemon with it
+    setsid nohup "$TS_DIR/tailscaled" --tun=userspace-networking --statedir="$TS_DIR/state" \
+        --socket="$TS_DIR/tailscaled.sock" >"$TS_DIR/tailscaled.log" 2>&1 </dev/null &
+    sleep 5
+}
+
+# a daemon that hangs does not always end on its own: TERM, then KILL
+daemon_kill() {
+    local p i
+    p=$(daemon_pid) || return 0
+    kill "$p" 2>/dev/null || true
+    for ((i = 0; i < 20; i++)); do kill -0 "$p" 2>/dev/null || return 0; sleep 0.5; done
+    kill -9 "$p" 2>/dev/null || true
+    for ((i = 0; i < 10; i++)); do kill -0 "$p" 2>/dev/null || return 0; sleep 0.5; done
+}
+
 daemon_up() {
+    local rc=0
     [ -x "$TS_DIR/tailscaled" ] || { echo "[remote] $TS_DIR/tailscaled is missing (scripts/rebuild restores it)" >&2; exit 1; }
     mkdir -p "$TS_DIR/state"
-    if ! pgrep -f "tailscaled.*$TS_DIR/state" >/dev/null; then
-        echo "[remote] starting tailscaled (userspace networking)"
-        # its own session: a caller's time limit or closed terminal must not take the daemon with it
-        setsid nohup "$TS_DIR/tailscaled" --tun=userspace-networking --statedir="$TS_DIR/state" \
-            --socket="$TS_DIR/tailscaled.sock" >"$TS_DIR/tailscaled.log" 2>&1 </dev/null &
-        sleep 5
+    daemon_pid >/dev/null || daemon_start
+    # a daemon that does not answer on its own socket (the time limit, 124) is restarted — never taken for one that
+    # waits for the pod to be authorised
+    timeout 20 $TS status >/dev/null 2>&1 || rc=$?
+    if [ "$rc" = 124 ]; then
+        echo "[remote] tailscaled does not answer on its socket — restarting it"
+        daemon_kill
+        daemon_start
+        rc=0
+        timeout 20 $TS status >/dev/null 2>&1 || rc=$?
+        if [ "$rc" = 124 ]; then
+            echo "remote: ERROR — tailscaled does not answer on its socket, even after a restart ($TS_DIR/tailscaled.log)"
+            exit 1
+        fi
     fi
     # `tailscale up` WAITS when the pod must be authorised again (it prints a link): never silently
-    if ! timeout 20 $TS status >/dev/null 2>&1 || ! timeout 30 $TS up --hostname=stac-pod >"$TMPD/up.out" 2>&1; then
+    if [ "$rc" != 0 ] || ! timeout 30 $TS up --hostname=stac-pod >"$TMPD/up.out" 2>&1; then
         cat "$TMPD/up.out" 2>/dev/null
         echo "[remote] THE POD MUST BE AUTHORISED ONCE: open the link above in a browser signed in to the Tailscale"
         echo "         account (or run: $TS up --hostname=stac-pod), then run this script again."
@@ -106,6 +144,36 @@ daemon_up() {
 }
 
 name() { $TS status --json 2>/dev/null | grep -o '"DNSName": *"[^"]*"' | head -1 | cut -d'"' -f4 | sed 's/\.$//'; }
+
+# THE ADDRESS ANSWERING, SEEN FROM OUTSIDE (USER 2026-11-28: "arranca el pod y las conexiones tailscale quedan
+# colgadas y no arrancan" / "si"). Started in the pod's first seconds, tailscaled took no connection at all — the
+# gate answered on the pod, the Funnel relay took the TCP connection, the TLS handshake never came back — while the
+# same start, in the start's own environment, made with the pod already up answered 6 times of 6 (why the first
+# seconds: not known). So the start asks the public address itself, without the cookie — the gate's 403 means TLS,
+# the funnel and the gate all answered — and restarts tailscaled until it does: 45 s a try, 4 restarts at most.
+# One line: "remote: up …" or "remote: ERROR …".
+verify_public() {
+    local host try t0 code=""
+    for ((try = 1; try <= 5; try++)); do
+        host=$(name)
+        t0=$SECONDS
+        while ((SECONDS - t0 < 45)); do
+            code=$(curl -4 -s -m 8 -o /dev/null -w '%{http_code}' "https://$host/" 2>/dev/null || true)
+            if [ "$code" = 403 ]; then
+                if [ "$try" = 1 ]; then echo "remote: up — https://$host/ answers from outside"
+                else echo "remote: up — https://$host/ answers from outside after $((try - 1)) restart(s) of tailscaled"; fi
+                return 0
+            fi
+            sleep 3
+        done
+        [ "$try" = 5 ] && break
+        echo "[remote] https://$host/ does not answer from outside (last answer: ${code:-none}) — restarting tailscaled"
+        daemon_kill
+        daemon_up
+    done
+    echo "remote: ERROR — https://$host/ does not answer from outside, after 4 restarts of tailscaled (its log: $TS_DIR/tailscaled.log)"
+    return 1
+}
 
 case "${1:-start}" in
     start)
@@ -116,7 +184,8 @@ case "${1:-start}" in
         st=$(timeout 15 $TS funnel status 2>/dev/null || true)
         if echo "$st" | grep -q "(Funnel on)" && echo "$st" | grep -q "proxy http://127.0.0.1:$GATE_PORT"; then
             echo "[remote] the page: https://$(name)/   (already published; the secret link: bash scripts/remote_access.sh link)"
-            exit 0
+            verify_public
+            exit $?
         fi
         # inside the tailnet too the address answers through the gate (August's setup served the backend bare)
         timeout 20 $TS serve --bg "http://127.0.0.1:$GATE_PORT" >/dev/null 2>&1 || true
@@ -130,6 +199,7 @@ case "${1:-start}" in
         fi
         $TS serve --bg --https=8443 "http://127.0.0.1:$AR_PORT" >/dev/null 2>&1 || true
         echo "[remote] the page: https://$(name)/   (the secret link: bash scripts/remote_access.sh link)"
+        verify_public
         ;;
     gate)                                   # the gate alone (render + start or reload): nothing published
         gate_up
@@ -140,7 +210,7 @@ case "${1:-start}" in
         ;;
     status)
         if gate_pid >/dev/null; then echo "gate: up (127.0.0.1:$GATE_PORT)"; else echo "gate: DOWN"; fi
-        if pgrep -f "tailscaled.*$TS_DIR/state" >/dev/null; then echo "tailscaled: up — $(name)"; $TS funnel status 2>&1 | sed 's/^/   /'; else echo "tailscaled: DOWN"; fi
+        if daemon_pid >/dev/null; then echo "tailscaled: up — $(name)"; $TS funnel status 2>&1 | sed 's/^/   /'; else echo "tailscaled: DOWN"; fi
         ;;
     rotate)
         new_key

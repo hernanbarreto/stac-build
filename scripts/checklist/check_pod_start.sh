@@ -22,8 +22,8 @@ guard=$(git show HEAD:init_pod.sh | grep -n 'tmux has-session -t backend' | head
 check "init_pod.sh (committed) runs pod_access.sh first, before its one-start guard" \
     test -n "$call" -a -n "$guard" -a "${call:-0}" -lt "${guard:-0}"
 check "init_pod.sh (working copy) runs it the same way" grep -q '^bash /workspace/stac-build/scripts/pod_access.sh$' init_pod.sh
-check "pod_autostart.sh repeats the ssh: / jupyter: lines in the container's log" \
-    grep -q "grep -E '^(ssh|jupyter):'" scripts/pod_autostart.sh
+check "pod_autostart.sh repeats the ssh: / jupyter: / packages: / remote: lines in the container's log" \
+    grep -q "grep -E '^(ssh|jupyter|packages|remote):'" scripts/pod_autostart.sh
 
 check "1. $FILE holds the key '$KEY_TYPE … hernan'" \
     awk -v t="$KEY_TYPE" -v k="$KEY_BODY" '$1 == t && $2 == k {f = 1} END {exit !f}' "$FILE"

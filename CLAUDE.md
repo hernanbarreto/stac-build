@@ -454,8 +454,14 @@ pipeline final, dejamos terminar todas las sesiones, todas"*. DO NOT TOUCH IT WI
     runs on a D-Bus of its own (the system bus started once, dbus-run-session) — no "Failed to connect to the bus".
     THE PUBLIC ADDRESS DID NOT ANSWER that afternoon ("esta mierda no anda nunca"): the gate answered on the pod,
     the Funnel relay took the connection and the TLS handshake never came back; tailscaled, started 15:15 UTC, had
-    logged nothing since its first second. Restarting tailscaled alone (`remote_access.sh start` after it) brought
-    it back (302 / 200 / 403 from the internet side). Why it went deaf: NOT traced.
+    logged nothing since its first second (USER: "siempre hace lo mismo, arranca el pod y las conexiones tailscale
+    quedan colgadas"). Started the start's way with the pod already up it answers (6 of 6): it is the pod's first
+    seconds — what in them, NOT known. THE FIX (his "si"): remote_access.sh start asks the public address from
+    outside (the gate's 403 without the cookie) and restarts tailscaled until it answers — 45 s a try, 4 restarts;
+    a daemon that does not answer on its socket is restarted, never taken for "authorise the pod"; the previous
+    log kept as tailscaled.prev.log; one line "remote: up …" / "remote: ERROR …", repeated in RunPod's Logs tab.
+    Tested: tailscaled frozen whole → up after 1 restart (1 m 29 s); the address dead from outside for 60 s with
+    tailscaled answering on the pod → up after 2 restarts (2 m 4 s).
   · NOT STARTED BY IT: a pipeline job that was running when the pod stopped (the queue is dropped: re-sent by
     hand, replace OFF) and the assistant's own session (tmux `claude` is created ready; `claude` is typed).
 - API: `POST /api/pipeline/run {session_id, scans: [key], replace, segment: [key]}` (the Reconstruir button);
